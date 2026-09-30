@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="fr" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cliniva - Connexion Sécurisée</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['"Plus Jakarta Sans"', 'sans-serif'] },
+                    colors: {
+                        brand: { neon: '#8be140', neonDark: '#75c832', darkBg: '#070b08', cardDark: '#0f1712' }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .login-glow {
+            background: radial-gradient(circle at 50% 30%, #15381d 0%, #070b08 80%);
+        }
+        .glass-card {
+            background: rgba(15, 23, 18, 0.75);
+            backdrop-filter: blur(24px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+    </style>
+</head>
+<body class="login-glow h-screen w-screen overflow-hidden flex items-center justify-center p-4 font-sans text-slate-200 antialiased">
+
+    <div class="glass-card w-full max-w-md p-8 sm:p-10 rounded-[2.5rem] shadow-2xl relative overflow-hidden border border-white/10">
+        <!-- Lueur de fond verte -->
+        <div class="absolute -top-24 -left-24 w-48 h-48 bg-brand-neon/20 rounded-full blur-3xl pointer-events-none"></div>
+
+        <!-- Logo & Titre -->
+        <div class="text-center mb-8">
+            <svg class="w-[4.5rem] h-[4.5rem] mx-auto mb-4 drop-shadow-[0_8px_18px_rgba(139,225,64,0.24)]" viewBox="0 0 64 64" role="img" aria-label="Logo Cliniva">
+                <defs><linearGradient id="clinivaLoginMarkGradient" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse"><stop stop-color="#A8F05C"/><stop offset="1" stop-color="#69C92F"/></linearGradient></defs>
+                <rect x="3" y="3" width="58" height="58" rx="19" fill="url(#clinivaLoginMarkGradient)"/>
+                <path d="M32 12.5 48 19v12.4c0 10.1-6.8 17.1-16 21.1-9.2-4-16-11-16-21.1V19l16-6.5Z" fill="#102016"/>
+                <path d="M21 32h6l3.3-7 5.1 15 3.3-8H44" fill="none" stroke="#A8F05C" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="32" cy="32" r="23.5" fill="none" stroke="white" stroke-opacity=".22"/>
+            </svg>
+            <h1 class="text-3xl font-black text-white tracking-tight">Cliniva<span class="text-brand-neon">.</span></h1>
+            <p class="text-[10px] font-bold uppercase tracking-[.2em] text-brand-neon/80 mt-1">Medical management</p>
+            <p class="text-xs text-slate-400 mt-2">Plateforme de Gestion Médicale Sécurisée</p>
+        </div>
+
+        <!-- Formulaire de Connexion -->
+        <form id="loginForm" onsubmit="handleLoginSubmit(event)" class="space-y-4">
+            <div>
+                <label class="block text-xs font-bold text-slate-300 mb-1.5 flex items-center gap-1.5">
+                    <i class="ph-bold ph-user text-brand-neon"></i> Identifiant
+                </label>
+                <input type="text" id="loginInput" required placeholder="Ex: admin ou dr.nom" class="w-full text-xs p-3.5 rounded-2xl border border-white/10 bg-black/40 text-white placeholder-slate-500 outline-none focus:border-brand-neon focus:ring-2 focus:ring-brand-neon/20 transition">
+            </div>
+
+            <div>
+                <label class="block text-xs font-bold text-slate-300 mb-1.5 flex items-center gap-1.5">
+                    <i class="ph-bold ph-lock text-brand-neon"></i> Mot de passe
+                </label>
+                <div class="relative">
+                    <input type="password" id="passwordInput" required placeholder="••••••••" class="w-full text-xs p-3.5 rounded-2xl border border-white/10 bg-black/40 text-white placeholder-slate-500 outline-none focus:border-brand-neon focus:ring-2 focus:ring-brand-neon/20 transition pr-10">
+                    <button type="button" onclick="togglePasswordVisibility()" class="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-white">
+                        <i id="eyeIcon" class="ph-bold ph-eye text-base"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div id="loginErrorMsg" class="hidden p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium text-center"></div>
+
+            <button type="submit" id="submitBtn" class="w-full mt-2 py-3.5 rounded-2xl bg-brand-neon hover:bg-brand-neonDark text-black font-extrabold text-xs shadow-lg shadow-brand-neon/20 transition-all flex items-center justify-center gap-2 cursor-pointer">
+                <span>Se connecter</span>
+                <i class="ph-bold ph-arrow-right text-sm"></i>
+            </button>
+        </form>
+
+        <div class="mt-6 pt-5 border-t border-white/5 text-center">
+            <span class="text-[11px] text-slate-500">Compte par défaut : <strong class="text-slate-300 font-mono">admin</strong> / <strong class="text-slate-300 font-mono">admin123</strong></span>
+        </div>
+    </div>
+
+    <script>
+        function togglePasswordVisibility() {
+            const pwd = document.getElementById('passwordInput');
+            const icon = document.getElementById('eyeIcon');
+            if (pwd.type === 'password') {
+                pwd.type = 'text';
+                icon.className = 'ph-bold ph-eye-slash text-base';
+            } else {
+                pwd.type = 'password';
+                icon.className = 'ph-bold ph-eye text-base';
+            }
+        }
+
+        async function handleLoginSubmit(e) {
+            e.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            const errorBox = document.getElementById('loginErrorMsg');
+            errorBox.classList.add('hidden');
+
+            const login = document.getElementById('loginInput').value.trim();
+            const password = document.getElementById('passwordInput').value.trim();
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="ph-bold ph-spinner animate-spin text-base"></i> Connexion...';
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ login, password })
+                });
+
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    btn.innerHTML = '<i class="ph-bold ph-check text-base"></i> Accès Autorisé';
+                    window.location.href = '/';
+                } else {
+                    errorBox.innerText = data.detail || data.message || "Identifiants invalides.";
+                    errorBox.classList.remove('hidden');
+                    btn.disabled = false;
+                    btn.innerHTML = '<span>Se connecter</span> <i class="ph-bold ph-arrow-right text-sm"></i>';
+                }
+            } catch (err) {
+                errorBox.innerText = "Erreur réseau de communication avec le serveur.";
+                errorBox.classList.remove('hidden');
+                btn.disabled = false;
+                btn.innerHTML = '<span>Se connecter</span> <i class="ph-bold ph-arrow-right text-sm"></i>';
+            }
+        }
+    </script>
+</body>
+</html>

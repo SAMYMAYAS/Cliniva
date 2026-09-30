@@ -1,0 +1,31 @@
+# Secrets et configuration propre à chaque poste
+config.json
+client/config.json
+.env
+.env.*
+!.env.example
+
+# Données cliniques, documents et fichiers générés par l'application
+uploads/
+*.bak
+*.backup
+*.dump
+*.sql.gz
+
+# Python et environnements locaux
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# IDE et fichiers temporaires
+.idea/
+.vscode/
+*.log
+*.tmp
+*.swp
+
+# Artefacts de compilation
+build/
+dist/

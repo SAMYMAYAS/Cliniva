@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="fr" class="transition-colors duration-300">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cliniva - Clinic Management Dashboard</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Phosphor Icons CDN -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+                    },
+                    colors: {
+                        brand: {
+                            neon: '#8be140',
+                            neonDark: '#75c832',
+                            darkBg: '#0b160f',
+                            cardDark: '#121c15',
+                            cardBorder: 'rgba(255, 255, 255, 0.08)',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .custom-glass {
+            background: rgba(18, 28, 21, 0.7);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .sidebar-glow {
+            background: radial-gradient(circle at 50% 20%, #17381f 0%, #0a130c 80%);
+        }
+        .banner-glow {
+            background: radial-gradient(circle at 60% 50%, #153e20 0%, #0e1711 75%);
+        }
+        /* Style fin de scrollbar pour ne pas encombrer l'écran */
+        ::-webkit-scrollbar {
+            width: 5px;
+            height: 5px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(139, 225, 64, 0.2);
+            border-radius: 9999px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(139, 225, 64, 0.5);
+        }
+    </style>
+</head>
+<!-- BODY STRICTEMENT BLOQUÉ EN HAUTEUR (h-screen et overflow-hidden) -->
+<body class="bg-[#f0f3f1] dark:bg-[#070b08] font-sans antialiased text-slate-800 dark:text-slate-200 h-screen max-h-screen overflow-hidden flex p-2 sm:p-3 lg:p-4 transition-colors duration-300">
+
+    <!-- WRAPPER GLOBAL FLOTTANT ARRONDIE FIXÉ À LA HAUTEUR DE L'ÉCRAN -->
+    <div class="w-full h-full max-h-full bg-[#f4f6f8] dark:bg-[#0c130e] rounded-[2.5rem] shadow-2xl flex overflow-hidden border border-black/5 dark:border-white/5 transition-colors duration-300">
+
+        <!-- OVERLAY MOBILE -->
+        <div id="sidebar-overlay" onclick="toggleSidebar()" class="fixed inset-0 bg-black/50 z-40 lg:hidden hidden"></div>
+
+        <!-- ==================== SIDEBAR GAUCHE (100% FIXE) ==================== -->
+        <aside id="sidebar" class="sidebar-glow w-64 lg:w-72 h-full flex-shrink-0 flex flex-col justify-between p-5 text-slate-300 rounded-[2.5rem] lg:m-2 transition-transform duration-300 z-50 fixed lg:static inset-y-0 left-0 -translate-x-full lg:translate-x-0 shadow-xl overflow-hidden">
+
+            <!-- PARTIE HAUTE (Logo + Menus) : DÉFILE SI PETIT ÉCRAN SANS POUSSER LE BAS -->
+            <div class="flex-1 overflow-y-auto pr-1">
+                <!-- Logo Cliniva -->
+                <div class="flex items-center gap-3 px-2 py-2 cursor-pointer group" onclick="loadModule('operations')" aria-label="Cliniva — accueil">
+                    <svg class="w-12 h-12 flex-shrink-0 drop-shadow-[0_6px_12px_rgba(139,225,64,0.18)] transition-transform duration-300 group-hover:scale-105" viewBox="0 0 64 64" role="img" aria-label="Logo Cliniva">
+                        <defs><linearGradient id="clinivaMarkGradient" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse"><stop stop-color="#A8F05C"/><stop offset="1" stop-color="#69C92F"/></linearGradient></defs>
+                        <rect x="3" y="3" width="58" height="58" rx="19" fill="url(#clinivaMarkGradient)"/>
+                        <path d="M32 12.5 48 19v12.4c0 10.1-6.8 17.1-16 21.1-9.2-4-16-11-16-21.1V19l16-6.5Z" fill="#102016"/>
+                        <path d="M21 32h6l3.3-7 5.1 15 3.3-8H44" fill="none" stroke="#A8F05C" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <circle cx="32" cy="32" r="23.5" fill="none" stroke="white" stroke-opacity=".22"/>
+                    </svg>
+                    <div class="min-w-0">
+                        <span class="block text-[25px] leading-none font-black tracking-tight text-white">Cliniva<span class="text-brand-neon">.</span></span>
+                        <span class="block mt-1.5 text-[9px] font-bold uppercase tracking-[.2em] text-slate-400">Medical management</span>
+                    </div>
+                </div>
+
+                <!-- Navigation Principale -->
+                <div class="mt-6 space-y-5">
+                    <div>
+                        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider px-3 mb-2">Navigation</p>
+                        <nav class="space-y-1">
+<!-- Dashboard -->
+    <button onclick="loadModule('operations')" data-module="operations" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 bg-brand-neon text-black font-semibold rounded-2xl transition shadow-md shadow-brand-neon/30 text-left">
+        <i class="ph-bold ph-squares-four text-xl"></i>
+        <span>Dashboard</span>
+    </button>
+
+    <!-- Passages -->
+    <button onclick="loadModule('gestion_passages')" data-module="gestion_passages" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph ph-door-open text-xl"></i>
+        <span>Accueil & Passages</span>
+    </button>
+
+    {% if user.role == 'Administrateur' or user.permissions.rdv_view %}
+    <button onclick="loadModule('gestion_rendezvous')" data-module="gestion_rendezvous" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph ph-calendar text-xl"></i>
+        <span>Rendez-vous</span>
+    </button>
+    {% endif %}
+
+<button onclick="loadModule('gestion_dme')" data-module="gestion_dme" class="sidebar-nav-btn w-full text-left flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150">
+    <i class="ph ph-stethoscope text-xl text-brand-neon"></i>
+    <span>Dossier Médical (DME)</span>
+</button>
+
+                            {% if user.permissions.cash_collect or user.permissions.cash_collect_rest or user.permissions.cash_refund or user.permissions.cash_remise or user.permissions.cash_reports %}
+                            <button onclick="loadModule('gestion_caisse')" data-module="gestion_caisse"
+                                    class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+                                <i class="ph ph-hand-coins text-xl text-brand-neon"></i>
+                                <span>Caisse & Facturation</span>
+                            </button>
+                            {% endif %}
+
+
+    <!-- Patients -->
+    <button onclick="loadModule('gestion_patients')" data-module="gestion_patients" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph ph-user text-xl"></i>
+        <span>Patients</span>
+    </button>
+
+    <!-- Médecins Traitants -->
+    <button onclick="loadModule('gestion_medecins_traitants')" data-module="gestion_medecins_traitants" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph ph-stethoscope text-xl"></i>
+        <span>Médecins Traitants</span>
+    </button>
+
+    <!-- Médicaments -->
+    <button onclick="loadModule('gestion_medicaments')" data-module="gestion_medicaments" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph ph-pill text-xl"></i>
+        <span>Médicaments</span>
+    </button>
+
+    <button onclick="loadModule('gestion_modeles_cr')" data-module="gestion_modeles_cr" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph ph-file-text  text-xl"></i>
+        <span>Modèles Comptes Rendus</span>
+    </button>
+
+
+
+
+
+
+                        </nav>
+                    </div>
+
+                    <!-- Paramètres secondaires -->
+
+                </div>
+            </div>
+
+            <!-- ============================================================= -->
+            <!-- PARTIE BASSE (SETTINGS + HELP + PROFIL) : STRICTEMENT ANCRÉE -->
+            <!-- ============================================================= -->
+            <div class="flex-shrink-0 space-y-3 pt-3 border-t border-white/10 mt-2">
+                <nav class="space-y-1">
+
+                    <!-- BOUTON SETTINGS AVEC ACCORDÉON -->
+                    <div>
+                        <button onclick="toggleSettingsMenu()" class="w-full flex items-center justify-between px-3.5 py-2 text-slate-400 hover:text-white text-sm transition rounded-xl hover:bg-white/5 group">
+                            <div class="flex items-center gap-3">
+                                <i class="ph ph-gear text-lg group-hover:text-brand-neon transition"></i>
+                                <span class="font-medium">Settings</span>
+                            </div>
+                            <i id="settings-chevron" class="ph ph-caret-down text-xs transition-transform duration-200"></i>
+                        </button>
+
+                        <!-- SOUS-MENU DÉROULANT (AVEC SCROLL INTERNE SI BESOIN) -->
+                        <div id="settings-submenu" class="hidden mt-1 pl-3 pr-1 py-1 space-y-0.5 border-l-2 border-brand-neon/30 ml-5 max-h-40 overflow-y-auto">
+                            <button onclick="loadModule('clinique_param')" class="w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                                <i class="ph ph-buildings text-sm text-brand-neon flex-shrink-0"></i>
+                                <span class="truncate">Paramétrage Clinique</span>
+                            </button>
+<button onclick="loadModule('gestion_utilisateur')" class="w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+    <i class="ph ph-user-gear text-sm text-brand-neon flex-shrink-0"></i>
+    <span class="truncate">Gestion Utilisateur</span>
+</button>
+                            <button onclick="loadModule('gestion_staff')" class="w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                                <i class="ph ph-identification-badge text-sm text-brand-neon flex-shrink-0"></i>
+                                <span class="truncate">Gestion Du Staff</span>
+                            </button>
+							<button onclick="loadModule('gestion_medicaments')" class="w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                            <i class="ph ph-pill text-sm text-brand-neon flex-shrink-0"></i>
+                            <span class="truncate">Base Médicaments & DCI</span>
+                            </button>
+                            <button onclick="loadModule('gestion_specialites')" class="w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                                <i class="ph ph-certificate text-sm text-brand-neon flex-shrink-0"></i>
+                                <span class="truncate">Gestion Des Spécialités</span>
+                            </button>
+                            <button onclick="loadModule('gestion_salles_soin')" class="w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                                <i class="ph ph-door text-sm text-brand-neon flex-shrink-0"></i>
+                                <span class="truncate">Gestion Salles De Soin</span>
+                            </button>
+                            <button onclick="loadModule('gestion_actes_medicaux')" class="w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                                <i class="ph ph-first-aid text-sm text-brand-neon flex-shrink-0"></i>
+                                <span class="truncate">Gestion Actes Médicaux</span>
+                            </button>
+<button onclick="loadModule('gestion_audit')" class="w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+    <i class="ph-bold ph-shield-check text-sm text-brand-neon flex-shrink-0"></i>
+    <span class="truncate">Journal d'Audit & Traçabilité</span>
+</button>
+                        </div>
+                    </div>
+
+                    <!-- Help Centre -->
+                    <a href="#" class="flex items-center gap-3 px-3.5 py-2 text-slate-400 hover:text-white text-sm transition">
+                        <i class="ph ph-question text-lg"></i>
+                        <span>Help Centre</span>
+                    </a>
+                </nav>
+
+                <!-- Carte Profil Manager -->
+                <!-- Carte Profil Utilisateur Connecté Dynamique -->
+                <div class="flex items-center justify-between p-2 rounded-2xl bg-black/40 border border-white/5">
+                    <div class="flex items-center gap-2.5">
+                        <img class="w-9 h-9 rounded-xl object-cover ring-2 ring-brand-neon/40"
+                             src="{{ user.avatar}}"
+                             alt="{{ user.prenom }}">
+                        <div>
+                            <p class="text-xs font-semibold text-white leading-tight">{{ user.prenom }} {{ user.nom
+                                }}</p>
+                            <p class="text-[10px] text-slate-400">{{ user.role }}</p>
+                        </div>
+                    </div>
+                    <a href="/api/auth/logout" class="p-1.5 text-slate-400 hover:text-rose-400 transition"
+                       title="Se déconnecter">
+                        <i class="ph-bold ph-sign-out text-base"></i>
+                    </a>
+                </div>
+            </div>
+        </aside>
+
+        <!-- ==================== CONTENU PRINCIPAL (SEUL À DÉFILER) ==================== -->
+        <!-- h-full et overflow-y-auto garantissent que seul le panneau de droite défile -->
+        <main class="flex-1 h-full flex flex-col min-w-0 overflow-y-auto px-4 sm:px-6 lg:px-8 py-6">
+
+            <!-- TOP BAR -->
+            <header class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6 flex-shrink-0">
+                <div class="flex items-center gap-3 w-full md:w-auto">
+                    <button onclick="toggleSidebar()" class="lg:hidden p-2.5 rounded-2xl bg-white dark:bg-[#131d16] border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 shadow-sm">
+                        <i class="ph-bold ph-list text-xl"></i>
+                    </button>
+
+                    <div class="relative flex-1 md:w-96">
+                        <span class="absolute inset-y-0 left-0 flex items-center pl-3.5 pointer-events-none text-slate-400 text-lg">
+                            <i class="ph ph-magnifying-glass"></i>
+                        </span>
+                        <input type="text" placeholder="Search...." class="w-full pl-10 pr-24 py-2.5 bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 rounded-full text-sm text-slate-700 dark:text-slate-200 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-neon/50 shadow-sm">
+                        <div class="absolute inset-y-0 right-1.5 flex items-center">
+                            <span class="text-[11px] font-semibold bg-brand-neon/20 text-emerald-800 dark:text-brand-neon px-2 py-1 rounded-full flex items-center gap-1 border border-brand-neon/30">
+                                <i class="ph-bold ph-command text-xs"></i> + Space
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-end gap-3.5">
+                    <div class="flex items-center p-1 bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 rounded-full shadow-sm">
+                        <button id="theme-moon-btn" onclick="setTheme('dark')" class="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-white transition">
+                            <i class="ph-bold ph-moon text-base"></i>
+                        </button>
+                        <button id="theme-sun-btn" onclick="setTheme('light')" class="w-8 h-8 rounded-full flex items-center justify-center bg-brand-neon text-black shadow-sm transition">
+                            <i class="ph-bold ph-sun text-base"></i>
+                        </button>
+                    </div>
+
+                    <button class="w-10 h-10 rounded-full bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 flex items-center justify-center text-slate-600 dark:text-slate-300 shadow-sm relative">
+                        <i class="ph ph-bell text-xl"></i>
+                        <span class="absolute top-2.5 right-2.5 w-2 h-2 bg-red-500 rounded-full"></span>
+                    </button>
+
+                    <div class="flex items-center gap-3 pl-2">
+                        <img class="w-10 h-10 rounded-full object-cover ring-2 ring-brand-neon/30" src="{{ user.avatar }}" alt="{{ user.prenom }} {{ user.nom }}">
+                        <div class="hidden sm:block text-left">
+                            <p class="text-sm font-bold text-slate-800 dark:text-white leading-tight">{{ user.prenom }} {{ user.nom }}</p>
+                            <p class="text-[11px] text-slate-400">{{ user.role }}</p>
+                        </div>
+                        <a href="/api/auth/logout" class="p-1.5 text-slate-400 hover:text-rose-400 transition"
+                           title="Se déconnecter">
+                            <i class="ph-bold ph-sign-out text-base"></i>
+                        </a>
+                    </div>
+
+                </div>
+            </header>
+
+
+            <div id="dynamic-content-area" class="flex-1 flex flex-col transition-all duration-300 pb-6">
+
+                <!-- VUE PAR DÉFAUT : OPERATIONS -->
+                <section class="bg-white dark:bg-[#121c15] rounded-3xl p-6 border border-slate-100 dark:border-white/5 shadow-sm flex-1 transition-colors duration-300">
+                    <div class="flex items-center justify-between mb-5">
+                        <h3 class="text-lg font-bold text-slate-900 dark:text-white">Operations</h3>
+                        <a href="#" class="text-xs font-semibold text-emerald-600 dark:text-brand-neon hover:underline">View All</a>
+                    </div>
+
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-xs border-collapse">
+                            <thead>
+                                <tr class="text-slate-400 dark:text-slate-500 font-semibold border-b border-slate-100 dark:border-white/5">
+                                    <th class="pb-3 pl-2">Patient Name</th>
+                                    <th class="pb-3">Date Of Operation</th>
+                                    <th class="pb-3">Duration</th>
+                                    <th class="pb-3">Follow-Up Date</th>
+                                    <th class="pb-3 pr-2 text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-50 dark:divide-white/5">
+                                {% for op in data.operation_records %}
+                                <tr class="hover:bg-slate-50/70 dark:hover:bg-white/[0.02] transition">
+                                    <td class="py-3.5 pl-2">
+                                        <div class="flex items-center gap-3">
+                                            <img class="w-9 h-9 rounded-full object-cover ring-1 ring-black/5 dark:ring-white/10" src="{{ op.avatar_url }}" alt="{{ op.patient_name }}">
+                                            <span class="font-bold text-slate-800 dark:text-slate-200 text-sm">{{ op.patient_name }}</span>
+                                        </div>
+                                    </td>
+                                    <td class="py-3.5 font-medium text-slate-700 dark:text-slate-300">{{ op.date_of_operation }}</td>
+                                    <td class="py-3.5 font-medium text-slate-700 dark:text-slate-300">{{ op.duration }}</td>
+                                    <td class="py-3.5 font-medium text-slate-700 dark:text-slate-300">{{ op.follow_up_date }}</td>
+                                    <td class="py-3.5 pr-2 text-right">
+                                        <div class="inline-flex items-center gap-2">
+                                            <button class="p-1.5 text-sky-500 hover:bg-sky-50 dark:hover:bg-sky-500/10 rounded-lg transition"><i class="ph ph-note-pencil text-base"></i></button>
+                                            <button class="p-1.5 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-500/10 rounded-lg transition"><i class="ph ph-trash text-base"></i></button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+            </div>
+
+        </main>
+    </div>
+
+    <!-- MOTEUR DE CHARGEMENT DYNAMIQUE -->
+<script>
+        // =====================================================================
+        // 1. GESTION DU THÈME SOMBRE / CLAIR
+        // =====================================================================
+        window.setTheme = function(theme) {
+            const htmlElement = document.documentElement;
+            const moonBtn = document.getElementById('theme-moon-btn');
+            const sunBtn = document.getElementById('theme-sun-btn');
+
+            if (theme === 'dark') {
+                htmlElement.classList.add('dark');
+                localStorage.setItem('cliniva_theme', 'dark');
+                if (moonBtn) moonBtn.className = "w-8 h-8 rounded-full flex items-center justify-center bg-brand-neon text-black shadow-sm transition";
+                if (sunBtn) sunBtn.className = "w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-white transition";
+            } else {
+                htmlElement.classList.remove('dark');
+                localStorage.setItem('cliniva_theme', 'light');
+                if (sunBtn) sunBtn.className = "w-8 h-8 rounded-full flex items-center justify-center bg-brand-neon text-black shadow-sm transition";
+                if (moonBtn) moonBtn.className = "w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-black transition";
+            }
+        };
+
+        // Initialisation immédiate du thème
+        const savedTheme = localStorage.getItem('cliniva_theme') || 'light';
+        window.setTheme(savedTheme);
+
+
+        // =====================================================================
+        // 2. OUVERTURE / FERMETURE SIDEBAR & SOUS-MENUS
+        // =====================================================================
+        window.toggleSidebar = function() {
+            const sidebar = document.getElementById('sidebar');
+            const overlay = document.getElementById('sidebar-overlay');
+            if (sidebar) sidebar.classList.toggle('-translate-x-full');
+            if (overlay) overlay.classList.toggle('hidden');
+        };
+
+        window.toggleSettingsMenu = function() {
+            const submenu = document.getElementById('settings-submenu');
+            const chevron = document.getElementById('settings-chevron');
+            if (submenu) submenu.classList.toggle('hidden');
+            if (chevron) chevron.classList.toggle('rotate-180');
+        };
+
+
+        // =====================================================================
+        // 3. CHARGEMENT DYNAMIQUE DES MODULES (SPA) & ÉTAT ACTIF SIDEBAR
+        // =====================================================================
+        window.loadModule = async function(moduleName) {
+            console.log("[Cliniva] Chargement du module :", moduleName);
+
+            // 1. Mise à jour de l'état actif des boutons
+            try {
+                // Gestion du bouton Dashboard
+                const dashBtn = document.querySelector('[data-module="operations"]');
+                if (dashBtn) {
+                    if (moduleName === 'operations') {
+                        dashBtn.className = "sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 bg-brand-neon text-black font-semibold rounded-2xl transition shadow-md shadow-brand-neon/30 text-left";
+                    } else {
+                        dashBtn.className = "sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left";
+                    }
+                }
+
+                // Gestion de tous les autres boutons (principaux et sous-menus)
+                document.querySelectorAll('.sidebar-nav-btn, .sidebar-sub-btn').forEach(btn => {
+                    const mod = btn.getAttribute('data-module');
+                    if (!mod || mod === 'operations') return;
+
+                    const isSub = btn.classList.contains('sidebar-sub-btn');
+                    if (mod === moduleName) {
+                        btn.className = isSub
+                            ? "sidebar-sub-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] bg-brand-neon/20 text-brand-neon font-bold rounded-lg transition"
+                            : "sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 bg-brand-neon text-black font-semibold rounded-2xl transition shadow-md shadow-brand-neon/30 text-left";
+                    } else {
+                        btn.className = isSub
+                            ? "sidebar-sub-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition"
+                            : "sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left";
+                    }
+                });
+            } catch (errMenu) {
+                console.warn("Mise à jour visuelle du menu ignorée :", errMenu);
+            }
+
+            // 2. Ciblage de la zone d'affichage centrale
+            let container = document.getElementById('dynamic-content-area');
+            if (!container) {
+                container = document.querySelector('main');
+            }
+
+            if (!container) {
+                console.error("Zone d'affichage introuvable.");
+                return;
+            }
+
+            // 3. Affichage du spinner de chargement
+            container.innerHTML = `
+                <div class="flex flex-col items-center justify-center py-24 bg-white dark:bg-[#121c15] rounded-3xl border border-slate-100 dark:border-white/5 shadow-sm">
+                    <i class="ph ph-spinner-gap animate-spin text-4xl text-brand-neon"></i>
+                    <p class="mt-3 text-xs text-slate-400">Chargement de ${moduleName}...</p>
+                </div>
+            `;
+
+            // 4. Appel réseau et injection du fragment HTML
+            try {
+                const response = await fetch(`/api/modules/${moduleName}`);
+                if (!response.ok) {
+                    let detailMsg = `Erreur HTTP ${response.status}`;
+                    try {
+                        const err = await response.json();
+                        detailMsg = err.detail || detailMsg;
+                    } catch (e) {
+                        detailMsg = await response.text();
+                    }
+                    throw new Error(detailMsg);
+                }
+
+                const htmlContent = await response.text();
+                container.innerHTML = htmlContent;
+
+                // Ré-exécution sécurisée de tous les scripts du module injecté
+                const scripts = container.querySelectorAll("script");
+                scripts.forEach(oldScript => {
+                    const newScript = document.createElement("script");
+                    Array.from(oldScript.attributes).forEach(attr => {
+                        newScript.setAttribute(attr.name, attr.value);
+                    });
+                    newScript.appendChild(document.createTextNode(oldScript.innerHTML));
+                    oldScript.parentNode.replaceChild(newScript, oldScript);
+                });
+                return true;
+
+            } catch (error) {
+                container.innerHTML = `
+                    <div class="bg-rose-500/10 border border-rose-500/20 text-rose-500 rounded-3xl p-8 text-center">
+                        <i class="ph ph-warning-circle text-4xl mb-2"></i>
+                        <h4 class="font-bold text-base">Impossible d'ouvrir le module ${moduleName}</h4>
+                        <p class="text-xs text-slate-400 mt-2 font-mono">${error.message}</p>
+                    </div>
+                `;
+                return false;
+            }
+        };
+
+
+        // =====================================================================
+        // 4. SYSTÈME MODERNE DE NOTIFICATIONS TOAST (REMPLACE ALERT)
+        // =====================================================================
+        window.showToast = function(message, type = 'auto', duration = 3500) {
+            let container = document.getElementById('toast-container');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'toast-container';
+                container.className = 'fixed top-6 right-6 z-[9999] flex flex-col gap-3 max-w-sm pointer-events-none';
+                document.body.appendChild(container);
+            }
+
+            if (type === 'auto') {
+                const msgLower = (message || '').toLowerCase();
+                if (msgLower.includes('erreur') || msgLower.includes('impossible') || msgLower.includes('échoué') || message.includes('❌')) {
+                    type = 'error';
+                } else if (msgLower.includes('succès') || msgLower.includes('enregistré') || msgLower.includes('ajouté') || msgLower.includes('validé') || message.includes('✅')) {
+                    type = 'success';
+                } else if (msgLower.includes('supprim') || msgLower.includes('attention')) {
+                    type = 'warning';
+                } else {
+                    type = 'info';
+                }
+            }
+
+            const styles = {
+                success: {
+                    border: 'border-brand-neon/40',
+                    bg: 'bg-white/95 dark:bg-[#121c15]/95',
+                    iconBg: 'bg-brand-neon/20 text-emerald-800 dark:text-brand-neon',
+                    icon: 'ph-bold ph-check-circle',
+                    badge: 'Succès'
+                },
+                error: {
+                    border: 'border-rose-500/40',
+                    bg: 'bg-white/95 dark:bg-[#1a1215]/95',
+                    iconBg: 'bg-rose-500/20 text-rose-500',
+                    icon: 'ph-bold ph-x-circle',
+                    badge: 'Erreur'
+                },
+                warning: {
+                    border: 'border-amber-500/40',
+                    bg: 'bg-white/95 dark:bg-[#1c1a12]/95',
+                    iconBg: 'bg-amber-500/20 text-amber-500',
+                    icon: 'ph-bold ph-warning-circle',
+                    badge: 'Attention'
+                },
+                info: {
+                    border: 'border-sky-500/40',
+                    bg: 'bg-white/95 dark:bg-[#12181c]/95',
+                    iconBg: 'bg-sky-500/20 text-sky-500',
+                    icon: 'ph-bold ph-info',
+                    badge: 'Information'
+                }
+            }[type] || styles.info;
+
+            const toast = document.createElement('div');
+            toast.className = `pointer-events-auto toast-animate p-3.5 rounded-2xl shadow-2xl backdrop-blur-md border ${styles.border} ${styles.bg} flex items-start gap-3 w-80 sm:w-96 text-xs transition-all duration-300`;
+            const cleanMsg = (message || '').replace(/^[✅❌⚠️ℹ️]\s*/, '');
+
+            toast.innerHTML = `
+                <div class="w-8 h-8 rounded-xl ${styles.iconBg} flex items-center justify-center text-lg flex-shrink-0 mt-0.5">
+                    <i class="${styles.icon}"></i>
+                </div>
+                <div class="flex-1 min-w-0 pr-1">
+                    <div class="flex items-center justify-between mb-0.5">
+                        <span class="font-bold text-[11px] uppercase tracking-wider text-slate-400">${styles.badge}</span>
+                        <span class="text-[10px] text-slate-400">${new Date().toLocaleTimeString('fr-FR', {hour: '2-digit', minute:'2-digit'})}</span>
+                    </div>
+                    <p class="font-semibold text-slate-800 dark:text-slate-100 leading-snug">${cleanMsg}</p>
+                </div>
+                <button type="button" onclick="this.parentElement.remove()" class="text-slate-400 hover:text-slate-600 dark:hover:text-white p-1 rounded-lg">
+                    <i class="ph-bold ph-x text-sm"></i>
+                </button>
+            `;
+
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(100%)';
+                setTimeout(() => toast.remove(), 300);
+            }, duration);
+        };
+
+        // Redirection universelle de alert() vers showToast()
+        window.alert = function(msg) {
+            window.showToast(msg, 'auto');
+        };
+
+
+        // =====================================================================
+        // 5. MODALE ASYNCHRONE DE CONFIRMATION (REMPLACE CONFIRM)
+        // =====================================================================
+        window.showConfirm = function(message, options = {}) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('custom-confirm-modal');
+                const card = document.getElementById('custom-confirm-card');
+                const titleEl = document.getElementById('confirm-title');
+                const msgEl = document.getElementById('confirm-message');
+                const okBtn = document.getElementById('confirm-ok-btn');
+                const cancelBtn = document.getElementById('confirm-cancel-btn');
+
+                if (!modal || !okBtn || !cancelBtn) {
+                    resolve(window.confirm(message));
+                    return;
+                }
+
+                if (titleEl) titleEl.innerText = options.title || "Confirmation requise";
+                if (msgEl) msgEl.innerText = message || "Voulez-vous vraiment continuer ?";
+                okBtn.innerText = options.okText || "Confirmer";
+                cancelBtn.innerText = options.cancelText || "Annuler";
+
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+                if (card) setTimeout(() => card.classList.replace('scale-95', 'scale-100'), 10);
+
+                const cleanup = (result) => {
+                    if (card) card.classList.replace('scale-100', 'scale-95');
+                    setTimeout(() => {
+                        modal.classList.add('hidden');
+                        modal.classList.remove('flex');
+                        resolve(result);
+                    }, 150);
+                };
+
+                okBtn.onclick = () => cleanup(true);
+                cancelBtn.onclick = () => cleanup(false);
+            });
+        };
+
+        // Ouvrir directement la salle d'attente après l'authentification.
+        window.loadModule('gestion_passages');
+    </script>
+</body>
+</html>
