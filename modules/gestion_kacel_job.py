@@ -512,7 +512,8 @@ class KacelJobManager:
         with get_db_cursor() as cursor:
             cursor.execute('''
                 INSERT INTO kacel_job_convention_categories (convention_id, nom, ordre)
-                SELECT %s, source.nom, ROW_NUMBER() OVER (ORDER BY MIN(source.ordre), source.nom)::int
+                SELECT %s, source.nom,
+                       ROW_NUMBER() OVER (ORDER BY source.ordre, source.nom)::int
                 FROM (
                     SELECT categorie AS nom, MIN(ordre) AS ordre
                     FROM kacel_job_convention_tariffs
