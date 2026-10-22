@@ -197,7 +197,7 @@ class KacelJobManager:
     def get_companies(self) -> List[Dict[str, Any]]:
         with get_db_cursor() as cursor:
             cursor.execute('\n                SELECT e.id, e.designation, e.adresse, e.email, e.telephone, e.contact,\n                       e.secteur_activite, e.observation, e.actif, e.representant, e.rc, e.nif, e.art, e.created_at,\n                       COUNT(c.id)::int AS nombre_conventions,\n                       (SELECT COUNT(*)::int FROM kacel_job_employees p WHERE p.entreprise_id=e.id) AS nombre_employes\n                FROM kacel_job_companies e\n                LEFT JOIN kacel_job_conventions c ON c.entreprise_id = e.id\n                GROUP BY e.id\n                ORDER BY LOWER(e.designation), e.id\n            ')
-        return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_company(self, company_id: int) -> Optional[Dict[str, Any]]:
         with get_db_cursor() as cursor:
@@ -238,7 +238,7 @@ class KacelJobManager:
                 params = ()
             query += ' ORDER BY c.created_at DESC, c.id DESC'
             cursor.execute(query, params)
-        return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_convention(self, convention_id: int) -> Optional[Dict[str, Any]]:
         with get_db_cursor() as cursor:
@@ -312,7 +312,7 @@ class KacelJobManager:
             if not int(cursor.fetchone()['total']):
                 cursor.executemany('\n                    INSERT INTO kacel_job_convention_tariffs\n                        (convention_id, code, categorie, designation, mode_tarif, configuration, description, ordre)\n                    VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s) ON CONFLICT (convention_id, code) DO NOTHING\n                ', [(convention_id, item['code'], item['categorie'], item['designation'], item['mode_tarif'], json.dumps(item['configuration'], ensure_ascii=False), item['description'], item['ordre']) for item in _default_tariffs()])
             cursor.execute('\n                SELECT id, convention_id, code, categorie, designation, mode_tarif, configuration,\n                       description, ordre, personnalisee\n                FROM kacel_job_convention_tariffs WHERE convention_id=%s ORDER BY ordre, id\n            ', (convention_id,))
-        return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
 
     def save_convention_tariffs(self, convention_id: int, rows: List[Dict[str, Any]]) -> int:
         if not self.get_convention(convention_id):
@@ -403,7 +403,7 @@ class KacelJobManager:
     def get_employees(self, company_id: int) -> List[Dict[str, Any]]:
         with get_db_cursor() as cursor:
             cursor.execute('\n                SELECT id, entreprise_id, nom, prenom, date_naissance, date_embauche, poste\n                FROM kacel_job_employees\n                WHERE entreprise_id=%s\n                ORDER BY LOWER(nom), LOWER(prenom), id\n            ', (company_id,))
-        return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
 
     def save_employee(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
