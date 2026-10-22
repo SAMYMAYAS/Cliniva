@@ -2135,7 +2135,7 @@ def render_html() -> str:
 
                     <div class="grid grid-cols-3 gap-3 pt-1">
                         <div class="bg-white dark:bg-black/30 p-2.5 rounded-2xl border border-slate-200/80 dark:border-white/10 flex items-center space-x-3">
-                            <img id="previewPhotoFace" src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80" class="w-12 h-12 rounded-xl object-cover border border-brand-neon shrink-0">
+                            <img id="previewPhotoFace" src="/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80" class="w-12 h-12 rounded-xl object-cover border border-brand-neon shrink-0">
                             <div class="truncate">
                                 <span class="text-xs font-bold text-slate-800 dark:text-white block truncate">1. Face</span>
                                 <span id="labelPhotoFace" class="text-[10px] text-slate-400">Photo principale</span>
@@ -2143,7 +2143,7 @@ def render_html() -> str:
                         </div>
 
                         <div class="bg-white dark:bg-black/30 p-2.5 rounded-2xl border border-slate-200/80 dark:border-white/10 flex items-center space-x-3">
-                            <img id="previewPhotoPDroit" src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80" class="w-12 h-12 rounded-xl object-cover border border-slate-200 dark:border-white/10 shrink-0 opacity-40">
+                            <img id="previewPhotoPDroit" src="/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80" class="w-12 h-12 rounded-xl object-cover border border-slate-200 dark:border-white/10 shrink-0 opacity-40">
                             <div class="truncate">
                                 <span class="text-xs font-bold text-slate-800 dark:text-white block truncate">2. Profil Droit</span>
                                 <span id="labelPhotoPDroit" class="text-[10px] text-slate-400 italic">Non capturé</span>
@@ -2151,7 +2151,7 @@ def render_html() -> str:
                         </div>
 
                         <div class="bg-white dark:bg-black/30 p-2.5 rounded-2xl border border-slate-200/80 dark:border-white/10 flex items-center space-x-3">
-                            <img id="previewPhotoPGauche" src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80" class="w-12 h-12 rounded-xl object-cover border border-slate-200 dark:border-white/10 shrink-0 opacity-40">
+                            <img id="previewPhotoPGauche" src="/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80" class="w-12 h-12 rounded-xl object-cover border border-slate-200 dark:border-white/10 shrink-0 opacity-40">
                             <div class="truncate">
                                 <span class="text-xs font-bold text-slate-800 dark:text-white block truncate">3. Profil Gauche</span>
                                 <span id="labelPhotoPGauche" class="text-[10px] text-slate-400 italic">Non capturé</span>
@@ -2204,7 +2204,7 @@ def render_html() -> str:
                     <div class="md:col-span-6 bg-slate-50 dark:bg-black/30 p-2.5 rounded-2xl border border-slate-200 dark:border-white/10 flex items-center justify-between">
                         <div class="flex items-center space-x-3">
                             <div class="w-10 h-10 rounded-xl bg-white dark:bg-black/40 border border-slate-200 dark:border-white/10 flex items-center justify-center shrink-0">
-                                <img id="previewEmpreinteImg" src="https://images.unsplash.com/photo-1544717305-2782549b5136?w=80&auto=format&fit=crop&q=80" class="w-8 h-8 object-contain opacity-30">
+                                <img id="previewEmpreinteImg" src="/static/images/fingerprint-placeholder.svg?w=80&auto=format&fit=crop&q=80" class="w-8 h-8 object-contain opacity-30">
                             </div>
                             <div>
                                 <span class="text-xs font-bold text-slate-800 dark:text-white block">Empreinte de l'Index</span>
@@ -2371,7 +2371,7 @@ def render_html() -> str:
 
                 <div class="bg-slate-50 dark:bg-black/30 p-4 rounded-2xl border border-slate-200 dark:border-white/10 flex flex-col items-center justify-center space-y-2.5">
                     <div class="w-24 h-28 rounded-2xl bg-white dark:bg-black/40 border-2 border-dashed border-brand-neon/40 flex items-center justify-center shadow-inner relative overflow-hidden">
-                        <img id="fingerprintModalLivePreview" src="https://images.unsplash.com/photo-1544717305-2782549b5136?w=120&auto=format&fit=crop&q=80" class="w-16 h-20 object-contain opacity-30">
+                        <img id="fingerprintModalLivePreview" src="/static/images/fingerprint-placeholder.svg?w=120&auto=format&fit=crop&q=80" class="w-16 h-20 object-contain opacity-30">
                         <div id="fingerprintScanWave" class="hidden absolute inset-x-0 top-0 h-1 bg-brand-neon shadow-lg shadow-brand-neon/50 animate-bounce"></div>
                     </div>
                     <span id="fingerprintPromptText" class="text-xs font-bold text-slate-700 dark:text-slate-300">Placez l'index sur le capteur</span>
@@ -2506,7 +2506,7 @@ def render_html() -> str:
                         tr.innerHTML = `
                             <td class="py-3.5 pl-2 text-slate-400 font-mono text-[11px]">#DOS-${{String(p.id).padStart(4, '0')}}</td>
                             <td class="py-3.5 flex items-center space-x-3">
-                                <img src="${{p.photo_face || p.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80'}}" class="w-9 h-9 rounded-full object-cover border border-slate-200 dark:border-white/10 shadow-sm">
+                                <img src="${{p.photo_face || p.avatar || '/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80'}}" class="w-9 h-9 rounded-full object-cover border border-slate-200 dark:border-white/10 shadow-sm">
                                 <div>
                                     <div class="font-bold text-slate-800 dark:text-slate-100 text-xs">${{p.nom}} ${{p.prenom}}</div>
                                     <div class="text-[10px] text-slate-400 font-medium">${{p.age}} (${{p.date_naissance}})</div>
@@ -2617,11 +2617,11 @@ def render_html() -> str:
                 document.getElementById('patientAgeDisplay').value = '';
                 scannedPiecesList = [];
 
-                const defaultAvatar = 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80';
+                const defaultAvatar = '/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80';
                 document.getElementById('previewPhotoFace').src = defaultAvatar;
                 document.getElementById('previewPhotoPDroit').src = defaultAvatar;
                 document.getElementById('previewPhotoPGauche').src = defaultAvatar;
-                document.getElementById('previewEmpreinteImg').src = 'https://images.unsplash.com/photo-1544717305-2782549b5136?w=80&auto=format&fit=crop&q=80';
+                document.getElementById('previewEmpreinteImg').src = '/static/images/fingerprint-placeholder.svg?w=80&auto=format&fit=crop&q=80';
 
                 document.getElementById('labelPhotoFace').innerText = "Photo principale";
                 document.getElementById('labelPhotoPDroit').innerText = "Non capturé";
@@ -2636,6 +2636,8 @@ def render_html() -> str:
 
             window.closePatientModal = function() {{
                 document.getElementById('patientModal').classList.add('hidden');
+                // Effacer le raccordement passage si la création a été annulée.
+                window.onPatientCreatedForPassage = null;
             }};
 
             window.editPatient = function(id) {{
@@ -2720,8 +2722,12 @@ def render_html() -> str:
                 }}).then(r => r.json());
 
                 if (res.success) {{
+                    const passageCreationCallback = !payload.id && window.onPatientCreatedForPassage;
                     closePatientModal();
-                    loadPatientsModule();
+                    await loadPatientsModule();
+                    if (typeof passageCreationCallback === 'function') {{
+                        await passageCreationCallback({{ ...payload, id: res.patient_id }});
+                    }}
                     alert(res.message);
                 }} else {{
                     alert(res.message);

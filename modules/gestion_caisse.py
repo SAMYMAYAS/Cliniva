@@ -1,21 +1,66 @@
 
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 import logging
 import math
+from pathlib import Path
+from io import BytesIO
 from html import escape as html_escape
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from database import get_db_cursor
 from app.auth import hash_password, track_action, get_current_user_optional
+from modules.prestation_categories import allocate_movement_categories, classify_prestation
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas
+from reportlab.graphics import renderPDF
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.barcode.qr import QrCodeWidget
 
 logger = logging.getLogger("CaisseModule")
 
 caisse_router = APIRouter(prefix="/api/finance", tags=["Caisse & Finances"])
+
+
+def _ensure_invoice_registry_schema() -> None:
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS caisse_factures (
+                id BIGSERIAL PRIMARY KEY,
+                numero_facture TEXT NOT NULL UNIQUE,
+                id_passage INTEGER NOT NULL UNIQUE
+                    REFERENCES patient_passages(id) ON DELETE RESTRICT,
+                date_generation TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                utilisateur TEXT NOT NULL DEFAULT '',
+                patient_nom TEXT NOT NULL DEFAULT '',
+                montant_ttc NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                pdf_data BYTEA NOT NULL,
+                statut TEXT NOT NULL DEFAULT 'VALIDEE',
+                date_annulation TIMESTAMPTZ,
+                utilisateur_annulation TEXT NOT NULL DEFAULT '',
+                motif_annulation TEXT NOT NULL DEFAULT '',
+                numero_avoir TEXT NOT NULL DEFAULT '',
+                avoir_pdf_data BYTEA
+            );
+            ALTER TABLE caisse_factures ADD COLUMN IF NOT EXISTS statut TEXT NOT NULL DEFAULT 'VALIDEE';
+            ALTER TABLE caisse_factures ADD COLUMN IF NOT EXISTS date_annulation TIMESTAMPTZ;
+            ALTER TABLE caisse_factures ADD COLUMN IF NOT EXISTS utilisateur_annulation TEXT NOT NULL DEFAULT '';
+            ALTER TABLE caisse_factures ADD COLUMN IF NOT EXISTS motif_annulation TEXT NOT NULL DEFAULT '';
+            ALTER TABLE caisse_factures ADD COLUMN IF NOT EXISTS numero_avoir TEXT NOT NULL DEFAULT '';
+            ALTER TABLE caisse_factures ADD COLUMN IF NOT EXISTS avoir_pdf_data BYTEA;
+            CREATE INDEX IF NOT EXISTS idx_caisse_factures_date
+                ON caisse_factures(date_generation DESC);
+            CREATE INDEX IF NOT EXISTS idx_caisse_factures_patient
+                ON caisse_factures(patient_nom);
+        """)
 
 ACCORDEURS_REMISE_LIST: List[str] = [
     "Direction Générale",
@@ -331,6 +376,38 @@ class CaisseManager:
             cursor.execute(query_mouvements, params_mouvements)
             rows_mouvements = [dict(r) for r in cursor.fetchall()]
 
+            # Reconstituer l'historique complet des passages concernés afin de
+            # répartir chaque paiement (et remboursement) sur les mêmes catégories.
+            passage_ids = sorted({r.get("id_passage") for r in rows_mouvements if r.get("id_passage") is not None})
+            category_allocations = {}
+            if passage_ids:
+                cursor.execute("""
+                    SELECT cm.id AS id_mouvement, cm.id_passage, cm.type_mouvement,
+                           cm.montant AS montant_mouvement,
+                           TO_CHAR(cm.date_mouvement, 'YYYY-MM-DD') AS date_mouvement,
+                           cm.heure_mouvement, p.actes_json, p.montant_total, p.remise
+                    FROM caisse_mouvements cm
+                    JOIN patient_passages p ON p.id = cm.id_passage
+                    WHERE cm.id_passage = ANY(%s)
+                    ORDER BY cm.date_mouvement, cm.heure_mouvement, cm.id
+                """, (passage_ids,))
+                history = [dict(r) for r in cursor.fetchall()]
+                passages_for_allocation = {}
+                for item in history:
+                    pid = item.get("id_passage")
+                    passage = passages_for_allocation.setdefault(pid, {
+                        "montant_total": item.get("montant_total"),
+                        "remise": item.get("remise"),
+                        "actes_json": item.get("actes_json"),
+                    })
+                    raw_acts = passage.get("actes_json")
+                    if not isinstance(raw_acts, list):
+                        try:
+                            passage["actes"] = json.loads(raw_acts or "[]")
+                        except (TypeError, ValueError):
+                            passage["actes"] = []
+                category_allocations = allocate_movement_categories(passages_for_allocation, history)
+
             # 2. PASSAGES CRÉÉS DANS LA PÉRIODE (pour Chiffre d'Affaires Brut & Remises accordées)
             cursor.execute("""
                            SELECT p.montant_total,
@@ -440,7 +517,10 @@ class CaisseManager:
 
             # 6. Caissiers distincts
             cursor.execute(
-                "SELECT DISTINCT utilisateur FROM patient_passages WHERE utilisateur IS NOT NULL AND utilisateur != '' ORDER BY utilisateur ASC;")
+                "SELECT DISTINCT utilisateur FROM ("
+                "SELECT utilisateur FROM caisse_mouvements UNION ALL "
+                "SELECT utilisateur FROM patient_passages"
+                ") operateurs WHERE utilisateur IS NOT NULL AND utilisateur != '' ORDER BY utilisateur ASC;")
             operateurs = [r["utilisateur"] for r in cursor.fetchall()]
 
             # 7. Clinique
@@ -455,6 +535,8 @@ class CaisseManager:
         # ---------------- CALCULS DU FLUX DE CAISSE RÉEL ----------------
         total_encaisse_reel = 0.0
         total_remboursements = 0.0
+        total_contraste = 0.0
+        total_sedation = 0.0
         modes_breakdown = {
             "Espèces": 0.0,
             "Carte CIB / Edahabia": 0.0,
@@ -482,6 +564,12 @@ class CaisseManager:
 
             actes = m.get("actes_json")
             m["actes"] = actes if isinstance(actes, list) else json.loads(actes or "[]")
+            allocation = category_allocations.get(m.get("id_mouvement"), {})
+            m["montant_principal"] = float(allocation.get("principal", 0))
+            m["montant_contraste"] = float(allocation.get("contraste", 0))
+            m["montant_sedation"] = float(allocation.get("sedation", 0))
+            total_contraste += m["montant_contraste"]
+            total_sedation += m["montant_sedation"]
             journal_flux.append(m)
 
         # Chiffre d'Affaires Brut & Remises
@@ -566,6 +654,8 @@ class CaisseManager:
                 "net_du": total_net_du,
                 "encaisse_total": total_encaisse_reel,
                 "remboursements_total": total_remboursements,
+                "produits_contraste_total": total_contraste,
+                "sedations_total": total_sedation,
                 "restes_total": total_restes,
                 "count_passages": len(rows_passages),
                 "count_remises": len(remises_list),
@@ -782,6 +872,775 @@ async def api_get_caisse_stats(
     return data
 
 
+@caisse_router.get("/rapport-utilisateur/pdf")
+async def api_download_user_cash_report_pdf(
+        request: Request,
+        operateur: str,
+        type_rapport: str = "jour",
+        date_debut: Optional[str] = None,
+        date_fin: Optional[str] = None,
+        mode_paiement: Optional[str] = "TOUS",
+        statut_paiement: Optional[str] = "TOUS"
+):
+    """Génère un PDF détaillé des mouvements de caisse d'un opérateur."""
+    _require_cash_permission(request, "cash_reports")
+    operator_name = str(operateur or "").strip()
+    if not operator_name:
+        raise HTTPException(status_code=400, detail="Sélectionnez un utilisateur de caisse.")
+    report_type = str(type_rapport or "jour").strip().lower()
+    if report_type not in {"jour", "garde", "complet"}:
+        raise HTTPException(status_code=400, detail="Type de rapport invalide.")
+
+    report = caisse_manager.get_stats({
+        "date_debut": date_debut,
+        "date_fin": date_fin,
+        "operateur": operator_name,
+        "mode_paiement": mode_paiement,
+        "statut_paiement": statut_paiement,
+    })
+    movements = report.get("journal") or []
+    if not movements:
+        raise HTTPException(status_code=404, detail="Aucun mouvement à exporter pour cet utilisateur et cette période.")
+
+    # Le rapport jour/garde suit l'heure effective de chaque mouvement de caisse.
+    # La période portée par les actes du passage sert uniquement à calculer le tarif.
+    if report_type != "complet":
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT horaires_tarification FROM clinic_info WHERE id = 1;")
+            horaires_row = cursor.fetchone()
+        horaires = (horaires_row or {}).get("horaires_tarification") or {}
+        if isinstance(horaires, str):
+            try:
+                horaires = json.loads(horaires or "{}")
+            except (TypeError, ValueError):
+                horaires = {}
+        jours_config = horaires.get("jours", {}) if isinstance(horaires, dict) else {}
+        noms_jours = ("Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche")
+
+        def movement_period(movement: Dict[str, Any]) -> str:
+            raw_date = movement.get("date_mouvement")
+            raw_time = movement.get("heure_mouvement")
+            try:
+                if isinstance(raw_date, datetime):
+                    movement_date = raw_date.date()
+                elif isinstance(raw_date, date):
+                    movement_date = raw_date
+                else:
+                    movement_date = date.fromisoformat(str(raw_date)[:10])
+            except (TypeError, ValueError):
+                # Une date de mouvement manquante ne doit pas être reclassée selon
+                # la date d'enregistrement du passage : on conserve le jour par défaut.
+                return "jour"
+            if isinstance(raw_time, time):
+                movement_time = raw_time.replace(tzinfo=None)
+            else:
+                try:
+                    movement_time = time.fromisoformat(str(raw_time or "").strip()[:8])
+                except ValueError:
+                    movement_time = None
+            if movement_time is None:
+                return "jour"
+
+            day_config = jours_config.get(noms_jours[movement_date.weekday()], {}) if isinstance(jours_config, dict) else {}
+            if not isinstance(day_config, dict):
+                day_config = {}
+            if day_config.get("nuit_24h"):
+                return "garde"
+            try:
+                day_start = time.fromisoformat(str(day_config.get("jour_debut") or "08:00")[:8])
+                day_end = time.fromisoformat(str(day_config.get("jour_fin") or "20:00")[:8])
+            except ValueError:
+                day_start, day_end = time(8, 0), time(20, 0)
+
+            if day_start == day_end:
+                is_day = True
+            elif day_start < day_end:
+                is_day = day_start <= movement_time < day_end
+            else:  # plage jour traversant minuit
+                is_day = movement_time >= day_start or movement_time < day_end
+            return "jour" if is_day else "garde"
+
+        movements = [
+            movement for movement in movements
+            if movement_period(movement) == report_type
+        ]
+    if not movements:
+        type_label = "de garde" if report_type == "garde" else "de jour"
+        raise HTTPException(status_code=404, detail=f"Aucun mouvement {type_label} à exporter pour cet utilisateur et cette période.")
+
+    def money(value: Any) -> str:
+        try:
+            amount = float(value or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        return f"{amount:,.2f}".replace(",", " ") + " DA"
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "CashReportTitle", parent=styles["Title"], fontName="Times-Bold",
+        fontSize=15, leading=19, textColor=colors.black, alignment=1,
+        spaceAfter=14,
+    )
+    meta_style = ParagraphStyle(
+        "CashReportMeta", parent=styles["Normal"], fontName="Times-Roman",
+        fontSize=9, leading=12, textColor=colors.black, spaceAfter=3,
+    )
+    header_style = ParagraphStyle(
+        "CashReportHeader", parent=styles["Normal"], fontName="Times-Bold",
+        fontSize=8, leading=10, textColor=colors.black,
+    )
+    cell_style = ParagraphStyle(
+        "CashReportCell", parent=styles["Normal"], fontName="Times-Roman",
+        fontSize=7.5, leading=9.5, textColor=colors.black,
+    )
+
+    active_filters = report.get("filtres_actifs") or {}
+    period_text = (
+        f"Période : {html_escape(str(active_filters.get('date_debut') or date_debut or ''))} "
+        f"au {html_escape(str(active_filters.get('date_fin') or date_fin or ''))}"
+    )
+    received_total = sum(max(0.0, float(item.get("montant_mouvement") or 0)) for item in movements)
+    refunded_total = sum(max(0.0, -float(item.get("montant_mouvement") or 0)) for item in movements)
+    net_total = received_total - refunded_total
+
+    clinic = report.get("clinic_info") or {}
+    clinic_name = html_escape(str(clinic.get("nom_raison_sociale") or "CLINIVA"))
+    clinic_phone = html_escape(str(clinic.get("telephone") or "-"))
+    story = [
+        Paragraph(f"<b>{clinic_name}</b>", meta_style),
+        Paragraph(f"Service de Facturation &amp; Caisse Centrale | Tél : {clinic_phone}", meta_style),
+        Paragraph(
+            f"Date d'édition : <b>{datetime.now().strftime('%d/%m/%Y à %H:%M')}</b><br/>"
+            f"Période : {period_text}<br/>Utilisateur caisse : <b>{'Tous les caissiers' if operator_name == 'TOUS' else '@' + html_escape(operator_name)}</b>", meta_style
+        ),
+        Paragraph(
+            "JOURNAL DE CAISSE — JOUR" if report_type == "jour" else
+            "JOURNAL DE CAISSE — GARDE" if report_type == "garde" else
+            ("RAPPORT DÉTAILLÉ DE CAISSE PAR UTILISATEUR" if operator_name != "TOUS" else "JOURNAL DÉTAILLÉ DE CAISSE"),
+            title_style,
+        ),
+    ]
+    summary_data = [
+        [Paragraph("Nombre de mouvements", cell_style), Paragraph(f"<b>{len(movements)}</b>", cell_style),
+         Paragraph("Encaissements", cell_style), Paragraph(f"<b>{money(received_total)}</b>", cell_style)],
+        [Paragraph("Remboursements", cell_style), Paragraph(f"<b>{money(refunded_total)}</b>", cell_style),
+         Paragraph("Net de caisse", cell_style), Paragraph(f"<b>{money(net_total)}</b>", cell_style)],
+    ]
+    summary = Table(summary_data, colWidths=[112, 125, 112, 145])
+    summary.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#cbd5e1")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("FONTNAME", (1, 0), (1, -1), "Times-Bold"),
+        ("FONTNAME", (3, 0), (3, -1), "Times-Bold"),
+    ]))
+    story.extend([summary, Spacer(1, 12)])
+
+    table_data = [[
+        Paragraph(label, header_style)
+        for label in ("Passage / date", "Patient", "Mouvement / prestation", "Caissier", "Mode", "Montant")
+    ]]
+    movement_labels = {
+        "ENCAISSEMENT_TOTAL": "Encaissement total",
+        "ENCAISSEMENT_PARTIEL": "Encaissement partiel",
+        "ENCAISSEMENT_RESTE": "Encaissement du reste",
+        "REGULARISATION": "Encaissement du reste",
+        "ENCAISSEMENT": "Encaissement total",
+        "ANNULATION": "Remboursement / annulation",
+    }
+    for movement in movements:
+        acts = movement.get("actes") or []
+        service_names = ", ".join(
+            str(act.get("nom") or act.get("designation") or "").strip()
+            for act in acts if isinstance(act, dict)
+            and str(act.get("nom") or act.get("designation") or "").strip()
+        ) or "Prestation non renseignée"
+        amount = float(movement.get("montant_mouvement") or 0)
+        amount_style = ParagraphStyle(
+            "CashAmount", parent=cell_style,
+            textColor=colors.HexColor("#b42332") if amount < 0 else colors.HexColor("#176b3a"),
+            alignment=2,
+        )
+        description = (
+            f"<b>{html_escape(movement_labels.get(movement.get('type_mouvement'), 'Mouvement de caisse'))}</b>"
+            f"<br/>{html_escape(service_names)}"
+        )
+        table_data.append([
+            Paragraph(
+                f"#PASS-{int(movement.get('id_passage') or 0):04d}<br/>"
+                f"{html_escape(str(movement.get('date_mouvement') or ''))}<br/>"
+                f"{html_escape(str(movement.get('heure_mouvement') or ''))}", cell_style
+            ),
+            Paragraph(
+                html_escape(f"{movement.get('nom') or ''} {movement.get('prenom') or ''}".strip()),
+                cell_style,
+            ),
+            Paragraph(description, cell_style),
+            Paragraph(f"@{html_escape(str(movement.get('operateur_mouvement') or operator_name))}", cell_style),
+            Paragraph(html_escape(str(movement.get("mode_mouvement") or "Espèces")), cell_style),
+            Paragraph(f"{'−' if amount < 0 else '+' if amount > 0 else ''}{money(abs(amount))}", amount_style),
+        ])
+
+    details = Table(
+        table_data,
+        # Keep the table inside the printable A4 width (595.28 - 2 * 42 pt).
+        # The previous widths summed to 514 pt and overflowed the 511 pt frame,
+        # causing ReportLab to fail when the day/guard journal had rows.
+        colWidths=[68, 82, 145, 63, 65, 72],
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+    details.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f1f5f9")),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(details)
+
+    output = BytesIO()
+    document = SimpleDocTemplate(
+        output, pagesize=A4,
+        leftMargin=42, rightMargin=42, topMargin=38, bottomMargin=38,
+        title=f"Rapport de caisse {report_type} - {operator_name}",
+    )
+    document.build(story)
+    safe_operator = "".join(char if char.isascii() and (char.isalnum() or char in "-_") else "_" for char in operator_name).strip("_") or "utilisateur"
+    filename = f"rapport_caisse_{safe_operator}_{active_filters.get('date_debut') or date_debut or 'periode'}.pdf"
+    pdf_content = output.getvalue()
+    return Response(
+        content=pdf_content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@caisse_router.get("/factures/registre")
+async def api_list_cash_invoices(
+    request: Request,
+    date_debut: Optional[str] = None,
+    date_fin: Optional[str] = None,
+    recherche: Optional[str] = None,
+    utilisateur: Optional[str] = None,
+):
+    _require_any_cash_permission(request, "cash_reports", "cash_collect", "cash_collect_rest", "cash_refund")
+    _ensure_invoice_registry_schema()
+    start = date_debut or date.today().isoformat()
+    end = date_fin or start
+    try:
+        date.fromisoformat(start)
+        date.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Période de factures invalide.")
+    if end < start:
+        raise HTTPException(status_code=400, detail="La date de fin doit suivre la date de début.")
+    term = str(recherche or '').strip()
+    operator = str(utilisateur or '').strip()
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT id, numero_facture, id_passage,
+                   TO_CHAR(date_generation, 'YYYY-MM-DD HH24:MI') AS date_generation,
+                   utilisateur, patient_nom, montant_ttc, statut,
+                   TO_CHAR(date_annulation, 'YYYY-MM-DD HH24:MI') AS date_annulation,
+                   utilisateur_annulation, motif_annulation, numero_avoir
+            FROM caisse_factures
+            WHERE date_generation::date BETWEEN %s::date AND %s::date
+              AND (%s = '' OR patient_nom ILIKE %s OR numero_facture ILIKE %s)
+              AND (%s = '' OR utilisateur ILIKE %s)
+            ORDER BY date_generation DESC, id DESC;
+        """, (start, end, term, f"%{term}%", f"%{term}%", operator, f"%{operator}%"))
+        rows = [dict(row) for row in cursor.fetchall()]
+    for row in rows:
+        row["montant_ttc"] = float(row.get("montant_ttc") or 0)
+    return {"success": True, "factures": rows}
+
+
+@caisse_router.get("/factures/registre/{invoice_id}/pdf")
+async def api_get_registered_invoice_pdf(invoice_id: int, request: Request, download: bool = False):
+    _require_any_cash_permission(request, "cash_reports", "cash_collect", "cash_collect_rest", "cash_refund")
+    _ensure_invoice_registry_schema()
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT numero_facture, pdf_data FROM caisse_factures WHERE id = %s;", (invoice_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Facture validée introuvable.")
+    return Response(
+        content=bytes(row["pdf_data"]), media_type="application/pdf",
+        headers={"Content-Disposition": f'{"attachment" if download else "inline"}; filename="facture_{row["numero_facture"]}.pdf"', "Cache-Control": "no-store"},
+    )
+
+
+@caisse_router.get("/factures/{passage_id}/status")
+async def api_cash_invoice_status(passage_id: int, request: Request):
+    _require_any_cash_permission(request, "cash_reports", "cash_collect", "cash_collect_rest", "cash_refund")
+    _ensure_invoice_registry_schema()
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT id, numero_facture, statut FROM caisse_factures WHERE id_passage = %s;", (passage_id,))
+        row = cursor.fetchone()
+    return {"success": True, "validated": bool(row), "invoice_id": row["id"] if row else None,
+            "numero_facture": row["numero_facture"] if row else None,
+            "statut": row["statut"] if row else None}
+
+
+@caisse_router.post("/factures/registre/{invoice_id}/annuler")
+async def api_cancel_registered_invoice(invoice_id: int, request: Request):
+    user = _require_cash_permission(request, "cash_refund")
+    _ensure_invoice_registry_schema()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    reason = str(payload.get("motif") or "").strip() if isinstance(payload, dict) else ""
+    if len(reason) < 4:
+        raise HTTPException(status_code=400, detail="Indiquez un motif d’annulation (au moins 4 caractères).")
+    if len(reason) > 500:
+        raise HTTPException(status_code=400, detail="Le motif ne peut pas dépasser 500 caractères.")
+
+    operator = str(user.get("login") or user.get("username") or user.get("nom_utilisateur") or "Utilisateur")
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT id, numero_facture, id_passage, patient_nom, montant_ttc, statut
+            FROM caisse_factures WHERE id = %s FOR UPDATE;
+        """, (invoice_id,))
+        invoice = cursor.fetchone()
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Facture introuvable dans le registre.")
+        if str(invoice.get("statut") or "VALIDEE").upper() == "ANNULEE":
+            return {"success": True, "already_cancelled": True, "numero_avoir": invoice.get("numero_avoir") or f"AV-{invoice['numero_facture']}"}
+
+        cancelled_at = datetime.now()
+        avoir_number = f"AV-{invoice['numero_facture']}"
+        output = BytesIO()
+        pdf = canvas.Canvas(output, pagesize=A4)
+        width, height = A4
+        def pdf_safe_text(value: Any) -> str:
+            text = str(value or "").replace("’", "'").replace("‘", "'").replace("—", "-").replace("–", "-")
+            return text.encode("cp1252", errors="replace").decode("cp1252")
+
+        pdf.setTitle(f"Avoir {avoir_number}")
+        pdf.setFillColor(colors.HexColor("#991b1b"))
+        pdf.setFont("Helvetica-Bold", 24)
+        pdf.drawCentredString(width / 2, height - 70, "AVOIR / ANNULATION DE FACTURE")
+        pdf.setStrokeColor(colors.HexColor("#b91c1c"))
+        pdf.setLineWidth(2)
+        pdf.roundRect(45, height - 155, width - 90, 44, 8, stroke=1, fill=0)
+        pdf.setFillColor(colors.HexColor("#7f1d1d"))
+        pdf.setFont("Helvetica-Bold", 14)
+        pdf.drawCentredString(width / 2, height - 137, f"N° Avoir : {avoir_number}")
+
+        pdf.setFillColor(colors.black)
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawString(55, height - 195, "RÉFÉRENCE DE LA FACTURE ANNULÉE")
+        pdf.setFont("Helvetica", 11)
+        pdf.drawString(55, height - 220, f"N° facture : {invoice['numero_facture']}")
+        pdf.drawString(55, height - 240, f"N° passage : Pas-{invoice['id_passage']}")
+        pdf.drawString(55, height - 260, pdf_safe_text(f"Patient : {invoice['patient_nom'] or 'Patient'}"))
+        pdf.drawString(55, height - 280, pdf_safe_text(f"Date d'annulation : {cancelled_at.strftime('%d/%m/%Y à %H:%M')}"))
+        pdf.drawString(55, height - 300, pdf_safe_text(f"Annulee par : {operator}"))
+
+        pdf.setFillColor(colors.HexColor("#fef2f2"))
+        pdf.setStrokeColor(colors.HexColor("#fecaca"))
+        pdf.roundRect(50, height - 380, width - 100, 48, 8, stroke=1, fill=1)
+        pdf.setFillColor(colors.HexColor("#7f1d1d"))
+        pdf.setFont("Helvetica-Bold", 12)
+        pdf.drawString(65, height - 360, "Montant TTC annulé")
+        pdf.drawRightString(width - 65, height - 360, f"{float(invoice['montant_ttc'] or 0):,.2f} DA".replace(",", " "))
+
+        pdf.setFillColor(colors.black)
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawString(55, height - 420, "Motif de l’annulation :")
+        pdf.setFont("Helvetica", 11)
+        words = pdf_safe_text(reason).split()
+        lines = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if pdf.stringWidth(candidate, "Helvetica", 11) > width - 110 and current:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        y = height - 442
+        for line in lines[:8]:
+            pdf.drawString(55, y, line)
+            y -= 17
+        pdf.setFillColor(colors.HexColor("#991b1b"))
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawCentredString(width / 2, 105, "La facture referencee ci-dessus est annulee et ne peut plus etre utilisee comme facture valide.")
+        pdf.setFillColor(colors.HexColor("#64748b"))
+        pdf.setFont("Helvetica", 9)
+        pdf.drawCentredString(width / 2, 78, "Document d’annulation généré par Cliniva")
+        pdf.save()
+        avoir_bytes = output.getvalue()
+
+        cursor.execute("""
+            UPDATE caisse_factures
+            SET statut = 'ANNULEE', date_annulation = %s, utilisateur_annulation = %s,
+                motif_annulation = %s, numero_avoir = %s, avoir_pdf_data = %s
+            WHERE id = %s AND statut <> 'ANNULEE';
+        """, (cancelled_at, operator, reason, avoir_number, avoir_bytes, invoice_id))
+
+    _track_financial_action(request, "ANNULATION_FACTURE_CAISSE",
+                            f"Facture {invoice['numero_facture']} annulée par {operator}; avoir {avoir_number}; motif: {reason}")
+    return {"success": True, "numero_avoir": avoir_number, "statut": "ANNULEE"}
+
+
+@caisse_router.get("/factures/registre/{invoice_id}/avoir.pdf")
+async def api_get_invoice_credit_note(invoice_id: int, request: Request, download: bool = False):
+    _require_any_cash_permission(request, "cash_reports", "cash_refund")
+    _ensure_invoice_registry_schema()
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT numero_avoir, avoir_pdf_data FROM caisse_factures WHERE id = %s AND statut = 'ANNULEE';", (invoice_id,))
+        row = cursor.fetchone()
+    if not row or not row.get("avoir_pdf_data"):
+        raise HTTPException(status_code=404, detail="Aucun avoir n’est enregistré pour cette facture.")
+    disposition = "attachment" if download else "inline"
+    return Response(content=bytes(row["avoir_pdf_data"]), media_type="application/pdf",
+                    headers={"Content-Disposition": f'{disposition}; filename="avoir_{row["numero_avoir"]}.pdf"', "Cache-Control": "no-store"})
+
+
+@caisse_router.post("/factures/{passage_id}/valider")
+async def api_validate_cash_invoice(passage_id: int, request: Request):
+    user = _require_any_cash_permission(request, "cash_reports", "cash_collect", "cash_collect_rest")
+    _ensure_invoice_registry_schema()
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT p.id, p.date_passage, p.montant_total, p.remise, p.actes_json, pat.nom, pat.prenom FROM patient_passages p LEFT JOIN patients pat ON pat.id=p.id_patient WHERE p.id=%s;", (passage_id,))
+        passage = cursor.fetchone()
+        if not passage:
+            raise HTTPException(status_code=404, detail="Passage introuvable.")
+        cursor.execute("SELECT id, numero_facture FROM caisse_factures WHERE id_passage=%s;", (passage_id,))
+        existing = cursor.fetchone()
+    if existing:
+        return {"success": True, "invoice_id": existing["id"], "numero_facture": existing["numero_facture"], "already_validated": True}
+
+    # Generate the exact same PDF shown in the preview, then persist it atomically.
+    preview = await api_view_cash_invoice_pdf(passage_id, request)
+    raw_acts = passage.get("actes_json")
+    if isinstance(raw_acts, str):
+        try:
+            raw_acts = json.loads(raw_acts or "[]")
+        except (TypeError, ValueError):
+            raw_acts = []
+    if isinstance(raw_acts, dict):
+        raw_acts = next((raw_acts.get(key) for key in ("actes", "prestations", "items", "lignes") if isinstance(raw_acts.get(key), list)), [])
+    gross = Decimal("0.00")
+    for act in raw_acts if isinstance(raw_acts, list) else []:
+        if not isinstance(act, dict):
+            continue
+        try:
+            quantity = max(1, int(act.get("quantite") or 1))
+            amount = Decimal(str(act.get("sous_total"))) if act.get("sous_total") is not None else Decimal(str(act.get("tarif") or act.get("prix") or 0)) * quantity
+            if amount.is_finite() and amount >= 0:
+                gross += amount
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+    try:
+        discount = max(Decimal("0"), Decimal(str(passage.get("remise") or 0)))
+    except (InvalidOperation, TypeError, ValueError):
+        discount = Decimal("0")
+    ttc = max(Decimal("0"), gross - discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    passage_date = passage.get("date_passage") or date.today()
+    invoice_year = str(passage_date)[:4]
+    invoice_number = f"{invoice_year}_{passage_id:06d}"
+    patient_name = f"{passage.get('nom') or 'Patient'} {passage.get('prenom') or ''}".strip()
+    login = str(user.get("login") or user.get("username") or user.get("nom_utilisateur") or "")
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO caisse_factures (numero_facture, id_passage, utilisateur, patient_nom, montant_ttc, pdf_data)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id_passage) DO NOTHING
+            RETURNING id;
+        """, (invoice_number, passage_id, login, patient_name, ttc, preview.body))
+        saved = cursor.fetchone()
+        cursor.execute("SELECT id, numero_facture FROM caisse_factures WHERE id_passage=%s;", (passage_id,))
+        record = cursor.fetchone()
+    if not record:
+        raise HTTPException(status_code=500, detail="La facture n'a pas pu être enregistrée.")
+    _track_financial_action(request, "VALIDATION_FACTURE_CAISSE", f"Facture {invoice_number} validée pour {patient_name} ({ttc} DA)")
+    return {"success": True, "invoice_id": record["id"], "numero_facture": record["numero_facture"], "already_validated": not bool(saved)}
+
+
+@caisse_router.get("/factures/{passage_id}/pdf")
+async def api_view_cash_invoice_pdf(passage_id: int, request: Request, download: bool = False):
+    """Génère une facture A4 à partir des prestations d'un passage de caisse."""
+    user = _require_any_cash_permission(request, "cash_reports", "cash_collect", "cash_collect_rest")
+    _ensure_invoice_registry_schema()
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT pdf_data, numero_facture FROM caisse_factures WHERE id_passage=%s;", (passage_id,))
+        saved_invoice = cursor.fetchone()
+        if saved_invoice:
+            return Response(content=bytes(saved_invoice["pdf_data"]), media_type="application/pdf", headers={
+                "Content-Disposition": f'{"attachment" if download else "inline"}; filename="facture_{saved_invoice["numero_facture"]}.pdf"',
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            })
+        if download:
+            raise HTTPException(status_code=409, detail="Validez la facture avant de la télécharger.")
+        cursor.execute("""
+            SELECT p.id AS id_passage, p.id_patient, p.date_passage, p.heure_passage,
+                   p.actes_json, p.montant_total, p.remise,
+                   COALESCE(pat.nom, 'Patient') AS nom,
+                   COALESCE(pat.prenom, '') AS prenom,
+                   COALESCE(pat.telephone_1, '') AS telephone,
+                   COALESCE(pat.wilaya, '') AS wilaya,
+                   COALESCE(pat.commune, '') AS commune,
+                   COALESCE(TO_CHAR(pat.date_naissance, 'DD/MM/YYYY'), '') AS date_naissance
+            FROM patient_passages p
+            LEFT JOIN patients pat ON pat.id = p.id_patient
+            WHERE p.id = %s;
+        """, (passage_id,))
+        passage_row = cursor.fetchone()
+        if not passage_row:
+            raise HTTPException(status_code=404, detail="Passage introuvable.")
+        passage = dict(passage_row)
+        cursor.execute("""
+            SELECT nom_raison_sociale, telephone, adresse, nif, nis, rc, article_imposition
+            FROM clinic_info WHERE id = 1;
+        """)
+        clinic_row = cursor.fetchone()
+
+    raw_acts = passage.get("actes_json")
+    if isinstance(raw_acts, dict):
+        # Accommodate both the current JSON array and older wrapped payloads.
+        raw_acts = next((raw_acts.get(key) for key in ("actes", "prestations", "items", "lignes")
+                         if isinstance(raw_acts.get(key), list)), [])
+    elif not isinstance(raw_acts, list):
+        try:
+            raw_acts = json.loads(raw_acts or "[]")
+        except (TypeError, ValueError):
+            raw_acts = []
+        if isinstance(raw_acts, dict):
+            raw_acts = next((raw_acts.get(key) for key in ("actes", "prestations", "items", "lignes")
+                             if isinstance(raw_acts.get(key), list)), [])
+    if not raw_acts:
+        raise HTTPException(status_code=409, detail="Aucune prestation n'est enregistrée pour ce passage.")
+
+    invoice_lines = []
+    gross_total = Decimal("0.00")
+    for act in raw_acts:
+        if not isinstance(act, dict):
+            continue
+        quantity = max(1, int(act.get("quantite") or 1))
+        try:
+            line_total = Decimal(str(act.get("sous_total"))) if act.get("sous_total") is not None else (
+                Decimal(str(act.get("tarif") or act.get("prix") or 0)) * quantity
+            )
+            if not line_total.is_finite() or line_total < 0:
+                raise InvalidOperation
+        except (InvalidOperation, TypeError, ValueError):
+            raise HTTPException(status_code=409, detail="Une prestation contient un montant invalide.")
+        line_total = line_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        gross_total += line_total
+        invoice_lines.append({
+            "label": str(act.get("nom") or act.get("designation") or act.get("libelle")
+                         or act.get("prestation") or act.get("examen") or "Prestation"),
+            "quantity": quantity,
+            "unit_price": (line_total / quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            "amount": line_total,
+        })
+    if not invoice_lines:
+        raise HTTPException(status_code=409, detail="Aucune prestation exploitable pour cette facture.")
+
+    # The provided invoice model uses a 9% VAT rate. Its TTC is the sum of
+    # prestation prices; we split that amount backwards into HT, VAT and stamp.
+    try:
+        discount = max(Decimal("0"), Decimal(str(passage.get("remise") or 0)))
+    except (InvalidOperation, TypeError, ValueError):
+        discount = Decimal("0")
+    discount = min(discount, gross_total).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    ttc = (gross_total - discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    vat = (ttc * Decimal("0.09")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if ttc <= Decimal("30000"):
+        stamp_rate = Decimal("0.01")
+    elif ttc <= Decimal("100000"):
+        stamp_rate = Decimal("0.015")
+    else:
+        stamp_rate = Decimal("0.02")
+    stamp = ((ttc + vat) * stamp_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    ht = ttc - vat - stamp
+
+    def amount_words_fr(value: Decimal) -> str:
+        units = ("zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf",
+                 "dix", "onze", "douze", "treize", "quatorze", "quinze", "seize")
+
+        def under_hundred(number: int) -> str:
+            if number < len(units):
+                return units[number]
+            if number < 20:
+                return "dix-" + units[number - 10]
+            if number < 70:
+                tens, remainder = divmod(number, 10)
+                names = {2: "vingt", 3: "trente", 4: "quarante", 5: "cinquante", 6: "soixante"}
+                return names[tens] + ("" if remainder == 0 else (" et un" if remainder == 1 else "-" + units[remainder]))
+            if number < 80:
+                return "soixante" + ("-et-onze" if number == 71 else "-" + under_hundred(number - 60))
+            if number == 80:
+                return "quatre-vingts"
+            return "quatre-vingt" + ("" if number == 80 else "-" + under_hundred(number - 80))
+
+        def under_thousand(number: int) -> str:
+            if number < 100:
+                return under_hundred(number)
+            hundreds, remainder = divmod(number, 100)
+            prefix = "cent" if hundreds == 1 else units[hundreds] + " cent"
+            if remainder == 0 and hundreds > 1:
+                prefix += "s"
+            return prefix if remainder == 0 else prefix + " " + under_hundred(remainder)
+
+        cents_total = int((value * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        whole, cents = divmod(cents_total, 100)
+        if whole >= 1_000_000:
+            millions, rest = divmod(whole, 1_000_000)
+            words = under_thousand(millions) + " million" + ("s" if millions > 1 else "")
+            if rest:
+                words += " " + under_thousand(rest // 1000) + " mille" if rest >= 1000 else " " + under_thousand(rest)
+                if rest >= 1000 and rest % 1000:
+                    words += " " + under_thousand(rest % 1000)
+        elif whole >= 1000:
+            thousands, rest = divmod(whole, 1000)
+            words = ("" if thousands == 1 else under_thousand(thousands) + " ") + "mille"
+            if rest:
+                words += " " + under_thousand(rest)
+        else:
+            words = under_thousand(whole)
+        result = words + " dinar" + ("s" if whole > 1 else "")
+        if cents:
+            result += " et " + under_hundred(cents) + " centime" + ("s" if cents > 1 else "")
+        return result[:1].upper() + result[1:]
+
+    clinic = dict(clinic_row) if clinic_row else {}
+    invoice_year = str(passage.get("date_passage") or date.today().isoformat())[:4]
+    invoice_number = f"{invoice_year}_{passage_id:06d}"
+    background_path = Path(__file__).resolve().parents[1] / "uploads" / "model_templates" / "Fact.png"
+    if not background_path.is_file():
+        raise HTTPException(status_code=500, detail="Le fond de facture uploads/model_templates/Fact.png est introuvable.")
+
+    output = BytesIO()
+    pdf = canvas.Canvas(output, pagesize=A4)
+    page_width, page_height = A4
+
+    # Use the clinic's supplied stationery as the sole page background.
+    pdf.drawImage(ImageReader(str(background_path)), 0, 0, width=page_width, height=page_height, preserveAspectRatio=False)
+
+    def money(value: Decimal) -> str:
+        value = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if value == value.to_integral_value():
+            rendered = str(int(value))
+        else:
+            rendered = f"{value:.2f}".replace(".", ",")
+        return rendered + " DA"
+
+    def draw_fit(text: str, x: float, y: float, max_width: float, font: str = "Helvetica", size: float = 8):
+        text = str(text or "")
+        while size > 5 and pdf.stringWidth(text, font, size) > max_width:
+            size -= 0.25
+        pdf.setFont(font, size)
+        pdf.drawString(x, y, text)
+
+    patient_name = f"{passage.get('nom') or ''} {passage.get('prenom') or ''}".strip()
+    passage_date = str(passage.get("date_passage") or date.today().isoformat())
+    try:
+        passage_date = date.fromisoformat(passage_date[:10]).strftime("%d/%m/%Y")
+    except ValueError:
+        pass
+    pdf.setFillColor(colors.black)
+    fiscal_parts = [
+        ("RC", clinic.get("rc")),
+        ("ART", clinic.get("article_imposition")),
+        ("NIF", clinic.get("nif")),
+        ("NIS", clinic.get("nis")),
+    ]
+    fiscal_line = "   ".join(f"{label} {value}" for label, value in fiscal_parts if value not in (None, ""))
+    if fiscal_line:
+        draw_fit(fiscal_line, 48, 722, page_width - 96, "Helvetica-Bold", 12)
+    pdf.setFont("Helvetica-Bold", 32)
+    pdf.drawCentredString(page_width / 2, 676, "Facture")
+    pdf.setFont("Helvetica-Bold", 12.5)
+    pdf.drawString(48, 636, f"ID Passage : Pas-{passage_id}")
+    draw_fit(f"N° Facture : {invoice_number}", 48, 616, 390, "Helvetica-Bold", 12.5)
+    draw_fit(f"Date : {passage_date}", 48, 596, 340, "Helvetica-Bold", 12.5)
+    draw_fit(f"Patient : {patient_name}", 48, 576, 390, "Helvetica-Bold", 12.5)
+
+    # QR links the invoice to its passage without exposing additional patient data.
+    try:
+        qr = QrCodeWidget(f"CLINIVA|FACTURE:{invoice_number}|PASSAGE:{passage_id}")
+        x1, y1, x2, y2 = qr.getBounds()
+        qr_size = 84
+        qr_drawing = Drawing(x2 - x1, y2 - y1)
+        qr_drawing.add(qr)
+        pdf.saveState()
+        pdf.translate(462, 603)
+        pdf.scale(qr_size / (x2 - x1), qr_size / (y2 - y1))
+        renderPDF.draw(qr_drawing, pdf, -x1, -y1)
+        pdf.restoreState()
+    except Exception:
+        logger.debug("Impossible de générer le QR de la facture", exc_info=True)
+
+    # Preserve the previously approved invoice layout on the supplied clinic
+    # stationery: broad prestation grid, totals at lower right, and amount in words.
+    table_x, table_bottom, table_top, table_width = 48, 366, 530, 508
+    divider_x = 452
+    pdf.setStrokeColor(colors.black)
+    pdf.setLineWidth(0.8)
+    pdf.rect(table_x, table_bottom, table_width, table_top - table_bottom)
+    pdf.line(divider_x, table_bottom, divider_x, table_top)
+    pdf.rect(table_x, table_top, 153, 22)
+    pdf.setFillColor(colors.black)
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(table_x + 4, table_top + 7, "Liste D'examens")
+
+    row_space = (table_top - table_bottom - 12) / max(1, len(invoice_lines))
+    row_font = max(5.5, min(10, row_space * 0.62))
+    for index, line in enumerate(invoice_lines):
+        y = table_top - 12 - index * row_space
+        label = f"{line['quantity']} × {line['label']}" if line["quantity"] > 1 else line["label"]
+        draw_fit(label, table_x + 4, y, divider_x - table_x - 10, "Helvetica-Bold", row_font)
+        pdf.setFont("Helvetica-Bold", row_font)
+        pdf.drawRightString(table_x + table_width - 7, y, money(line["amount"]))
+
+    total_rows = [("Total HT", ht), ("Remise", discount), ("TVA (9 %)", vat),
+                  (f"Timbre Fiscal ({stamp_rate * 100:g} %)", stamp), ("Total TTC", ttc)]
+    totals_x, totals_y, totals_width, totals_height = 347, 280, 209, 86
+    totals_split = 452
+    total_row_h = totals_height / len(total_rows)
+    pdf.setStrokeColor(colors.black)
+    pdf.setLineWidth(0.8)
+    pdf.rect(totals_x, totals_y, totals_width, totals_height)
+    pdf.line(totals_split, totals_y, totals_split, totals_y + totals_height)
+    for index, (label, value) in enumerate(total_rows):
+        row_top = totals_y + totals_height - index * total_row_h
+        if index:
+            pdf.line(totals_x, row_top, totals_x + totals_width, row_top)
+        pdf.setFont("Helvetica-Bold", 8.5)
+        pdf.drawString(totals_x + 7, row_top - 12, label)
+        pdf.drawRightString(totals_x + totals_width - 7, row_top - 12, money(value))
+
+    pdf.setFillColor(colors.black)
+    draw_fit(f"Arrêtée à la somme de : {amount_words_fr(ttc)} Dinars", 48, 252, 500, "Helvetica-Bold", 9)
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawRightString(530, 214, "La Direction")
+    pdf.save()
+
+    return Response(
+        content=output.getvalue(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="facture_{invoice_number}.pdf"',
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
 @caisse_router.post("/regulariser")
 async def api_regulariser_impaye(payload: Dict[str, Any], request: Request):
     user = _require_any_cash_permission(request, "cash_collect", "cash_collect_rest")
@@ -846,10 +1705,34 @@ async def view_movement_receipt(mouvement_id: int, request: Request):
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Mouvement de caisse introuvable.")
+        movement = dict(row)
+        cursor.execute("""
+            SELECT cm.id AS id_mouvement, cm.id_passage, cm.type_mouvement,
+                   cm.montant AS montant_mouvement,
+                   TO_CHAR(cm.date_mouvement, 'YYYY-MM-DD') AS date_mouvement,
+                   cm.heure_mouvement
+            FROM caisse_mouvements cm
+            WHERE cm.id_passage = %s
+            ORDER BY cm.date_mouvement, cm.heure_mouvement, cm.id
+        """, (movement.get("id_passage"),))
+        history = [dict(item) for item in cursor.fetchall()]
+        passage_acts = movement.get("actes_json")
+        if not isinstance(passage_acts, list):
+            try:
+                passage_acts = json.loads(passage_acts or "[]")
+            except (TypeError, ValueError):
+                passage_acts = []
+        allocations = allocate_movement_categories({
+            movement.get("id_passage"): {
+                "actes": passage_acts,
+                "montant_total": movement.get("montant_total"),
+                "remise": movement.get("remise"),
+            }
+        }, history)
+        movement["allocations"] = allocations.get(movement.get("id_mouvement"), {})
         cursor.execute("SELECT nom_raison_sociale, adresse, telephone FROM clinic_info WHERE id = 1;")
         clinic_row = cursor.fetchone()
 
-    movement = dict(row)
     acts = movement.get("actes_json")
     movement["actes"] = acts if isinstance(acts, list) else json.loads(acts or "[]")
     clinic = dict(clinic_row) if clinic_row else {}
@@ -932,6 +1815,62 @@ async def view_cloture_pv_html(
         </tr>
         """
 
+    def special_sales_table(category):
+        rows = []
+        total = 0.0
+        for movement in data.get("journal") or []:
+            try:
+                acts = movement.get("actes") or []
+                if isinstance(acts, str):
+                    acts = json.loads(acts or "[]")
+                matching = [
+                    act for act in acts
+                    if isinstance(act, dict) and classify_prestation(act) == category
+                ]
+                category_payment = float(
+                    movement.get("montant_contraste" if category == "contraste" else "montant_sedation") or 0
+                )
+            except (TypeError, ValueError):
+                continue
+            if abs(category_payment) < 0.005:
+                continue
+            weighted = []
+            for act in matching:
+                try:
+                    weight = float(act.get("sous_total") or 0)
+                    if weight <= 0:
+                        weight = float(act.get("tarif") or act.get("prix") or act.get("prix_jour") or 0) * float(act.get("quantite") or 1)
+                except (TypeError, ValueError):
+                    weight = 0.0
+                weighted.append((act, max(0.0, weight)))
+            if not weighted:
+                weighted = [({"nom": "Prestation non renseignée"}, 1.0)]
+            weight_sum = sum(weight for _, weight in weighted)
+            if weight_sum <= 0:
+                weighted = [(act, 1.0) for act, _ in weighted]
+                weight_sum = len(weighted)
+            allocated_so_far = 0.0
+            for index, (act, weight) in enumerate(weighted):
+                payment = (
+                    round(category_payment - allocated_so_far, 2)
+                    if index == len(weighted) - 1
+                    else round(category_payment * weight / weight_sum, 2)
+                )
+                allocated_so_far += payment
+                total += payment
+                rows.append(f"""
+                    <tr>
+                        <td>{html_escape(str(movement.get("nom") or ""))} {html_escape(str(movement.get("prenom") or ""))}</td>
+                        <td>{html_escape(str(act.get("nom") or act.get("designation") or "Prestation non renseignée"))}</td>
+                        <td class="text-right">{f_da(payment)}</td>
+                    </tr>
+                """)
+        rows.append(f'<tr class="total-row"><td colspan="2">TOTAL</td><td class="text-right">{f_da(total)}</td></tr>')
+        return "".join(rows), total
+
+    lignes_contraste, total_contraste = special_sales_table("contraste")
+    lignes_sedation, total_sedation = special_sales_table("sedation")
+
     return f"""
     <!DOCTYPE html>
     <html lang="fr">
@@ -954,6 +1893,7 @@ async def view_cloture_pv_html(
             th {{ background: #f8fafc; font-weight: bold; }}
             .text-right {{ text-align: right; }}
             .bold {{ font-weight: bold; }}
+            .special-sales .total-row {{ background: #ecfdf5; font-weight: bold; }}
             .no-print {{ position: fixed; top: 15px; right: 15px; z-index: 9999; display: flex; gap: 10px; }}
             .btn {{ border: none; padding: 10px 18px; border-radius: 10px; font-weight: bold; cursor: pointer; }}
             .btn-print {{ background: #121c15; color: #8be140; }}
@@ -1030,6 +1970,22 @@ async def view_cloture_pv_html(
                 </tbody>
             </table>
 
+            <div style="font-size:11pt; font-weight:bold; margin-top:25px; margin-bottom:6px;">
+                Ventes de produits de contraste :
+            </div>
+            <table class="special-sales">
+                <thead><tr style="background:#f1f5f9;"><th>Nom et prénom du patient</th><th>Produit vendu</th><th class="text-right">Paiement</th></tr></thead>
+                <tbody>{lignes_contraste}</tbody>
+            </table>
+
+            <div style="font-size:11pt; font-weight:bold; margin-top:25px; margin-bottom:6px;">
+                Ventes de produits de sédation :
+            </div>
+            <table class="special-sales">
+                <thead><tr style="background:#f1f5f9;"><th>Nom et prénom du patient</th><th>Produit vendu</th><th class="text-right">Paiement</th></tr></thead>
+                <tbody>{lignes_sedation}</tbody>
+            </table>
+
             <div style="margin-top: 50px; display:flex; justify-content:space-between;">
                 <div style="text-align:center; width:200px;">
                     <div>Visa du Caissier</div>
@@ -1074,6 +2030,15 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
             </div>
 
             <div class="flex items-center gap-2.5">
+                <button type="button" id="caisseDailyJournalButton" onclick="openCaisseUserReportPdf('TOUS', 'jour')" class="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2.5 rounded-2xl font-bold text-xs shadow-md transition cursor-pointer">
+                    <i class="ph-bold ph-sun text-base"></i><span>Journal du jour</span>
+                </button>
+                <button type="button" id="caisseGuardJournalButton" onclick="openCaisseUserReportPdf('TOUS', 'garde')" class="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white px-4 py-2.5 rounded-2xl font-bold text-xs shadow-md transition cursor-pointer">
+                    <i class="ph-bold ph-moon text-base"></i><span>Journal de garde</span>
+                </button>
+                <button type="button" id="caisseInvoiceRegisterButton" onclick="openCaisseInvoiceRegister()" class="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-2xl font-bold text-xs shadow-md transition cursor-pointer">
+                    <i class="ph-bold ph-files text-base"></i><span>Registre des factures</span>
+                </button>
                 <button type="button" id="caissePvButton" onclick="printClotureCaissePV()" class="flex items-center gap-2 bg-slate-900 hover:bg-black text-white px-4 py-2.5 rounded-2xl font-bold text-xs shadow-md border border-white/10 transition cursor-pointer">
                     <i class="ph-bold ph-printer text-brand-neon text-base"></i>
                     <span>PV de Clôture A4</span>
@@ -1141,7 +2106,7 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
         </div>
 
         <!-- CAPSULES KPIS FINANCIERS CENTRÉES -->
-        <div id="caisseKpisPanel" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+        <div id="caisseKpisPanel" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-8 gap-4">
 
             <!-- 1. Encaissé Réel en Caisse -->
             <div class="bg-gradient-to-br from-[#12281a] to-[#0a150e] rounded-3xl p-5 text-white shadow-md border border-brand-neon/30 flex flex-col items-center justify-center text-center">
@@ -1180,6 +2145,18 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
                     <span id="kpiRemboursementsTotal" class="text-xl font-extrabold text-rose-500 font-mono">0.00 DA</span>
                 </div>
                 <span class="text-[10px] text-slate-400">Remboursements de la période</span>
+            </div>
+
+            <!-- Prestations spéciales séparées -->
+            <div class="bg-white dark:bg-[#121c15] rounded-3xl p-5 shadow-sm border border-violet-100 dark:border-violet-500/10 flex flex-col items-center justify-center text-center">
+                <span class="text-[11px] font-bold text-slate-400 mb-1">Produits de contraste encaissés</span>
+                <div class="my-1.5"><span id="kpiProduitsContraste" class="text-xl font-extrabold text-violet-600 dark:text-violet-400 font-mono">0.00 DA</span></div>
+                <span class="text-[10px] text-slate-400">Net des remboursements</span>
+            </div>
+            <div class="bg-white dark:bg-[#121c15] rounded-3xl p-5 shadow-sm border border-cyan-100 dark:border-cyan-500/10 flex flex-col items-center justify-center text-center">
+                <span class="text-[11px] font-bold text-slate-400 mb-1">Sédations encaissées</span>
+                <div class="my-1.5"><span id="kpiSedations" class="text-xl font-extrabold text-cyan-600 dark:text-cyan-400 font-mono">0.00 DA</span></div>
+                <span class="text-[10px] text-slate-400">Net des remboursements</span>
             </div>
 
             <!-- 4. Net Dû -->
@@ -1223,6 +2200,10 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
             <button id="caisse-tab-btn-annules" onclick="switchCaisseTab('annules')" class="caisse-tab-btn flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-all cursor-pointer">
                 <i class="ph-bold ph-x-circle text-base"></i>
                 <span>Paiements Annulés</span>
+            </button>
+            <button id="caisse-tab-btn-rapport-utilisateurs" onclick="switchCaisseTab('rapport-utilisateurs')" class="caisse-tab-btn flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-all cursor-pointer">
+                <i class="ph-bold ph-users-three text-base"></i>
+                <span>Rapport par utilisateur</span>
             </button>
         </div>
 
@@ -1339,6 +2320,33 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
                         </tr>
                     </thead>
                     <tbody id="caisseAnnulesTableBody" class="divide-y divide-slate-100 dark:divide-white/5 font-medium"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ================= RAPPORT COMPLÉMENTAIRE PAR UTILISATEUR ================= -->
+        <div id="caisse-tab-content-rapport-utilisateurs" class="caisse-tab-content hidden bg-white dark:bg-[#121c15] rounded-3xl p-6 shadow-sm border border-slate-100 dark:border-white/5 space-y-4">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-white/5 pb-3">
+                <div>
+                    <h3 class="text-sm font-bold text-slate-800 dark:text-white">Rapport de caisse par utilisateur</h3>
+                    <p class="text-[11px] text-slate-400">Synthèse des encaissements et remboursements enregistrés par chaque opérateur sur la période filtrée.</p>
+                </div>
+                <span id="caisseReportUserPeriod" class="text-[10px] font-bold text-slate-500 dark:text-slate-400"></span>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-xs">
+                    <thead>
+                        <tr class="text-slate-400 font-semibold border-b border-slate-100 dark:border-white/5">
+                            <th class="py-3 pl-2">Utilisateur / Caissier</th>
+                            <th class="py-3 text-center">Nombre de mouvements</th>
+                            <th class="py-3 text-right">Encaissements</th>
+                            <th class="py-3 text-right">Remboursements</th>
+                            <th class="py-3 text-right">Net en caisse</th>
+                            <th class="py-3 pr-2 text-right">Détail</th>
+                        </tr>
+                    </thead>
+                    <tbody id="caisseReportUserTableBody" class="divide-y divide-slate-100 dark:divide-white/5 font-medium"></tbody>
+                    <tfoot id="caisseReportUserTableFoot" class="border-t-2 border-slate-200 dark:border-white/10 font-extrabold"></tfoot>
                 </table>
             </div>
         </div>
@@ -1546,6 +2554,94 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
         </div>
     </div>
 
+    <!-- ================= MODALE RAPPORT UTILISATEUR PDF INTÉGRÉE ================= -->
+    <div id="caisseUserReportPdfModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center hidden z-[115] p-2 sm:p-4">
+        <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-5xl h-[95vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
+            <div class="px-5 py-3 border-b border-slate-100 dark:border-white/5 flex justify-between items-center bg-slate-50 dark:bg-black/20 flex-shrink-0">
+                <h3 class="text-xs font-bold text-slate-800 dark:text-white flex items-center gap-1.5">
+                    <i class="ph-bold ph-file-pdf text-brand-neon"></i>
+                    <span id="caisseUserReportPdfTitle">Rapport détaillé de caisse</span>
+                </h3>
+                <div class="flex items-center space-x-2">
+                    <button type="button" onclick="printCaisseUserReportPdfIframe()" class="px-3.5 py-1.5 rounded-xl bg-brand-neon text-black text-xs font-bold shadow-sm inline-flex items-center gap-1 cursor-pointer"><i class="ph-bold ph-printer"></i><span>Imprimer / Enregistrer en PDF</span></button>
+                    <button type="button" onclick="closeCaisseUserReportPdf()" class="px-3.5 py-1.5 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-xs font-bold shadow-sm inline-flex items-center gap-1 cursor-pointer"><i class="ph-bold ph-x-circle"></i><span>Fermer</span></button>
+                </div>
+            </div>
+            <div class="p-2 overflow-y-auto bg-slate-200 dark:bg-black/60 flex justify-center flex-1">
+                <iframe id="caisseUserReportPdfIframe" src="about:blank" title="Rapport PDF par utilisateur" class="w-full h-full rounded-2xl border-none shadow-md bg-white"></iframe>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= MODALE FACTURE PATIENT ================= -->
+    <div id="caisseInvoicePdfModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center hidden z-[9999] p-2 sm:p-4" style="z-index:99999">
+        <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-5xl h-[95vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
+            <div class="px-5 py-3 border-b border-slate-100 dark:border-white/5 flex justify-between items-center bg-slate-50 dark:bg-black/20 flex-shrink-0">
+                <h3 class="text-xs font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                    <i class="ph-bold ph-file-text text-emerald-600"></i>
+                    <span id="caisseInvoicePdfTitle">Facture patient</span>
+                </h3>
+                <div class="flex items-center gap-2">
+                    <button type="button" id="caisseInvoiceValidateButton" onclick="validateCaisseInvoice()" class="px-3.5 py-1.5 rounded-xl text-white text-xs font-bold shadow-sm inline-flex items-center gap-1.5 cursor-pointer hover:brightness-110" style="background-color:#15803d;color:#ffffff;border:1px solid #166534"><i class="ph-bold ph-check-circle text-base" aria-hidden="true"></i><span>Valider la facture</span></button>
+                    <button type="button" id="caisseInvoiceDownloadButton" onclick="downloadCaisseInvoicePdf()" class="hidden px-3.5 py-1.5 rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold shadow-sm inline-flex items-center gap-1.5 cursor-pointer"><i class="ph-bold ph-download-simple"></i><span>Télécharger</span></button>
+                    <button type="button" id="caisseInvoicePrintButton" onclick="printCaisseInvoicePdfIframe()" class="hidden px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm inline-flex items-center gap-1.5 cursor-pointer"><i class="ph-bold ph-printer"></i><span>Imprimer</span></button>
+                    <button type="button" onclick="closeCaisseInvoicePdf()" class="px-3.5 py-1.5 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-xs font-bold shadow-sm inline-flex items-center gap-1.5 cursor-pointer"><i class="ph-bold ph-x-circle"></i><span>Fermer</span></button>
+                </div>
+            </div>
+            <div class="p-2 overflow-y-auto bg-slate-200 dark:bg-black/60 flex justify-center flex-1">
+                <iframe id="caisseInvoicePdfIframe" src="about:blank" title="Facture patient PDF" class="w-full h-full rounded-2xl border-none shadow-md bg-white"></iframe>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= REGISTRE DES FACTURES VALIDÉES ================= -->
+    <div id="caisseInvoiceRegisterModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center hidden z-[117] p-2 sm:p-4">
+        <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-6xl max-h-[95vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
+            <div class="px-5 py-4 border-b border-slate-100 dark:border-white/5 flex justify-between items-center bg-slate-50 dark:bg-black/20 flex-shrink-0">
+                <h3 class="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2"><i class="ph-bold ph-files text-emerald-600"></i>Registre des factures</h3>
+                <button type="button" onclick="closeCaisseInvoiceRegister()" class="px-3 py-1.5 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-xs font-bold inline-flex items-center gap-1"><i class="ph-bold ph-x"></i>Fermer</button>
+            </div>
+            <div class="p-4 sm:p-5 space-y-4 overflow-y-auto">
+                <form id="caisseInvoiceRegisterFilters" onsubmit="event.preventDefault(); loadCaisseInvoiceRegister();" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 p-4 rounded-2xl bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-white/10">
+                    <label class="text-[11px] font-bold text-slate-600 dark:text-slate-300">Du<input id="caisseInvoiceDateStart" type="date" class="mt-1 w-full p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-black/30 text-xs"></label>
+                    <label class="text-[11px] font-bold text-slate-600 dark:text-slate-300">Au<input id="caisseInvoiceDateEnd" type="date" class="mt-1 w-full p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-black/30 text-xs"></label>
+                    <label class="text-[11px] font-bold text-slate-600 dark:text-slate-300">Patient ou facture<input id="caisseInvoiceSearch" type="search" placeholder="Nom, passage, n° facture" class="mt-1 w-full p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-black/30 text-xs"></label>
+                    <label class="text-[11px] font-bold text-slate-600 dark:text-slate-300">Utilisateur<input id="caisseInvoiceUserSearch" type="search" placeholder="Tous les utilisateurs" class="mt-1 w-full p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-black/30 text-xs"></label>
+                    <button type="submit" class="self-end w-full h-[38px] px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 leading-none"><i class="ph-bold ph-funnel"></i>Recherche de facture</button>
+                </form>
+                <div id="caisseInvoiceRegisterSummary" class="text-xs font-semibold text-slate-500 dark:text-slate-400"></div>
+                <div class="overflow-x-auto rounded-2xl border border-slate-200 dark:border-white/10">
+                    <table class="w-full min-w-[760px] text-left text-xs">
+                        <thead class="bg-slate-100 dark:bg-black/30 text-slate-600 dark:text-slate-300 uppercase tracking-wide"><tr><th class="p-3">Date / heure</th><th class="p-3">N° facture</th><th class="p-3">Statut</th><th class="p-3">Utilisateur</th><th class="p-3">Patient</th><th class="p-3 text-right">Total TTC</th><th class="p-3 text-center">Actions</th></tr></thead>
+                        <tbody id="caisseInvoiceRegisterRows" class="divide-y divide-slate-100 dark:divide-white/5"><tr><td colspan="7" class="p-6 text-center text-slate-400">Choisissez une période puis filtrez.</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="caisseInvoiceCancelModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center hidden z-[10000] p-4" style="z-index:100000">
+        <div class="w-full max-w-lg rounded-3xl bg-white dark:bg-[#121c15] shadow-2xl border border-rose-200 dark:border-rose-900/40 overflow-hidden">
+            <div class="px-5 py-4 flex items-center justify-between bg-rose-50 dark:bg-rose-950/30 border-b border-rose-100 dark:border-rose-900/40">
+                <h3 class="font-bold text-slate-800 dark:text-white flex items-center gap-2"><i class="ph-bold ph-prohibit text-rose-600 text-lg"></i>Annuler la facture</h3>
+                <button type="button" onclick="closeCaisseInvoiceCancelModal()" class="text-slate-400 hover:text-rose-600"><i class="ph-bold ph-x text-lg"></i></button>
+            </div>
+            <form onsubmit="submitCaisseInvoiceCancellation(event)" class="p-5 space-y-4">
+                <input type="hidden" id="caisseInvoiceCancelId">
+                <div class="rounded-2xl bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-white/10 p-3 text-xs space-y-1">
+                    <div><span class="text-slate-500">Facture :</span> <strong id="caisseInvoiceCancelNumber"></strong></div>
+                    <div><span class="text-slate-500">Patient :</span> <strong id="caisseInvoiceCancelPatient"></strong></div>
+                </div>
+                <p class="text-xs text-rose-700 dark:text-rose-300">La facture ne sera pas supprimée. Elle sera marquée comme annulée et un avoir sera conservé dans le registre.</p>
+                <label class="block text-xs font-bold text-slate-700 dark:text-slate-200">Motif obligatoire<textarea id="caisseInvoiceCancelReason" required minlength="4" maxlength="500" rows="3" class="mt-1 w-full p-3 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-black/30 text-sm outline-none focus:ring-2 focus:ring-rose-400" placeholder="Expliquez la raison de l’annulation"></textarea></label>
+                <div class="flex justify-end gap-2 pt-2">
+                    <button type="button" onclick="closeCaisseInvoiceCancelModal()" class="px-4 py-2 rounded-xl text-slate-500 bg-slate-100 dark:bg-white/5 text-xs font-bold">Retour</button>
+                    <button id="caisseInvoiceCancelSubmit" type="submit" class="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold inline-flex items-center gap-2"><i class="ph-bold ph-prohibit"></i>Confirmer l’annulation</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- MODALE TICKET 80MM -->
     <div id="caisseReceiptModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center hidden z-[110] p-4">
         <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-md max-h-[96vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
@@ -1578,6 +2674,9 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
             function applyCaissePermissions() {{
                 const setVisible = (id, visible) => document.getElementById(id)?.classList.toggle('hidden', !visible);
                 setVisible('caissePvButton', caisseAccess.cash_reports);
+                setVisible('caisseDailyJournalButton', caisseAccess.cash_reports);
+                setVisible('caisseGuardJournalButton', caisseAccess.cash_reports);
+                setVisible('caisseInvoiceRegisterButton', caisseAccess.cash_reports || caisseAccess.cash_collect || caisseAccess.cash_collect_rest || caisseAccess.cash_refund);
                 setVisible('caisseFiltersPanel', caisseAccess.cash_reports);
                 setVisible('caisseKpisPanel', caisseAccess.cash_reports);
                 setVisible('caisse-tab-btn-journal', caisseAccess.cash_reports);
@@ -1590,6 +2689,8 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
                 setVisible('caisse-tab-content-remises', caisseAccess.cash_reports || caisseAccess.cash_remise);
                 setVisible('caisse-tab-btn-annules', caisseAccess.cash_reports || caisseAccess.cash_refund);
                 setVisible('caisse-tab-content-annules', caisseAccess.cash_reports || caisseAccess.cash_refund);
+                setVisible('caisse-tab-btn-rapport-utilisateurs', caisseAccess.cash_reports);
+                setVisible('caisse-tab-content-rapport-utilisateurs', caisseAccess.cash_reports);
                 setVisible('caisseRemiseFields', caisseAccess.cash_remise);
                 if (caisseAccess.cash_reports) {{
                     switchCaisseTab('journal');
@@ -1634,6 +2735,7 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
                     renderImpayesTable(data.impayes || []);
                     renderRemisesTable(data.remises || []);
                     renderAnnulesTable(data.annules || []);
+                    renderCaisseUserReport(data.journal || []);
 
                     const badgeNP = document.getElementById('badgeNonPayesCount');
                     if (badgeNP) badgeNP.innerText = (data.non_payes || []).length;
@@ -1666,6 +2768,8 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
                 document.getElementById('kpiCaBrut').innerText = f(kpis.ca_brut);
                 document.getElementById('kpiRemisesTotal').innerText = '-' + f(kpis.remises_total);
                 document.getElementById('kpiRemboursementsTotal').innerText = f(kpis.remboursements_total);
+                document.getElementById('kpiProduitsContraste').innerText = f(kpis.produits_contraste_total);
+                document.getElementById('kpiSedations').innerText = f(kpis.sedations_total);
                 document.getElementById('kpiNetDu').innerText = f(kpis.net_du);
                 document.getElementById('kpiRestesTotal').innerText = f(kpis.restes_total);
 
@@ -1733,6 +2837,7 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
                         <td class="py-3 pr-2 text-right">
                             <div class="inline-flex items-center gap-1.5">
                                 ${{(caisseAccess.cash_collect || caisseAccess.cash_collect_rest) ? `<button type="button" onclick="openCaisseMovementReceiptModal(${{j.id_mouvement}})" title="Ticket de ce mouvement" class="p-1.5 rounded-lg bg-slate-100 dark:bg-black/30 text-slate-700 dark:text-slate-300 hover:text-brand-neon"><i class="ph-bold ph-receipt text-sm"></i></button>` : ''}}
+                                ${{(caisseAccess.cash_reports || caisseAccess.cash_collect || caisseAccess.cash_collect_rest) && isEntree && mVal > 0 ? `<button type="button" onclick="openCaisseInvoicePdf(Number(this.dataset.passage), this.dataset.patient)" data-passage="${{Number(j.id_passage)}}" data-patient="${{escapeCaisseHtml(`${{j.nom || ''}} ${{j.prenom || ''}}`.trim())}}" title="Générer la facture du passage" class="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-700 hover:bg-emerald-600 hover:text-white transition"><i class="ph-bold ph-file-text text-sm"></i></button>` : ''}}
                                 ${{caisseAccess.cash_refund && isEntree && mVal > 0 ? `
                                 <button type="button" onclick="openAnnulerPaiementModal(Number(this.dataset.id), this.dataset.patient, Number(this.dataset.amount))" data-id="${{Number(j.id_passage)}}" data-patient="${{escapeCaisseHtml(`${{j.nom || ''}} ${{j.prenom || ''}}`.trim())}}" data-amount="${{mVal}}" title="Annuler le paiement / Rembourser" class="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500 text-rose-500 hover:text-white transition">
                                     <i class="ph-bold ph-arrow-u-up-left text-sm"></i>
@@ -1742,6 +2847,59 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
                         </td>
                     `;
                     tbody.appendChild(tr);
+                }});
+            }}
+
+            function renderCaisseUserReport(items) {{
+                const tbody = document.getElementById('caisseReportUserTableBody');
+                const tfoot = document.getElementById('caisseReportUserTableFoot');
+                const period = document.getElementById('caisseReportUserPeriod');
+                if (!tbody || !tfoot) return;
+                const startDate = document.getElementById('caisseDateDebut')?.value || '';
+                const endDate = document.getElementById('caisseDateFin')?.value || '';
+                const selectedOperator = document.getElementById('caisseFilterOperateur')?.value || 'TOUS';
+                if (period) period.textContent = `${{startDate}} → ${{endDate}}${{selectedOperator !== 'TOUS' ? ` · @${{selectedOperator}}` : ''}}`;
+
+                const operators = new Map();
+                (items || []).forEach(movement => {{
+                    const operator = String(movement.operateur_mouvement || movement.utilisateur || '').trim() || 'Utilisateur non renseigné';
+                    const amount = Number(movement.montant_mouvement || 0);
+                    const entry = operators.get(operator) || {{ count: 0, incoming: 0, refunds: 0, net: 0, movements: [] }};
+                    entry.count += 1;
+                    if (amount > 0) entry.incoming += amount;
+                    if (amount < 0) entry.refunds += Math.abs(amount);
+                    entry.net += amount;
+                    entry.movements.push(movement);
+                    operators.set(operator, entry);
+                }});
+
+                const rows = [...operators.entries()].sort((a, b) => a[0].localeCompare(b[0], 'fr'));
+                if (!rows.length) {{
+                    tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-slate-400">Aucun mouvement de caisse pour cette période et ces filtres.</td></tr>';
+                    tfoot.innerHTML = '';
+                    return;
+                }}
+                const money = value => `${{Number(value || 0).toLocaleString('fr-FR', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }})}} DA`;
+                const totals = rows.reduce((sum, [, entry]) => ({{
+                    count: sum.count + entry.count,
+                    incoming: sum.incoming + entry.incoming,
+                    refunds: sum.refunds + entry.refunds,
+                    net: sum.net + entry.net
+                }}), {{ count: 0, incoming: 0, refunds: 0, net: 0 }});
+
+                tbody.innerHTML = rows.map(([operator, entry]) => `
+                    <tr class="hover:bg-slate-50/80 dark:hover:bg-white/[0.02]">
+                        <td class="py-3 pl-2 font-mono font-bold text-slate-800 dark:text-slate-100">@${{escapeCaisseHtml(operator)}}</td>
+                        <td class="py-3 text-center">${{entry.count}}</td>
+                        <td class="py-3 text-right font-mono font-bold text-emerald-700 dark:text-brand-neon">${{money(entry.incoming)}}</td>
+                        <td class="py-3 text-right font-mono font-bold text-rose-500">-${{money(entry.refunds)}}</td>
+                        <td class="py-3 text-right font-mono font-black ${{entry.net >= 0 ? 'text-emerald-700 dark:text-brand-neon' : 'text-rose-500'}}">${{money(entry.net)}}</td>
+                        <td class="py-3 pr-2 text-right"><button type="button" data-caisse-user="${{escapeCaisseHtml(operator)}}" data-report-type="complet" class="caisse-user-report-open inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-brand-neon text-white dark:text-black text-[10px] font-bold hover:opacity-90"><i class="ph-bold ph-file-pdf"></i>Rapport PDF</button></td>
+                    </tr>
+                `).join('');
+                tfoot.innerHTML = `<tr class="bg-slate-50 dark:bg-black/20"><td class="py-3 pl-2">Total période</td><td class="py-3 text-center">${{totals.count}}</td><td class="py-3 text-right font-mono">${{money(totals.incoming)}}</td><td class="py-3 text-right font-mono text-rose-500">-${{money(totals.refunds)}}</td><td class="py-3 text-right font-mono">${{money(totals.net)}}</td><td></td></tr>`;
+                tbody.querySelectorAll('.caisse-user-report-open').forEach(button => {{
+                    button.addEventListener('click', () => window.openCaisseUserReportPdf(button.dataset.caisseUser || '', button.dataset.reportType || 'jour'));
                 }});
             }}
 
@@ -2092,6 +3250,287 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
 
             window.printCloturePvIframe = function() {{
                 const iframe = document.getElementById('cloturePvIframe');
+                if (iframe && iframe.contentWindow) {{
+                    iframe.contentWindow.focus();
+                    iframe.contentWindow.print();
+                }}
+            }};
+
+            window.openCaisseUserReportPdf = function(operator, reportType = 'jour') {{
+                const modal = document.getElementById('caisseUserReportPdfModal');
+                const iframe = document.getElementById('caisseUserReportPdfIframe');
+                const title = document.getElementById('caisseUserReportPdfTitle');
+                if (!modal || !iframe || !operator) return;
+                const query = new URLSearchParams({{
+                    operateur: operator,
+                    type_rapport: reportType,
+                    date_debut: document.getElementById('caisseDateDebut')?.value || '',
+                    date_fin: document.getElementById('caisseDateFin')?.value || '',
+                    mode_paiement: document.getElementById('caisseFilterMode')?.value || 'TOUS',
+                    statut_paiement: document.getElementById('caisseFilterStatut')?.value || 'TOUS'
+                }});
+                const reportLabel = reportType === 'garde' ? 'Journal de garde' : (reportType === 'jour' ? 'Journal du jour' : 'Rapport détaillé');
+                const operatorLabel = operator === 'TOUS' ? 'Tous les caissiers' : `@${{operator}}`;
+                if (title) title.textContent = `${{reportLabel}} — ${{operatorLabel}}`;
+                iframe.src = '/api/finance/rapport-utilisateur/pdf?' + query.toString();
+                modal.classList.remove('hidden');
+            }};
+
+            window.closeCaisseUserReportPdf = function() {{
+                const modal = document.getElementById('caisseUserReportPdfModal');
+                const iframe = document.getElementById('caisseUserReportPdfIframe');
+                if (iframe) iframe.src = 'about:blank';
+                if (modal) modal.classList.add('hidden');
+            }};
+
+            let currentCaisseInvoicePassageId = null;
+            let currentCaisseRegisteredInvoiceId = null;
+            let currentCaisseInvoiceDocumentType = 'facture';
+            let caisseInvoiceReturnToRegister = false;
+            const setCaisseInvoiceActions = (validated, cancelled = false, isAvoir = false) => {{
+                const pending = validated === null;
+                const validateButton = document.getElementById('caisseInvoiceValidateButton');
+                if (validateButton) {{
+                    validateButton.classList.toggle('hidden', pending);
+                    validateButton.disabled = Boolean(validated) || pending || cancelled;
+                    validateButton.style.backgroundColor = validated || cancelled ? '#64748b' : '#15803d';
+                    validateButton.style.borderColor = validated || cancelled ? '#475569' : '#166534';
+                    validateButton.innerHTML = validated
+                        ? `<i class="ph-bold ph-check-circle text-base" aria-hidden="true"></i><span>${{isAvoir ? 'Avoir d’annulation' : (cancelled ? 'Facture annulée' : 'Facture déjà validée')}}</span>`
+                        : '<i class="ph-bold ph-check-circle text-base" aria-hidden="true"></i><span>Valider la facture</span>';
+                    validateButton.title = validated || cancelled ? 'Cette facture est déjà validée et ne peut pas être validée une seconde fois.' : '';
+                }}
+                document.getElementById('caisseInvoicePrintButton')?.classList.toggle('hidden', !validated || pending || (cancelled && !isAvoir));
+                document.getElementById('caisseInvoiceDownloadButton')?.classList.toggle('hidden', !validated || pending || (cancelled && !isAvoir));
+            }};
+
+            window.openCaisseInvoicePdf = async function(passageId, patientName = '') {{
+                const modal = document.getElementById('caisseInvoicePdfModal');
+                const iframe = document.getElementById('caisseInvoicePdfIframe');
+                const title = document.getElementById('caisseInvoicePdfTitle');
+                if (!modal || !iframe || !passageId) return;
+                caisseInvoiceReturnToRegister = false;
+                currentCaisseInvoicePassageId = Number(passageId);
+                currentCaisseRegisteredInvoiceId = null;
+                currentCaisseInvoiceDocumentType = 'facture';
+                setCaisseInvoiceActions(null);
+                if (title) title.textContent = `Facture — ${{patientName || `Passage #${{passageId}}`}}`;
+                modal.classList.remove('hidden');
+                try {{
+                    const response = await fetch('/api/finance/factures/' + encodeURIComponent(passageId) + '/status', {{ cache: 'no-store' }});
+                    const state = await response.json();
+                    if (!response.ok || !state.success) throw new Error(state.detail || 'Impossible de vérifier la facture.');
+                    const cancelled = String(state.statut || '').toUpperCase() === 'ANNULEE';
+                    setCaisseInvoiceActions(Boolean(state.validated), cancelled);
+                    if (state.validated && title) title.textContent = `${{cancelled ? 'Facture annulée' : 'Facture'}} ${{state.numero_facture || ''}} — ${{patientName || `Passage #${{passageId}}`}}`;
+                    iframe.src = '/api/finance/factures/' + encodeURIComponent(passageId) + '/pdf?v=' + Date.now() + '#toolbar=0&navpanes=0';
+                }} catch (error) {{
+                    iframe.src = 'about:blank';
+                    if (typeof showToast === 'function') showToast(error.message || 'Erreur de chargement de la facture.', 'error');
+                    else alert(error.message || 'Erreur de chargement de la facture.');
+                    modal.classList.add('hidden');
+                }}
+            }};
+
+            window.validateCaisseInvoice = async function() {{
+                if (!currentCaisseInvoicePassageId) return;
+                const button = document.getElementById('caisseInvoiceValidateButton');
+                if (button) {{ button.disabled = true; button.classList.add('opacity-60'); }}
+                try {{
+                    const response = await fetch('/api/finance/factures/' + encodeURIComponent(currentCaisseInvoicePassageId) + '/valider', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: '{{}}' }});
+                    const result = await response.json();
+                    if (!response.ok || !result.success) throw new Error(result.detail || 'La validation de la facture a échoué.');
+                    setCaisseInvoiceActions(true);
+                    const title = document.getElementById('caisseInvoicePdfTitle');
+                    if (title) title.textContent = `Facture ${{result.numero_facture || ''}}`;
+                    const iframe = document.getElementById('caisseInvoicePdfIframe');
+                    if (iframe) iframe.src = '/api/finance/factures/' + encodeURIComponent(currentCaisseInvoicePassageId) + '/pdf?v=' + Date.now() + '#toolbar=0&navpanes=0';
+                    if (typeof showToast === 'function') showToast('Facture validée et enregistrée. Vous pouvez maintenant l’imprimer.', 'success');
+                }} catch (error) {{
+                    if (typeof showToast === 'function') showToast(error.message || 'Erreur de validation.', 'error');
+                    else alert(error.message || 'Erreur de validation.');
+                }} finally {{
+                    if (button) {{ button.disabled = false; button.classList.remove('opacity-60'); }}
+                }}
+            }};
+
+            window.openCaisseInvoiceRegister = function() {{
+                const modal = document.getElementById('caisseInvoiceRegisterModal');
+                if (!modal) return;
+                const today = new Date();
+                const localDate = new Date(today.getTime() - today.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+                const start = document.getElementById('caisseInvoiceDateStart');
+                const end = document.getElementById('caisseInvoiceDateEnd');
+                if (start && !start.value) start.value = localDate;
+                if (end && !end.value) end.value = localDate;
+                modal.classList.remove('hidden');
+                loadCaisseInvoiceRegister();
+            }};
+
+            window.closeCaisseInvoiceRegister = function() {{
+                document.getElementById('caisseInvoiceRegisterModal')?.classList.add('hidden');
+            }};
+
+            window.loadCaisseInvoiceRegister = async function() {{
+                const rows = document.getElementById('caisseInvoiceRegisterRows');
+                const summary = document.getElementById('caisseInvoiceRegisterSummary');
+                if (!rows) return;
+                rows.innerHTML = '<tr><td colspan="7" class="p-6 text-center text-slate-400">Chargement des factures…</td></tr>';
+                const query = new URLSearchParams({{
+                    date_debut: document.getElementById('caisseInvoiceDateStart')?.value || '',
+                    date_fin: document.getElementById('caisseInvoiceDateEnd')?.value || '',
+                    recherche: document.getElementById('caisseInvoiceSearch')?.value || '',
+                    utilisateur: document.getElementById('caisseInvoiceUserSearch')?.value || ''
+                }});
+                try {{
+                    const response = await fetch('/api/finance/factures/registre?' + query.toString(), {{ cache: 'no-store' }});
+                    const result = await response.json();
+                    if (!response.ok || !result.success) throw new Error(result.detail || 'Impossible de charger le registre.');
+                    const invoices = result.factures || [];
+                    const activeInvoices = invoices.filter(invoice => String(invoice.statut || 'VALIDEE').toUpperCase() !== 'ANNULEE');
+                    const total = activeInvoices.reduce((sum, invoice) => sum + Number(invoice.montant_ttc || 0), 0);
+                    if (summary) summary.textContent = `${{invoices.length}} facture(s) · ${{invoices.length - activeInvoices.length}} annulée(s) · Total TTC valide : ${{total.toLocaleString('fr-FR', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }})}} DA`;
+                    if (!invoices.length) {{
+                        rows.innerHTML = '<tr><td colspan="7" class="p-8 text-center text-slate-400"><i class="ph-bold ph-file-x text-2xl block mb-2"></i>Aucune facture validée pour ces filtres.</td></tr>';
+                        return;
+                    }}
+                    rows.innerHTML = invoices.map(invoice => {{
+                        const cancelled = String(invoice.statut || 'VALIDEE').toUpperCase() === 'ANNULEE';
+                        const statusCell = cancelled
+                            ? `<span title="${{escapeCaisseHtml(invoice.motif_annulation || '')}}" class="inline-flex rounded-full px-2 py-1 bg-rose-100 text-rose-700 font-bold">Annulée</span><span class="block mt-1 text-[10px] text-slate-400">Avoir ${{escapeCaisseHtml(invoice.numero_avoir || '')}}</span>`
+                            : '<span class="inline-flex rounded-full px-2 py-1 bg-emerald-100 text-emerald-700 font-bold">Validée</span>';
+                        const viewButton = `<button type="button" onclick="openCaisseRegisteredInvoice(Number(this.dataset.id), this.dataset.number, this.dataset.patient, this.dataset.status)" data-id="${{Number(invoice.id)}}" data-number="${{escapeCaisseHtml(invoice.numero_facture)}}" data-patient="${{escapeCaisseHtml(invoice.patient_nom || '')}}" data-status="${{cancelled ? 'ANNULEE' : 'VALIDEE'}}" class="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold inline-flex items-center gap-1"><i class="ph-bold ph-eye"></i>Voir</button>`;
+                        let otherActions = '';
+                        if (cancelled) {{
+                            otherActions = `<button type="button" onclick="openCaisseInvoiceAvoir(Number(this.dataset.id), this.dataset.number, this.dataset.patient)" data-id="${{Number(invoice.id)}}" data-number="${{escapeCaisseHtml(invoice.numero_avoir || '')}}" data-patient="${{escapeCaisseHtml(invoice.patient_nom || '')}}" class="px-2.5 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-bold inline-flex items-center gap-1"><i class="ph-bold ph-file-pdf"></i>Avoir</button>`;
+                        }} else if (caisseAccess.cash_refund) {{
+                            otherActions = `<button type="button" onclick="openCaisseInvoiceCancelModal(Number(this.dataset.id), this.dataset.number, this.dataset.patient)" data-id="${{Number(invoice.id)}}" data-number="${{escapeCaisseHtml(invoice.numero_facture)}}" data-patient="${{escapeCaisseHtml(invoice.patient_nom || '')}}" class="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-700 hover:text-white border border-rose-200 font-bold inline-flex items-center gap-1"><i class="ph-bold ph-prohibit"></i>Annuler</button>`;
+                        }}
+                        return `<tr class="hover:bg-emerald-50/60 dark:hover:bg-white/5">
+                        <td class="p-3 whitespace-nowrap">${{escapeCaisseHtml(invoice.date_generation)}}</td>
+                        <td class="p-3 font-mono font-bold text-emerald-700 dark:text-emerald-400">${{escapeCaisseHtml(invoice.numero_facture)}}</td>
+                        <td class="p-3">${{statusCell}}${{cancelled ? `<span class="block mt-1 text-[10px] text-slate-400">${{escapeCaisseHtml(invoice.date_annulation || '')}} · @${{escapeCaisseHtml(invoice.utilisateur_annulation || '')}}</span>` : ''}}</td>
+                        <td class="p-3">@${{escapeCaisseHtml(invoice.utilisateur || '—')}}</td>
+                        <td class="p-3 font-semibold">${{escapeCaisseHtml(invoice.patient_nom || '—')}} <span class="block text-[10px] text-slate-400">Passage #${{Number(invoice.id_passage)}}</span></td>
+                        <td class="p-3 text-right font-mono font-bold">${{Number(invoice.montant_ttc || 0).toLocaleString('fr-FR', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }})}} DA</td>
+                        <td class="p-3 text-center"><div class="flex flex-wrap justify-center gap-1.5">${{viewButton}}${{otherActions}}</div></td>
+                    </tr>`;
+                    }}).join('');
+                }} catch (error) {{
+                    rows.innerHTML = `<tr><td colspan="7" class="p-6 text-center text-rose-500">${{escapeCaisseHtml(error.message || 'Erreur de chargement.')}}</td></tr>`;
+                }}
+            }};
+
+            window.openCaisseRegisteredInvoice = function(invoiceId, invoiceNumber, patientName = '', invoiceStatus = 'VALIDEE') {{
+                const modal = document.getElementById('caisseInvoicePdfModal');
+                const iframe = document.getElementById('caisseInvoicePdfIframe');
+                const title = document.getElementById('caisseInvoicePdfTitle');
+                if (!modal || !iframe || !invoiceId) return;
+                caisseInvoiceReturnToRegister = true;
+                currentCaisseInvoicePassageId = null;
+                currentCaisseRegisteredInvoiceId = Number(invoiceId);
+                currentCaisseInvoiceDocumentType = 'facture';
+                const cancelled = String(invoiceStatus || '').toUpperCase() === 'ANNULEE';
+                setCaisseInvoiceActions(true, cancelled);
+                if (title) title.textContent = `${{cancelled ? 'Facture annulée' : 'Facture'}} ${{invoiceNumber || ''}} — ${{patientName || 'Patient'}}`;
+                iframe.src = '/api/finance/factures/registre/' + encodeURIComponent(invoiceId) + '/pdf?v=' + Date.now() + (cancelled ? '#toolbar=0&navpanes=0' : '');
+                document.getElementById('caisseInvoiceRegisterModal')?.classList.add('hidden');
+                modal.classList.remove('hidden');
+            }};
+
+            window.openCaisseInvoiceAvoir = function(invoiceId, avoirNumber, patientName = '') {{
+                const modal = document.getElementById('caisseInvoicePdfModal');
+                const iframe = document.getElementById('caisseInvoicePdfIframe');
+                const title = document.getElementById('caisseInvoicePdfTitle');
+                if (!modal || !iframe || !invoiceId) return;
+                caisseInvoiceReturnToRegister = true;
+                currentCaisseInvoicePassageId = null;
+                currentCaisseRegisteredInvoiceId = Number(invoiceId);
+                currentCaisseInvoiceDocumentType = 'avoir';
+                setCaisseInvoiceActions(true, true, true);
+                if (title) title.textContent = `Avoir ${{avoirNumber || ''}} — ${{patientName || 'Patient'}}`;
+                iframe.src = '/api/finance/factures/registre/' + encodeURIComponent(invoiceId) + '/avoir.pdf?v=' + Date.now();
+                document.getElementById('caisseInvoiceRegisterModal')?.classList.add('hidden');
+                modal.classList.remove('hidden');
+            }};
+
+            window.openCaisseInvoiceCancelModal = function(invoiceId, invoiceNumber, patientName) {{
+                document.getElementById('caisseInvoiceCancelId').value = invoiceId;
+                document.getElementById('caisseInvoiceCancelNumber').textContent = invoiceNumber || '';
+                document.getElementById('caisseInvoiceCancelPatient').textContent = patientName || '';
+                document.getElementById('caisseInvoiceCancelReason').value = '';
+                document.getElementById('caisseInvoiceCancelModal').classList.remove('hidden');
+            }};
+
+            window.closeCaisseInvoiceCancelModal = function() {{
+                document.getElementById('caisseInvoiceCancelModal')?.classList.add('hidden');
+            }};
+
+            window.submitCaisseInvoiceCancellation = async function(event) {{
+                event.preventDefault();
+                const invoiceId = Number(document.getElementById('caisseInvoiceCancelId')?.value);
+                const reason = document.getElementById('caisseInvoiceCancelReason')?.value?.trim() || '';
+                const button = document.getElementById('caisseInvoiceCancelSubmit');
+                if (!invoiceId || reason.length < 4) return;
+                if (button) {{ button.disabled = true; button.classList.add('opacity-60'); }}
+                try {{
+                    const response = await fetch('/api/finance/factures/registre/' + encodeURIComponent(invoiceId) + '/annuler', {{
+                        method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ motif: reason }})
+                    }});
+                    const result = await response.json();
+                    if (!response.ok || !result.success) throw new Error(result.detail || 'L’annulation de la facture a échoué.');
+                    closeCaisseInvoiceCancelModal();
+                    await loadCaisseInvoiceRegister();
+                    if (typeof showToast === 'function') showToast(`Facture annulée. Avoir ${{result.numero_avoir}} créé et conservé au registre.`, 'success');
+                }} catch (error) {{
+                    if (typeof showToast === 'function') showToast(error.message || 'Erreur lors de l’annulation.', 'error');
+                    else alert(error.message || 'Erreur lors de l’annulation.');
+                }} finally {{
+                    if (button) {{ button.disabled = false; button.classList.remove('opacity-60'); }}
+                }}
+            }};
+
+            window.closeCaisseInvoicePdf = function() {{
+                const modal = document.getElementById('caisseInvoicePdfModal');
+                const iframe = document.getElementById('caisseInvoicePdfIframe');
+                if (iframe) iframe.src = 'about:blank';
+                currentCaisseInvoicePassageId = null;
+                currentCaisseRegisteredInvoiceId = null;
+                currentCaisseInvoiceDocumentType = 'facture';
+                if (modal) modal.classList.add('hidden');
+                if (caisseInvoiceReturnToRegister) {{
+                    document.getElementById('caisseInvoiceRegisterModal')?.classList.remove('hidden');
+                    caisseInvoiceReturnToRegister = false;
+                }}
+            }};
+
+            window.downloadCaisseInvoicePdf = function() {{
+                let url = '';
+                if (currentCaisseInvoicePassageId) {{
+                    url = '/api/finance/factures/' + encodeURIComponent(currentCaisseInvoicePassageId) + '/pdf?download=true';
+                }} else if (currentCaisseRegisteredInvoiceId) {{
+                    const fileType = currentCaisseInvoiceDocumentType === 'avoir' ? 'avoir.pdf' : 'pdf';
+                    url = '/api/finance/factures/registre/' + encodeURIComponent(currentCaisseRegisteredInvoiceId) + '/' + fileType + '?download=true';
+                }}
+                if (!url) return;
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'facture.pdf';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+            }};
+
+            window.printCaisseInvoicePdfIframe = function() {{
+                const iframe = document.getElementById('caisseInvoicePdfIframe');
+                if (iframe && iframe.contentWindow) {{
+                    iframe.contentWindow.focus();
+                    iframe.contentWindow.print();
+                }}
+            }};
+
+            window.printCaisseUserReportPdfIframe = function() {{
+                const iframe = document.getElementById('caisseUserReportPdfIframe');
                 if (iframe && iframe.contentWindow) {{
                     iframe.contentWindow.focus();
                     iframe.contentWindow.print();

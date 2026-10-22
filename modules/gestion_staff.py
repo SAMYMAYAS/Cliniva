@@ -70,7 +70,7 @@ SPECIALITES_MEDICALES: List[str] = [
     "Médecine Physique & Réadaptation",
 ]
 
-AVATAR_PAR_DEFAUT = "https://images.unsplash.com/photo-1622253692010-333f2da6031d?w=120&auto=format&fit=crop&q=80"
+AVATAR_PAR_DEFAUT = "/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80"
 
 
 # ============================================================================

@@ -13,7 +13,7 @@ logger = logging.getLogger("UsersModule")
 
 users_router = APIRouter(prefix="/api/users", tags=["Gestion Utilisateurs"])
 
-AVATAR_DEFAULT = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80"
+AVATAR_DEFAULT = "/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80"
 
 
 # ============================================================================
@@ -60,6 +60,20 @@ class UserManager:
             logger.warning("Impossible de lire ref_specialites : %s", err)
             return []
 
+    def get_available_plannings_rdv(self) -> List[Dict[str, Any]]:
+        """Renvoie les plannings pouvant être attribués individuellement aux utilisateurs."""
+        try:
+            with get_db_cursor() as cursor:
+                cursor.execute("""
+                    SELECT id, specialite, jours_semaine, jour_semaine, heure_debut, heure_fin, actif
+                    FROM appointment_specialty_schedules
+                    ORDER BY specialite, jour_semaine, heure_debut;
+                """)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as err:
+            logger.warning("Impossible de lire les plannings de rendez-vous : %s", err)
+            return []
+
     def get_all_users(self) -> List[Dict[str, Any]]:
         """Récupère l'ensemble des utilisateurs enregistrés avec leurs spécialités."""
         with get_db_cursor() as cursor:
@@ -73,7 +87,8 @@ class UserManager:
                                   status,
                                   avatar,
                                   permissions,
-                                  specialites_autorisees
+                                  specialites_autorisees,
+                                  plannings_rdv_autorises
                            FROM users
                            ORDER BY id DESC;
                            """)
@@ -95,6 +110,13 @@ class UserManager:
                 except Exception:
                     specs = []
 
+            schedules = r["plannings_rdv_autorises"]
+            if isinstance(schedules, str):
+                try:
+                    schedules = json.loads(schedules)
+                except Exception:
+                    schedules = []
+
             users.append({
                 "id": r["id"],
                 "prenom": r["prenom"],
@@ -106,6 +128,7 @@ class UserManager:
                 "avatar": r["avatar"] or AVATAR_DEFAULT,
                 "permissions": perms or {},
                 "specialites_autorisees": specs or [],
+                "plannings_rdv_autorises": schedules,
             })
         return users
 
@@ -131,6 +154,19 @@ class UserManager:
 
         specs = data.get("specialites_autorisees") or []
         specs_json = json.dumps(specs)
+        schedules = data.get("plannings_rdv_autorises") or []
+        try:
+            schedules = sorted({int(value) for value in schedules})
+        except (TypeError, ValueError):
+            return {"success": False, "message": "La sélection des plannings de rendez-vous est invalide."}
+        if any(value < 1 for value in schedules):
+            return {"success": False, "message": "La sélection des plannings de rendez-vous est invalide."}
+        with get_db_cursor() as cursor:
+            if schedules:
+                cursor.execute("SELECT COUNT(*) AS total FROM appointment_specialty_schedules WHERE id=ANY(%s);", (schedules,))
+                if int(cursor.fetchone()["total"]) != len(schedules):
+                    return {"success": False, "message": "Un planning sélectionné n'existe plus."}
+        schedules_json = json.dumps(schedules)
 
         raw_avatar = data.get("avatar") or ""
         avatar_path = self.save_avatar_file(raw_avatar) if raw_avatar else AVATAR_DEFAULT
@@ -153,12 +189,13 @@ class UserManager:
                                     password_hash = %s, \
                                     status        = %s, \
                                     avatar        = %s, \
-                                    permissions   = %s::jsonb, specialites_autorisees = %s::jsonb
+                                    permissions   = %s::jsonb, specialites_autorisees = %s::jsonb,
+                                    plannings_rdv_autorises = %s::jsonb
                                 WHERE id = %s; \
                                 """
                         cursor.execute(query,
                                        (prenom, nom, telephone, role, login, pwd_hash, status, avatar_path, perms_json,
-                                        specs_json, user_id))
+                                        specs_json, schedules_json, user_id))
                     else:
                         query = """
                                 UPDATE users \
@@ -169,22 +206,23 @@ class UserManager:
                                     login       = %s, \
                                     status      = %s, \
                                     avatar      = %s, \
-                                    permissions = %s::jsonb, specialites_autorisees = %s::jsonb
+                                    permissions = %s::jsonb, specialites_autorisees = %s::jsonb,
+                                    plannings_rdv_autorises = %s::jsonb
                                 WHERE id = %s; \
                                 """
                         cursor.execute(query, (prenom, nom, telephone, role, login, status, avatar_path, perms_json,
-                                               specs_json, user_id))
+                                               specs_json, schedules_json, user_id))
                 else:
                     pwd_hash = self.hash_password(password if password else "123456")
                     query = """
                             INSERT INTO users
                             (prenom, nom, telephone, role, login, password_hash, status, avatar, permissions, \
-                             specialites_autorisees)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb); \
+                             specialites_autorisees, plannings_rdv_autorises)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb); \
                             """
                     cursor.execute(query,
                                    (prenom, nom, telephone, role, login, pwd_hash, status, avatar_path, perms_json,
-                                    specs_json))
+                                    specs_json, schedules_json))
 
                 return {"success": True, "message": "Utilisateur, droits et spécialités enregistrés avec succès !"}
 
@@ -220,11 +258,13 @@ async def api_get_users():
         users = user_manager.get_all_users()
         total = user_manager.count()
         specs = user_manager.get_available_specialites()
+        schedules = user_manager.get_available_plannings_rdv()
         return {
             "success": True,
             "users": users,
             "total_count": total,
-            "available_specialites": specs
+            "available_specialites": specs,
+            "available_rdv_schedules": schedules
         }
     except Exception as exc:
         logger.error("Erreur GET /api/users: %s", exc, exc_info=True)
@@ -249,7 +289,7 @@ async def api_delete_user(payload: Dict[str, Any]):
 # ============================================================================
 # RENDU DU COMPOSANT HTML ET DU SCRIPT INTERACTIF
 # ============================================================================
-def render_html() -> str:
+def _render_html() -> str:
     """Génère l'HTML complet avec la sélection multiple des disciplines et spécialités."""
     return """
     <div id="view-users" class="space-y-6">
@@ -313,7 +353,7 @@ def render_html() -> str:
 
     <!-- ================= MODALE UTILISATEUR ================= -->
     <div id="userModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center hidden z-50 p-4">
-        <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-4xl max-h-[94vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
+        <div style="max-width:1180px" class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-h-[94vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
 
             <div class="px-6 py-4 border-b border-slate-100 dark:border-white/5 flex justify-between items-center bg-slate-50/50 dark:bg-black/20">
                 <div class="flex items-center space-x-2">
@@ -334,7 +374,7 @@ def render_html() -> str:
                 <!-- 1. PHOTO DE PROFIL -->
                 <div class="flex items-center space-x-5 bg-brand-neon/10 dark:bg-brand-neon/5 p-4 rounded-2xl border border-brand-neon/20">
                     <div class="relative group shrink-0">
-                        <img id="avatarPreview" src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80" class="w-16 h-16 rounded-2xl object-cover border-2 border-brand-neon shadow-md">
+                        <img id="avatarPreview" src="/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80" class="w-16 h-16 rounded-2xl object-cover border-2 border-brand-neon shadow-md">
                         <label for="avatarUploadInput" class="absolute inset-0 bg-black/50 rounded-2xl flex items-center justify-center text-white opacity-0 group-hover:opacity-100 cursor-pointer transition">
                             <i class="ph-bold ph-camera text-2xl"></i>
                         </label>
@@ -466,8 +506,9 @@ def render_html() -> str:
                             </div>
                             <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_dme_view" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Ouvrir le DME du Patient</span></label>
                             <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_dme_consult" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Rédiger Consultations</span></label>
+                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_dme_reset" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Réinitialiser une consultation DME en cours</span></label>
                             <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_dme_prescribe" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Émettre & Imprimer Ordonnances</span></label>
-                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_dme_demandes" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Demandes Radio & PEC</span></label>
+                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_dme_demandes" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Demandes biologiques, radiologiques & PEC / catalogue des bilans</span></label>
                         </div>
 
                         <!-- 6. Actes Médicaux -->
@@ -532,6 +573,14 @@ def render_html() -> str:
                             <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_rdv_view" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Consulter l'agenda</span></label>
                             <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_rdv_manage" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Créer, modifier et transférer</span></label>
                         </div>
+                        <div class="space-y-1.5 bg-white dark:bg-[#121c15] p-3 rounded-2xl border border-emerald-200/70 dark:border-emerald-400/20">
+                            <div class="font-bold text-emerald-800 dark:text-emerald-300 text-[11px] border-b border-emerald-100 dark:border-white/10 pb-1 flex items-center gap-1.5">
+                                <i class="ph-bold ph-briefcase text-emerald-600"></i> Kacel Job
+                            </div>
+                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_kacel_job_view" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Consulter entreprises et conventions</span></label>
+                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_kacel_job_manage_companies" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Gérer les entreprises</span></label>
+                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_kacel_job_manage_conventions" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Gérer les conventions</span></label>
+                        </div>
                         <!-- 13. Administration Système -->
                         <div class="space-y-1.5 bg-brand-neon/10 dark:bg-brand-neon/5 p-3 rounded-2xl border border-brand-neon/30">
                             <div class="font-bold text-emerald-950 dark:text-brand-neon text-[11px] border-b border-brand-neon/20 pb-1 flex items-center gap-1.5">
@@ -544,6 +593,14 @@ def render_html() -> str:
                     </div>
                     <br>
                     <br>
+                <div class="space-y-2.5 bg-indigo-50/70 dark:bg-indigo-400/5 p-4 rounded-3xl border border-indigo-200/80 dark:border-indigo-300/10">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-indigo-200/70 dark:border-white/10 pb-2.5">
+                        <div><h4 class="text-xs font-bold text-slate-800 dark:text-white flex items-center gap-1.5"><i class="ph-bold ph-calendar-check text-indigo-500 text-base"></i> Plannings de rendez-vous autorisés</h4>
+                        <p class="text-[11px] text-slate-500">Cochez les plannings que cet utilisateur peut consulter et gérer. Sans sélection, il n’a accès à aucun planning.</p></div>
+                        <div class="flex items-center gap-2 text-[11px]"><button type="button" onclick="toggleAllRdvSchedules(true)" class="text-indigo-600 font-bold hover:underline">Tout cocher</button><span class="text-slate-400">|</span><button type="button" onclick="toggleAllRdvSchedules(false)" class="text-slate-500 font-bold hover:underline">Tout décocher</button></div>
+                    </div>
+                    <div id="userRdvSchedulesGrid" class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto p-1"><span class="text-xs text-slate-400 italic">Chargement des plannings…</span></div>
+                </div>
                       <!-- ⭐ 4. PÉRIMÈTRE MÉDICAL : DISCIPLINES & SPÉCIALITÉS AUTORISÉES (MULTI-SÉLECTION) ⭐ -->
                 <div class="space-y-2.5 bg-slate-50 dark:bg-black/30 p-4 rounded-3xl border border-slate-200/80 dark:border-white/10">
                     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200/60 dark:border-white/10 pb-2.5">
@@ -583,6 +640,7 @@ def render_html() -> str:
         (function() {
             let usersData = [];
             let availableSpecialites = [];
+            let availableRdvSchedules = [];
             let filteredUsersList = [];
             let currentUserPage = 1;
             const USERS_PER_PAGE = 15;
@@ -611,7 +669,7 @@ def render_html() -> str:
                 "Administrateur": [
                     "dash_view", "dash_financial", "reception_view", "reception_create", "reception_edit",
                     "cash_collect", "cash_collect_rest", "cash_refund", "cash_remise", "cash_reports", "pat_view", "pat_create", "pat_edit", "pat_delete",
-                    "dme_view", "dme_consult", "dme_prescribe", "dme_demandes",
+                    "dme_view", "dme_consult", "dme_reset", "dme_prescribe", "dme_demandes",
                     "act_view", "act_manage", "ctype_view", "ctype_manage", "cr_view", "cr_manage",
                     "med_view", "med_manage", "med_import_export", "doc_manage", "room_manage", "clinic_settings",
                     "admin_users", "admin_perms", "rdv_view", "rdv_manage"
@@ -633,9 +691,11 @@ def render_html() -> str:
                     const data = await res.json();
                     usersData = data.users || [];
                     availableSpecialites = data.available_specialites || [];
+                    availableRdvSchedules = data.available_rdv_schedules || [];
 
                     document.getElementById('totalUsersCount').innerText = data.total_count || usersData.length;
                     renderSpecialitesCheckboxes();
+                    renderRdvScheduleCheckboxes();
                     filterUsers();
                 } catch(err) {
                     console.error("Erreur chargement utilisateurs:", err);
@@ -666,6 +726,28 @@ def render_html() -> str:
                     grid.appendChild(label);
                 });
             }
+
+            function renderRdvScheduleCheckboxes() {
+                const grid = document.getElementById('userRdvSchedulesGrid');
+                if (!grid) return;
+                grid.innerHTML = '';
+                if (!availableRdvSchedules.length) {
+                    grid.innerHTML = '<span class="text-xs text-slate-400 italic col-span-2 py-2">Aucun planning enregistré. Créez d’abord un planning dans Rendez-vous.</span>';
+                    return;
+                }
+                availableRdvSchedules.forEach(schedule => {
+                    const days = (schedule.jours_semaine || [schedule.jour_semaine]).map(Number)
+                        .map(day => ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'][day]).join(', ');
+                    const label = document.createElement('label');
+                    label.className = 'flex items-start gap-2.5 p-2.5 rounded-xl border border-indigo-100 dark:border-white/10 bg-white dark:bg-[#121c15] hover:bg-indigo-50/60 dark:hover:bg-white/5 cursor-pointer transition';
+                    label.innerHTML = `<input type="checkbox" value="${Number(schedule.id)}" class="user-rdv-schedule-check mt-0.5 rounded text-brand-neon focus:ring-brand-neon"><span class="min-w-0"><b class="block truncate text-xs text-slate-700 dark:text-slate-200">${schedule.specialite}</b><small class="block text-[10px] text-slate-500">${days} · ${String(schedule.heure_debut).slice(0,5)}–${String(schedule.heure_fin).slice(0,5)}</small></span>`;
+                    grid.appendChild(label);
+                });
+            }
+
+            window.toggleAllRdvSchedules = function(check) {
+                document.querySelectorAll('.user-rdv-schedule-check').forEach(cb => cb.checked = check);
+            };
 
             window.toggleAllSpecialites = function(check) {
                 document.querySelectorAll('.user-specialite-check').forEach(cb => cb.checked = check);
@@ -729,7 +811,7 @@ def render_html() -> str:
 
                         tr.innerHTML = `
                             <td class="py-3.5 pl-2 flex items-center space-x-3">
-                                <img src="${u.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80'}" class="w-9 h-9 rounded-xl object-cover shadow-sm border border-slate-200 dark:border-white/10">
+                                <img src="${u.avatar || '/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80'}" class="w-9 h-9 rounded-xl object-cover shadow-sm border border-slate-200 dark:border-white/10">
                                 <div>
                                     <div class="font-bold text-slate-800 dark:text-slate-100 text-xs">${u.prenom} ${u.nom}</div>
                                     <div class="text-[10px] text-slate-400 font-mono">ID: #${u.id}</div>
@@ -813,11 +895,13 @@ def render_html() -> str:
 
                 document.getElementById('userId').value = '';
                 document.getElementById('avatarData').value = '';
-                document.getElementById('avatarPreview').src = 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80';
+                document.getElementById('avatarPreview').src = '/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80';
                 document.getElementById('modalTitle').innerText = 'Ajouter un Collaborateur';
+                switchUserFormTab('general');
 
                 toggleAllUserPerms(false);
                 toggleAllSpecialites(false);
+                toggleAllRdvSchedules(false);
                 applyUserRolePreset('Médecin');
 
                 document.getElementById('userModal').classList.remove('hidden');
@@ -859,9 +943,11 @@ def render_html() -> str:
                 document.getElementById('userLogin').value = u.login || '';
                 document.getElementById('userPassword').value = '';
                 document.getElementById('avatarData').value = u.avatar || '';
-                document.getElementById('avatarPreview').src = u.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80';
+                document.getElementById('avatarPreview').src = u.avatar || '/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80';
                 document.getElementById('userStatus').value = u.status || 'Actif';
                 document.getElementById('modalTitle').innerText = 'Modifier les droits de ' + u.prenom + ' ' + u.nom;
+
+                document.querySelectorAll('.user-dme-display-check').forEach(cb => { cb.checked = u.permissions?.[cb.id.replace('perm_', '')] !== false; });
 
                 // Re-cochage des permissions
                 toggleAllUserPerms(false);
@@ -884,6 +970,12 @@ def render_html() -> str:
                 document.querySelectorAll('.user-specialite-check').forEach(cb => {
                     cb.checked = userSpecs.includes(cb.value);
                 });
+                const userSchedules = Array.isArray(u.plannings_rdv_autorises)
+                    ? u.plannings_rdv_autorises.map(Number)
+                    : availableRdvSchedules.map(schedule => Number(schedule.id));
+                document.querySelectorAll('.user-rdv-schedule-check').forEach(cb => {
+                    cb.checked = userSchedules.includes(Number(cb.value));
+                });
             };
 
             window.handleUserFormSubmit = async function(e) {
@@ -891,7 +983,7 @@ def render_html() -> str:
 
                 // Collecte des permissions granulaires
                 const perms = {};
-                document.querySelectorAll('.user-perm-check').forEach(cb => {
+                document.querySelectorAll('.user-perm-check, .user-dme-display-check').forEach(cb => {
                     const key = cb.id.replace('perm_', '');
                     perms[key] = cb.checked;
                 });
@@ -901,6 +993,8 @@ def render_html() -> str:
                 document.querySelectorAll('.user-specialite-check:checked').forEach(cb => {
                     selectedSpecialites.push(cb.value);
                 });
+                const selectedRdvSchedules = [...document.querySelectorAll('.user-rdv-schedule-check:checked')]
+                    .map(cb => Number(cb.value));
 
                 const userData = {
                     id: document.getElementById('userId').value ? parseInt(document.getElementById('userId').value) : null,
@@ -913,7 +1007,8 @@ def render_html() -> str:
                     avatar: document.getElementById('avatarData').value || document.getElementById('avatarPreview').src,
                     status: document.getElementById('userStatus').value,
                     permissions: perms,
-                    specialites_autorisees: selectedSpecialites
+                    specialites_autorisees: selectedSpecialites,
+                    plannings_rdv_autorises: selectedRdvSchedules
                 };
 
                 const res = await fetch('/api/users/save', {
@@ -961,3 +1056,60 @@ def render_html() -> str:
         })();
     </script>
     """
+
+
+def render_html() -> str:
+    from modules.dme_display import display_settings_html
+    html = _render_html()
+    content_start = html.index('<!-- 1. PHOTO DE PROFIL -->')
+    planning_start = html.index('<div class="space-y-2.5 bg-indigo-50/70')
+    medical_start = html.index('<!-- ⭐ 4. PÉRIMÈTRE MÉDICAL')
+    actions_start = html.index('<!-- ACTIONS -->')
+    general = html[content_start:planning_start].rstrip()
+    # Ferme la matrice des autorisations avant les panneaux suivants.
+    general = general.replace('<br>', '') + '</div>'
+    planning = html[planning_start:medical_start]
+    medical = html[medical_start:actions_start].rstrip()
+    medical = medical.rsplit('</div>', 1)[0]
+    tabs = [
+        ('general', 'Autorisations générales et informations', general),
+        ('dmi', 'Affichage du DMI par utilisateur', display_settings_html()),
+        ('planning', 'Plannings de rendez-vous autorisés', planning),
+        ('medical', 'Périmètre médical : disciplines et spécialités autorisées', medical),
+    ]
+    navigation = '<div role="tablist" aria-label="Paramétrage utilisateur" class="flex flex-wrap gap-2">'
+    panels = ''
+    for index, (key, label, content) in enumerate(tabs):
+        selected = index == 0
+        navigation += (
+            f'<button type="button" role="tab" id="user-tab-{key}" '
+            f'aria-controls="user-panel-{key}" aria-selected="{str(selected).lower()}" '
+            f'onclick="switchUserFormTab(\'{key}\')" '
+            'class="user-form-tab px-3 py-2.5 rounded-xl text-xs font-bold border border-slate-200 dark:border-white/10">'
+            f'{index + 1}. {label}</button>'
+        )
+        panels += (
+            f'<section role="tabpanel" id="user-panel-{key}" aria-labelledby="user-tab-{key}" '
+            f'class="user-form-panel space-y-6{" hidden" if not selected else ""}">{content}</section>'
+        )
+    html = html[:content_start] + navigation + '</div>' + panels + html[actions_start:]
+    script = '''
+            window.switchUserFormTab = function(key) {
+                document.querySelectorAll('.user-form-panel').forEach(panel => {
+                    panel.classList.toggle('hidden', panel.id !== 'user-panel-' + key);
+                });
+                document.querySelectorAll('.user-form-tab').forEach(button => {
+                    const selected = button.id === 'user-tab-' + key;
+                    button.setAttribute('aria-selected', String(selected));
+                    button.classList.toggle('bg-brand-neon', selected);
+                    button.classList.toggle('text-black', selected);
+                    button.classList.toggle('text-slate-500', !selected);
+                });
+            };
+            document.getElementById('userForm').addEventListener('invalid', event => {
+                const panel = event.target.closest('.user-form-panel');
+                if (panel) switchUserFormTab(panel.id.replace('user-panel-', ''));
+            }, true);
+            switchUserFormTab('general');
+    '''
+    return html.replace('let usersData = [];', script + 'let usersData = [];', 1)

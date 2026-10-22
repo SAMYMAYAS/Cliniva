@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import time
+import unicodedata
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -16,7 +17,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from database import DOCS_DIR, get_db_cursor
 from app.auth import hash_password, track_action, get_current_user_optional
-from modules.gestion_patients import ALGERIA_WILAYAS, GROUPES_SANGUINS, TYPES_PIECES_IDENTITE
+from modules.gestion_patients import (
+    ALGERIA_WILAYAS,
+    GROUPES_SANGUINS,
+    TYPES_PIECES_IDENTITE,
+    render_html as render_patients_html,
+)
 
 logger = logging.getLogger("PassagesModule")
 
@@ -66,6 +72,28 @@ DOCS_PASSAGE_TYPES: List[str] = [
     "Prise en Charge (PEC)",
     "Badge",
 ]
+
+
+def is_radiology_category(category_name: Any) -> bool:
+    normalized = "".join(
+        char for char in unicodedata.normalize("NFKD", str(category_name or "").casefold())
+        if not unicodedata.combining(char)
+    )
+    return "radiolog" in normalized and "medical" in normalized
+
+
+def passage_has_radiology_exam(passage: Dict[str, Any], consultations_by_name: Dict[str, Dict[str, Any]]) -> bool:
+    acts = passage.get("actes") or []
+    for act in acts:
+        if not isinstance(act, dict):
+            continue
+        category = act.get("categorie") or act.get("category") or ""
+        if not category:
+            designation = str(act.get("nom") or act.get("designation") or "").strip().casefold()
+            category = (consultations_by_name.get(designation) or {}).get("categorie") or ""
+        if is_radiology_category(category):
+            return True
+    return False
 
 
 # ============================================================================
@@ -130,11 +158,20 @@ class ReceptionManager:
                                   pat.avatar,
                                   pat.date_naissance,
                                   pat.genre,
+                                  pat.groupe_sanguin,
                                   pat.wilaya,
                                   pat.commune,
+                                  (
+                                      COALESCE(p.statut, '') = 'En attente'
+                                      AND COALESCE(p.statut_paiement, 'Non payé') = 'Non payé'
+                                      AND COALESCE(p.versement, 0) <= 0
+                                      AND NOT EXISTS (SELECT 1 FROM caisse_mouvements cm WHERE cm.id_passage = p.id)
+                                      AND NOT EXISTS (SELECT 1 FROM patient_dme_records d WHERE d.id_passage = p.id)
+                                  ) AS editable_pre_consultation,
                                   td.nom                                as medecin_traitant_nom,
                                   td.prenom                             as medecin_traitant_prenom,
                                   td.grade                              as medecin_traitant_grade,
+                                  td.specialite                         as medecin_traitant_specialite,
                                   td.adresse                            as medecin_traitant_adresse
                            FROM patient_passages p
                                     LEFT JOIN patients pat ON p.id_patient = pat.id
@@ -154,6 +191,7 @@ class ReceptionManager:
             item["documents_scannes"] = item.get("documents_scannes") if isinstance(item.get("documents_scannes"),
                                                                                     list) else json.loads(
                 item.get("documents_scannes") or "[]")
+            item["pieces_scannees"] = item.get("pieces_scannees") if isinstance(item.get("pieces_scannees"), list) else json.loads(item.get("pieces_scannees") or "[]")
             passages.append(item)
         return passages
 
@@ -194,6 +232,7 @@ class ReceptionManager:
                                   td.nom                                                   as medecin_traitant_nom,
                                   td.prenom                                                as medecin_traitant_prenom,
                                   td.grade                                                 as medecin_traitant_grade,
+                                  td.specialite                                            as medecin_traitant_specialite,
                                   td.adresse                                               as medecin_traitant_adresse
                            FROM patient_passages p
                                     LEFT JOIN patients pat ON p.id_patient = pat.id
@@ -539,11 +578,14 @@ class ReceptionManager:
             patients = [dict(r) for r in cursor.fetchall()]
 
             cursor.execute(
-                "SELECT id, designation, categorie, tarif, tarif_nuit, specialite FROM consultation_types ORDER BY designation ASC;")
+                "SELECT id, designation, categorie, type_consultation, transmettre_hl7, modalite, tarif, tarif_nuit, specialite FROM consultation_types ORDER BY designation ASC;")
             consultations = [dict(r) for r in cursor.fetchall()]
 
+            cursor.execute("SELECT nom FROM ref_modalites ORDER BY nom ASC;")
+            modalites = [str(r.get("nom") or "").strip() for r in cursor.fetchall() if str(r.get("nom") or "").strip()]
+
             cursor.execute(
-                "SELECT id, grade, nom, prenom, telephone, email, adresse, wilaya, commune FROM treating_doctors ORDER BY nom ASC;")
+                "SELECT id, grade, nom, prenom, telephone, email, adresse, wilaya, commune, specialite FROM treating_doctors ORDER BY nom ASC;")
             medecins_traitants = [dict(r) for r in cursor.fetchall()]
 
             cursor.execute(
@@ -572,6 +614,7 @@ class ReceptionManager:
             "patients": patients,
             "medecins_traitants": medecins_traitants,
             "consultations": consultations,
+            "modalites": modalites,
             "types_passages": TYPES_PASSAGES,
             "doc_types": DOCS_PASSAGE_TYPES,
             "horaires_tarification": horaires,
@@ -588,8 +631,10 @@ manager = ReceptionManager()
 # POINTS D'ACCÈS FASTAPI (ROUTES JSON & TICKET)
 # ============================================================================
 @reception_router.get("/passages")
-async def api_get_passages(request: Request):
+async def api_get_passages(request: Request, service: Optional[str] = None):
     try:
+        from modules.gestion_caisse import CaisseManager
+        CaisseManager.ensure_caisse_schema()
         user = get_current_user_optional(request)
         user_permissions = user.get("permissions") or {} if user else {}
         if isinstance(user_permissions, str):
@@ -630,8 +675,29 @@ async def api_get_passages(request: Request):
         user_specs = sorted(list(set(user_specs)))
 
         passages = manager.get_all()
-        total = manager.count()
         init_data = manager.get_initial_data()
+        if str(service or "").strip().lower() in {"radiologie", "autres"}:
+            consultations_by_name = {
+                str(item.get("designation") or "").strip().casefold(): item
+                for item in init_data.get("consultations", [])
+            }
+            radiology_only = str(service).strip().lower() == "radiologie"
+            passages = [
+                passage for passage in passages
+                if passage_has_radiology_exam(passage, consultations_by_name) == radiology_only
+            ]
+            if radiology_only:
+                for passage in passages:
+                    modalities = {
+                        str(consultations_by_name.get(str(act.get("nom") or "").strip().casefold(), {}).get("modalite") or "").strip()
+                        for act in (passage.get("actes") or [])
+                        if is_radiology_category(consultations_by_name.get(str(act.get("nom") or "").strip().casefold(), {}).get("categorie"))
+                    }
+                    passage["modalites"] = sorted(mod for mod in modalities if mod)
+                init_data["radiology_modalites"] = sorted(
+                    set(init_data.get("modalites") or []), key=str.casefold
+                )
+        total = len(passages) if service else manager.count()
         init_data["user_specialites"] = user_specs
 
         return {
@@ -661,38 +727,158 @@ async def api_update_patient_from_passage(payload: Dict[str, Any], request: Requ
     prenom = str(payload.get("prenom") or "").strip().title()
     date_naissance = str(payload.get("date_naissance") or "").strip()
     genre = str(payload.get("genre") or "").strip()
+    groupe_sanguin = str(payload.get("groupe_sanguin") or "").strip()
+    type_piece_identite = str(payload.get("type_piece_identite") or "Carte Chifa").strip()
+    doc_identite = payload.get("doc_identite") or ""
+    avatar = payload.get("avatar") or ""
+    photo_face = payload.get("photo_face") or ""
+    photo_profil_droit = payload.get("photo_profil_droit") or ""
+    photo_profil_gauche = payload.get("photo_profil_gauche") or ""
+    empreinte_index = payload.get("empreinte_index") or ""
+    pieces_scannees = payload.get("pieces_scannees") or []
     telephone_1 = str(payload.get("telephone_1") or "").strip()
     telephone_2 = str(payload.get("telephone_2") or "").strip()
     email = str(payload.get("email") or "").strip()
     wilaya = str(payload.get("wilaya") or "").strip()
     commune = str(payload.get("commune") or "").strip()
+    questionnaire = payload.get("questionnaire") or {}
+    documents_scannes = payload.get("documents_scannes") or []
+    actes = payload.get("actes") or []
+    date_passage = str(payload.get("date_passage") or "").strip()
+    heure_passage = str(payload.get("heure_passage") or "").strip()
+    type_passage = str(payload.get("type_passage") or "").strip()
+    try:
+        medecin_traitant_id = int(payload.get("medecin_traitant_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Médecin traitant invalide.")
 
-    if not all((nom, prenom, date_naissance, genre, telephone_1, wilaya, commune)):
-        raise HTTPException(status_code=400, detail="Nom, prénom, date de naissance, genre, téléphone, wilaya et commune sont obligatoires.")
+    if not all((nom, prenom, date_naissance, genre, groupe_sanguin, telephone_1, wilaya, commune)):
+        raise HTTPException(status_code=400, detail="Nom, prénom, date de naissance, genre, groupe sanguin, téléphone, wilaya et commune sont obligatoires.")
     if len(nom) > 100 or len(prenom) > 100 or len(telephone_1) > 30 or len(telephone_2) > 30 or len(email) > 254 or len(wilaya) > 100 or len(commune) > 100:
         raise HTTPException(status_code=400, detail="Une ou plusieurs informations dépassent la longueur autorisée.")
     if genre not in {"Homme", "Femme", "Autre"}:
         raise HTTPException(status_code=400, detail="Genre invalide.")
+    if groupe_sanguin not in set(GROUPES_SANGUINS):
+        raise HTTPException(status_code=400, detail="Groupe sanguin invalide.")
+    if type_piece_identite not in TYPES_PIECES_IDENTITE:
+        raise HTTPException(status_code=400, detail="Type de pièce d’identité invalide.")
+    if not isinstance(questionnaire, dict) or not isinstance(actes, list) or not actes or len(actes) > 100 or not isinstance(documents_scannes, list) or len(documents_scannes) > 30 or not isinstance(pieces_scannees, list) or len(pieces_scannees) > 30:
+        raise HTTPException(status_code=400, detail="Informations médicales ou documents invalides.")
+    try:
+        date.fromisoformat(date_passage)
+        datetime.strptime(heure_passage, "%H:%M")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Date ou heure du passage invalide.")
+    if not type_passage:
+        raise HTTPException(status_code=400, detail="La discipline ou le type de passage est obligatoire.")
+    patient_files = [doc_identite, avatar, photo_face, photo_profil_droit, photo_profil_gauche, empreinte_index]
+    if any(not isinstance(value, str) or len(value) > 18_000_000 for value in patient_files):
+        raise HTTPException(status_code=413, detail="Une photo ou pièce d’identité dépasse la taille autorisée.")
+    if any(not isinstance(doc, dict) or len(str(doc.get("data") or "")) > 18_000_000 for doc in documents_scannes + pieces_scannees):
+        raise HTTPException(status_code=413, detail="Un document dépasse la taille autorisée.")
     try:
         date.fromisoformat(date_naissance)
     except ValueError:
         raise HTTPException(status_code=400, detail="Date de naissance invalide.")
 
     with get_db_cursor() as cursor:
-        cursor.execute("SELECT 1 FROM patient_passages WHERE id = %s AND id_patient = %s;", (passage_id, patient_id))
-        if not cursor.fetchone():
+        cursor.execute("""
+            SELECT p.id_patient, p.versement, p.remise_type, p.remise_valeur,
+                   COALESCE(p.statut, '') AS statut,
+                   COALESCE(p.statut_paiement, 'Non payé') AS statut_paiement,
+                   EXISTS (SELECT 1 FROM caisse_mouvements cm WHERE cm.id_passage = p.id) AS has_cash_history,
+                   EXISTS (SELECT 1 FROM patient_dme_records d WHERE d.id_passage = p.id) AS has_consultation
+            FROM patient_passages p
+            WHERE p.id = %s
+            FOR UPDATE OF p;
+        """, (passage_id,))
+        passage = cursor.fetchone()
+        if not passage or int(passage.get("id_patient") or 0) != patient_id:
             raise HTTPException(status_code=404, detail="Le patient n'est pas associé à ce passage.")
+        if passage.get("has_cash_history") or float(passage.get("versement") or 0) > 0 or passage.get("statut_paiement") != "Non payé":
+            raise HTTPException(status_code=409, detail="La fiche ne peut plus être modifiée : un encaissement ou un mouvement de caisse existe déjà.")
+        if passage.get("has_consultation") or passage.get("statut") != "En attente":
+            raise HTTPException(status_code=409, detail="La fiche ne peut plus être modifiée : la consultation DME a commencé ou le passage a avancé.")
+        act_totals = []
+        try:
+            for act in actes:
+                if not isinstance(act, dict):
+                    raise ValueError("prestation invalide")
+                raw_total = act.get("sous_total")
+                if raw_total is None:
+                    raw_total = float(act.get("tarif") or 0) * int(act.get("quantite") or 1)
+                act_total = float(raw_total)
+                if not math.isfinite(act_total) or act_total < 0:
+                    raise ValueError("montant invalide")
+                act_totals.append(act_total)
+            montant_total_corrige = round(sum(act_totals), 2)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(status_code=400, detail="Une prestation contient un tarif ou une quantité invalide.")
+        remise_type_existante = str(passage.get("remise_type") or "DA")
+        remise_valeur_existante = float(passage.get("remise_valeur") or 0)
+        remise_corrigee = (montant_total_corrige * remise_valeur_existante / 100) if remise_type_existante == "%" else remise_valeur_existante
+        remise_corrigee = round(min(montant_total_corrige, max(0, remise_corrigee)), 2)
+        reste_corrige = round(max(0, montant_total_corrige - remise_corrigee), 2)
         cursor.execute("""
             UPDATE patients
             SET nom = %s, prenom = %s, date_naissance = %s, genre = %s,
-                telephone_1 = %s, telephone_2 = %s, email = %s, wilaya = %s, commune = %s
+                groupe_sanguin = %s, telephone_1 = %s, telephone_2 = %s,
+                email = %s, wilaya = %s, commune = %s, type_piece_identite = %s,
+                doc_identite = %s, avatar = %s, photo_face = %s, photo_profil_droit = %s,
+                photo_profil_gauche = %s, empreinte_index = %s, pieces_scannees = %s::jsonb
             WHERE id = %s;
-        """, (nom, prenom, date_naissance, genre, telephone_1, telephone_2, email, wilaya, commune, patient_id))
+        """, (nom, prenom, date_naissance, genre, groupe_sanguin, telephone_1, telephone_2, email, wilaya, commune,
+              type_piece_identite, doc_identite, avatar, photo_face, photo_profil_droit, photo_profil_gauche, empreinte_index,
+              json.dumps(pieces_scannees), patient_id))
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Patient introuvable.")
+        cursor.execute("""
+            UPDATE patient_passages
+            SET date_passage = %s, heure_passage = %s, type_passage = %s,
+                medecin_traitant_id = %s, actes_json = %s::jsonb,
+                montant_total = %s, remise = %s, reste = %s,
+                questionnaire_json = %s::jsonb, documents_scannes = %s::jsonb
+            WHERE id = %s AND id_patient = %s;
+        """, (date_passage, heure_passage, type_passage, medecin_traitant_id, json.dumps(actes),
+              montant_total_corrige, remise_corrigee, reste_corrige,
+              json.dumps(questionnaire), json.dumps(documents_scannes), passage_id, patient_id))
 
-    track_action(request, "MODIFICATION_PATIENT_DEPUIS_PASSAGE", f"Fiche patient #{patient_id} modifiée depuis le passage #{passage_id}")
-    return {"success": True, "message": "Fiche patient mise à jour. La demande d'examen peut être régénérée.", "patient_id": patient_id}
+    track_action(request, "MODIFICATION_DOSSIER_AVANT_CONSULTATION", f"Fiche patient et informations médicales du passage #{passage_id} mises à jour")
+    return {"success": True, "message": "Informations du patient et du passage mises à jour.", "patient_id": patient_id, "id_passage": passage_id}
+
+
+@reception_router.get("/patient/edit-data/{passage_id}")
+async def api_get_patient_edit_data(passage_id: int, request: Request):
+    _require_reception_permission(request, "pat_edit")
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT p.id_patient, p.questionnaire_json, p.documents_scannes,
+                   COALESCE(p.statut, '') AS statut, COALESCE(p.statut_paiement, 'Non payé') AS statut_paiement,
+                   p.versement,
+                   pat.type_piece_identite, pat.doc_identite, pat.avatar, pat.photo_face,
+                   pat.photo_profil_droit, pat.photo_profil_gauche, pat.empreinte_index, pat.pieces_scannees,
+                   EXISTS (SELECT 1 FROM caisse_mouvements cm WHERE cm.id_passage = p.id) AS has_cash_history,
+                   EXISTS (SELECT 1 FROM patient_dme_records d WHERE d.id_passage = p.id) AS has_consultation
+            FROM patient_passages p JOIN patients pat ON pat.id = p.id_patient
+            WHERE p.id = %s;
+        """, (passage_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Passage introuvable.")
+    if (row.get("has_cash_history") or float(row.get("versement") or 0) > 0
+            or row.get("statut_paiement") != "Non payé" or row.get("has_consultation")
+            or row.get("statut") != "En attente"):
+        raise HTTPException(status_code=409, detail="La fiche ne peut plus être modifiée : encaissement ou consultation déjà commencé.")
+    result = dict(row)
+    for key, default, expected in (("questionnaire_json", {}, dict), ("documents_scannes", [], list), ("pieces_scannees", [], list)):
+        value = result.get(key)
+        if not isinstance(value, expected):
+            try:
+                value = json.loads(value or ("{}" if expected is dict else "[]"))
+            except (TypeError, ValueError):
+                value = default
+        result[key.replace("_json", "")] = value
+    return result
 
 
 @reception_router.post("/save")
@@ -828,6 +1014,66 @@ async def view_standalone_ticket(passage_id: int, request: Request):
 def render_ticket_html(p: Dict[str, Any], clinic: Dict[str, Any], movement: Optional[Dict[str, Any]] = None) -> str:
     """Génération du ticket 80mm standard."""
     if movement:
+        from modules.prestation_categories import CATEGORY_KEYS, classify_prestation
+
+        acts = movement.get("actes") or []
+        allocations = movement.get("allocations") or {"principal": movement.get("montant_mouvement", 0)}
+        categories = {
+            "principal": "TICKET PRINCIPAL — PRESTATIONS",
+            "contraste": "TICKET SPÉCIAL — PRODUITS DE CONTRASTE",
+            "sedation": "TICKET SPÉCIAL — SÉDATION",
+        }
+        grouped = {key: [] for key in CATEGORY_KEYS}
+        for act in acts:
+            if isinstance(act, dict):
+                grouped[classify_prestation(act)].append(act)
+        clinic_name = html_escape(str(clinic.get("clinic_name") or "Cliniva Medical Center"))
+        clinic_address = html_escape(str(clinic.get("clinic_adresse") or ""))
+        clinic_phone = html_escape(str(clinic.get("clinic_tel") or ""))
+        patient_name = html_escape(f'{movement.get("nom") or "Patient"} {movement.get("prenom") or ""}'.strip())
+        movement_id = int(movement.get("id_mouvement") or 0)
+        passage_id = int(movement.get("id_passage") or 0)
+        sign_label = "REMBOURSÉ" if float(movement.get("montant_mouvement") or 0) < 0 else "MONTANT ENCAISSÉ"
+        tickets = []
+        for category in CATEGORY_KEYS:
+            category_amount = float(allocations.get(category) or 0)
+            if abs(category_amount) < 0.005:
+                continue
+            lines = "".join(
+                f'<div style="margin:2px 0;">• {html_escape(str(act.get("nom") or act.get("designation") or "Prestation"))} × {html_escape(str(act.get("quantite") or 1))}</div>'
+                for act in grouped[category]
+            ) or '<div>Aucune prestation détaillée</div>'
+            amount_text = f'{"-" if category_amount < 0 else ""}{abs(category_amount):,.2f} DA'
+            tickets.append(f"""
+              <section class="ticket">
+                <div class="center bold">{clinic_name}</div>
+                <div class="center small">{clinic_address} | Tél: {clinic_phone}</div>
+                <div class="line"></div><div class="center bold">{categories[category]}</div>
+                <div class="center small">{html_escape(str(movement.get("type_mouvement") or ""))}</div>
+                <div class="row"><span>Passage</span><strong>#PASS-{passage_id:04d}</strong></div>
+                <div class="row"><span>Mouvement</span><strong>#{movement_id}</strong></div>
+                <div class="row"><span>Date</span><strong>{html_escape(str(movement.get("date_mouvement") or ""))} {html_escape(str(movement.get("heure_mouvement") or ""))}</strong></div>
+                <div>Patient : <strong>{patient_name}</strong></div>
+                <div>Caissier : @{html_escape(str(movement.get("operateur_mouvement") or "-"))}</div>
+                <div class="line"></div><strong>PRESTATIONS :</strong><div>{lines}</div>
+                <div class="line"></div>
+                <div class="row"><span>Mode de paiement</span><strong>{html_escape(str(movement.get("mode_mouvement") or "Espèces"))}</strong></div>
+                <div class="row bold"><span>{sign_label}</span><span>{amount_text}</span></div>
+                <div class="line"></div><div class="center small">Merci pour votre confiance.</div>
+              </section>
+            """)
+        return f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Tickets #{passage_id}</title>
+        <style>
+          @page {{ size:80mm auto; margin:0; }} * {{ box-sizing:border-box; }}
+          body {{ width:78mm; margin:0; padding:10px; color:#000; font:11px/1.3 'Courier New',monospace; }}
+          .center {{ text-align:center; }} .bold {{ font-weight:bold; }} .small {{ font-size:9px; }}
+          .line {{ border-top:1px dashed #000; margin:7px 0; }}
+          .row {{ display:flex; justify-content:space-between; gap:6px; margin:3px 0; }}
+          .ticket {{ padding-bottom:10px; }}
+          @media print {{ .no-print {{ display:none!important; }} .ticket:not(:last-child) {{ page-break-after:always; }} }}
+        </style></head><body><div class="no-print center"><button onclick="window.print()">Imprimer les tickets</button></div>
+        {''.join(tickets)}</body></html>"""
+
         movement_type = movement.get("type_mouvement")
         labels = {
             "ENCAISSEMENT_RESTE": "ENCAISSEMENT DU RESTE",
@@ -1251,22 +1497,61 @@ async def view_demande_examen(passage_id: int):
 # ============================================================================
 # RENDU DU COMPOSANT HTML ET JAVASCRIPT COMPLET
 # ============================================================================
-def render_html() -> str:
+def render_html(mode: str = "general") -> str:
     """Génère l'HTML complet avec Dark Mode, Modales d'ajout rapide au premier plan et validation."""
+    is_radiology_mode = str(mode or "").strip().lower() == "radiologie"
     doc_types_options = "".join([f'<option value="{dt}">{dt}</option>' for dt in DOCS_PASSAGE_TYPES])
+    identity_types_options = "".join([f'<option value="{tp}">{tp}</option>' for tp in TYPES_PIECES_IDENTITE])
     wilayas_options = "".join([f'<option value="{w}">{w}</option>' for w in sorted(ALGERIA_WILAYAS.keys())])
     groupes_options = "".join([f'<option value="{g}">{g}</option>' for g in GROUPES_SANGUINS])
     pieces_options = "".join([f'<option value="{tp}">{tp}</option>' for tp in TYPES_PIECES_IDENTITE])
     wilayas_json = json.dumps(ALGERIA_WILAYAS)
+    questionnaire_edit_items = [
+        ("hospitalise", "Patient hospitalisé"), ("dossier_interne", "Ancien dossier interne"),
+        ("dossier_externe", "Dossier externe"), ("urgence_vitale", "Urgence vitale"),
+        ("grossesse", "Grossesse"), ("allergie", "Allergie"), ("diabete", "Diabète"),
+        ("hta", "Hypertension (HTA)"), ("asthme", "Asthme"),
+        ("insuffisance_renale", "Insuffisance rénale"), ("pace_maker", "Pace maker"),
+        ("valve_cardiaque", "Valve cardiaque"), ("prothese_metallique", "Prothèse métallique"),
+    ]
+    questionnaire_edit_html = "".join(
+        f'<label class="flex items-center justify-between gap-3 py-2 border-b border-slate-100 dark:border-white/5 text-[11px]">'
+        f'<span class="font-semibold text-slate-700 dark:text-slate-300">{label}</span>'
+        f'<select id="passageEditQuestionnaire_{key}" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"><option value="NON">Non</option><option value="OUI">Oui</option></select></label>'
+        for key, label in questionnaire_edit_items
+    )
+    patient_form_component = render_patients_html().replace(
+        'id="view-patients" class="space-y-6"',
+        'id="view-patients" class="hidden"',
+    ).replace('z-50', 'z-[100]')
+    table_headers_html = (
+        """
+        <th class="w-[27%] py-3 pl-3 text-left">Patient</th>
+        <th class="w-[37%] py-3 px-2 text-left">Examen</th>
+        <th class="w-[12%] py-3 px-2 text-center">État résultat</th>
+        <th class="w-[10%] py-3 px-2 text-center">État passage</th>
+        <th class="w-[8%] py-3 px-2 text-center">État paiement</th>
+        <th class="w-[12%] py-3 pr-3 text-right">Détails</th>
+        """
+        if is_radiology_mode else
+        """
+        <th class="w-[14%] py-3 pl-3 pr-2 rounded-l-xl font-bold">Passage / horaire</th>
+        <th class="w-[23%] py-3 px-2 font-bold">Patient</th>
+        <th class="w-[17%] py-3 px-2 font-bold">Médecin / type</th>
+        <th class="w-[22%] py-3 px-2 font-bold">Prestations / actes</th>
+        <th class="w-[15%] py-3 px-2 font-bold">Règlement</th>
+        <th class="w-[9%] py-3 pl-2 pr-3 rounded-r-xl font-bold text-right">Actions</th>
+        """
+    )
 
     return f"""
-    <div id="view-reception" class="space-y-6">
+    <div id="view-reception" data-view-mode="{'radiologie' if is_radiology_mode else 'general'}" class="space-y-6">
 
         <!-- BANDEAU D'EN-TÊTE -->
         <div class="banner-glow rounded-3xl p-6 lg:p-8 text-white shadow-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
-                <h1 class="text-2xl font-extrabold tracking-tight mb-1">Accueil & Passages des Patients</h1>
-                <p class="text-xs text-slate-300">Enregistrement des admissions, numérisation des ordonnances, questionnaire médical bilingue et accès direct au DME.</p>
+                <h1 class="text-2xl font-extrabold tracking-tight mb-1">{'Salle d’attente — Radiologie' if is_radiology_mode else 'Accueil & Passages des Patients'}</h1>
+                <p class="text-xs text-slate-300">{'Suivi des passages de radiologie et création de nouvelles admissions.' if is_radiology_mode else 'Enregistrement des admissions, numérisation des ordonnances, questionnaire médical bilingue et accès direct au DME.'}</p>
             </div>
 
             <div class="flex items-center gap-3">
@@ -1290,9 +1575,11 @@ def render_html() -> str:
             </div>
             <div class="flex flex-wrap items-center gap-2">
                 <button type="button" id="clearPassageFiltersBtn" onclick="clearPassageFilters()" class="hidden px-3 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-white/5 transition">Réinitialiser</button>
-                <div class="inline-flex items-center gap-1 p-1 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20" aria-label="Style du tableau des passages">
+                <div class="passage-style-switch inline-flex items-center gap-1 p-1 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20" aria-label="Style du tableau des passages">
                     <button type="button" id="passageStyleClassicBtn" onclick="setPassageDisplayStyle('classic')" class="px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition">Tableau</button>
                     <button type="button" id="passageStyleCardsBtn" onclick="setPassageDisplayStyle('cards')" class="px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition">Lignes arrondies</button>
+                    <button type="button" id="passageStyleWorklistBtn" onclick="setPassageDisplayStyle('worklist')" class="px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition"><i class="ph-bold ph-list-dashes mr-1"></i>Style Worklist</button>
+                    <button type="button" id="passageStyleEssentialBtn" onclick="setPassageDisplayStyle('essential')" class="px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition"><i class="ph-bold ph-identification-card mr-1"></i>Vue d’ensemble</button>
                 </div>
                 <button type="button" onclick="openPassageFiltersModal()" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 dark:bg-brand-neon text-white dark:text-black text-xs font-bold shadow-sm hover:opacity-90 transition">
                     <i class="ph-bold ph-sliders-horizontal text-sm"></i><span>Rechercher et filtrer</span><span id="passageFilterCount" class="hidden min-w-5 h-5 px-1 rounded-full bg-white/20 dark:bg-black/10 items-center justify-center text-[10px]">0</span>
@@ -1302,28 +1589,30 @@ def render_html() -> str:
 
         <!-- MODALE RECHERCHE ET FILTRES -->
         <div id="passageFiltersModal" class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm hidden items-center justify-center z-[70] p-4" onclick="if(event.target===this) closePassageFiltersModal()">
-            <div class="w-full max-w-3xl max-h-[90vh] overflow-hidden rounded-3xl bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 shadow-2xl flex flex-col">
-                <div class="px-6 py-5 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
-                    <div class="flex items-center gap-3"><div class="w-10 h-10 rounded-2xl bg-brand-neon/20 text-emerald-700 dark:text-brand-neon flex items-center justify-center"><i class="ph-bold ph-magnifying-glass text-lg"></i></div><div><h2 class="font-bold text-slate-800 dark:text-white">Recherche et filtres</h2><p class="text-[11px] text-slate-500 dark:text-slate-400">Combinez plusieurs critères pour retrouver un passage.</p></div></div>
-                    <button type="button" onclick="closePassageFiltersModal()" class="w-9 h-9 rounded-xl text-slate-400 hover:bg-slate-100 dark:hover:bg-white/5"><i class="ph-bold ph-x"></i></button>
+            <div class="passage-filter-modal-card w-full max-w-3xl max-h-[90vh] overflow-hidden rounded-3xl bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 shadow-2xl flex flex-col">
+                <div class="passage-filter-modal-head px-6 py-5 flex items-center justify-between">
+                    <div class="flex items-center gap-3"><div class="passage-filter-modal-icon w-11 h-11 rounded-2xl flex items-center justify-center"><i class="ph-bold ph-funnel text-xl"></i></div><div><div class="text-[9px] tracking-[.16em] font-extrabold text-emerald-100/80 uppercase">Recherche avancée</div><h2 class="font-extrabold text-white">Filtrer les passages</h2><p class="text-[11px] text-emerald-50/80">Combinez les critères pour retrouver rapidement un dossier.</p></div></div>
+                    <button type="button" onclick="closePassageFiltersModal()" class="passage-filter-close w-9 h-9 rounded-xl text-white/80 hover:bg-white/15"><i class="ph-bold ph-x"></i></button>
                 </div>
-                <div class="p-6 overflow-y-auto">
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <label class="sm:col-span-2"><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Recherche libre</span><div class="flex items-center gap-2 px-3 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20"><i class="ph ph-magnifying-glass text-slate-400"></i><input id="filterPassageSearch" type="search" placeholder="Nom, prénom, téléphone, numéro, médecin ou acte..." class="w-full py-2.5 text-xs outline-none bg-transparent text-slate-800 dark:text-white"></div></label>
-                        <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Numéro de passage</span><input id="filterPassageNumero" type="text" placeholder="Ex. 125" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
-                        <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Téléphone patient</span><input id="filterPassageTelephone" type="search" placeholder="Numéro de téléphone" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
-                        <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Date de naissance</span><input id="filterPassageDateNaissance" type="date" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
-                        <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Médecin traitant</span><input id="filterPassageMedecin" type="search" placeholder="Nom du médecin" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
-                        <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Acte ou prestation</span><input id="filterPassageActe" type="search" placeholder="Nom de l'acte" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
-                        <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Type de passage</span><select id="filterPassageType" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option value="">Tous les types</option></select></label>
-                        <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Statut</span><select id="filterPassageStatut" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option value="">Tous les statuts</option><option>En attente</option><option>En cours</option><option>Terminé</option></select></label>
-                        <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Date à partir du</span><input id="filterPassageDateDebut" type="date" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
-                        <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Date jusqu'au</span><input id="filterPassageDateFin" type="date" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
+                <div class="passage-filter-modal-body p-6 overflow-y-auto">
+                    <div class="passage-filter-grid grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                        <label class="sm:col-span-2"><span class="passage-filter-label"><i class="ph-bold ph-magnifying-glass"></i>{'Nom et prénom du patient' if is_radiology_mode else 'Recherche libre'}</span><div class="passage-filter-search flex items-center gap-2 px-3 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20"><i class="ph ph-magnifying-glass text-slate-400"></i><input id="filterPassageSearch" type="search" placeholder="{'Nom ou prénom' if is_radiology_mode else 'Nom, prénom, téléphone, numéro, médecin ou acte...'}" class="w-full py-2.5 text-xs outline-none bg-transparent text-slate-800 dark:text-white"></div></label>
+                        <label><span class="passage-filter-label"><i class="ph-bold ph-hash"></i>Numéro de passage</span><input id="filterPassageNumero" type="text" placeholder="Ex. 125" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
+                        <label><span class="passage-filter-label"><i class="ph-bold ph-phone"></i>Téléphone patient</span><input id="filterPassageTelephone" type="search" placeholder="Numéro de téléphone" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
+                        <label><span class="passage-filter-label"><i class="ph-bold ph-calendar-blank"></i>Date de naissance</span><input id="filterPassageDateNaissance" type="date" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
+                        <label><span class="passage-filter-label"><i class="ph-bold ph-stethoscope"></i>Médecin traitant</span><input id="filterPassageMedecin" type="search" placeholder="Nom du médecin" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
+                        <label><span class="passage-filter-label"><i class="ph-bold ph-first-aid-kit"></i>Acte ou prestation</span><input id="filterPassageActe" type="search" placeholder="Nom de l'acte" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
+                        <label><span class="passage-filter-label"><i class="ph-bold ph-list-bullets"></i>Type de passage</span><select id="filterPassageType" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option value="">Tous les types</option></select></label>
+                        <label><span class="passage-filter-label"><i class="ph-bold ph-activity"></i>Statut</span><select id="filterPassageStatut" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option value="">Tous les statuts</option><option>En attente</option><option>En cours</option><option>Terminé</option></select></label>
+                        <label class="sm:col-span-2"><span class="passage-filter-label"><i class="ph-bold ph-calendar-dots"></i>Raccourci de période</span><select id="filterPassageDateShortcut" onchange="applyPassageDateShortcut(this.value)" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option value="">Choisir une période rapide…</option><option value="today">Aujourd’hui</option><option value="yesterday">Hier</option><option value="day_before">Avant-hier</option><option value="3days">Depuis 3 jours</option><option value="7weeks">Depuis 7 semaines</option><option value="15days">Depuis 15 jours</option><option value="month">Depuis un mois</option></select></label>
+                        <label><span class="passage-filter-label"><i class="ph-bold ph-calendar-plus"></i>Date à partir du</span><input id="filterPassageDateDebut" type="date" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
+                        <label><span class="passage-filter-label"><i class="ph-bold ph-calendar-check"></i>Date jusqu'au</span><input id="filterPassageDateFin" type="date" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
+                        {'<label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Modalité</span><select id="filterPassageModalite" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option value="">Toutes les modalités</option></select></label><label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">État du passage</span><select id="filterPassageEtat" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option value="">Tous</option><option value="fait">Fait</option><option value="non_fait">Pas encore fait</option></select></label><label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">État du résultat</span><select id="filterPassageResultat" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option value="">Tous</option><option value="disponible">Disponible</option><option value="non_disponible">Non disponible</option></select></label>' if is_radiology_mode else ''}
                     </div>
                 </div>
-                <div class="px-6 py-4 border-t border-slate-100 dark:border-white/5 flex items-center justify-between gap-3 bg-slate-50/70 dark:bg-black/10">
-                    <button type="button" onclick="clearPassageFilters()" class="px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-200/70 dark:hover:bg-white/5">Effacer les critères</button>
-                    <div class="flex gap-2"><button type="button" onclick="closePassageFiltersModal()" class="px-4 py-2 rounded-xl border border-slate-200 dark:border-white/10 text-xs font-semibold text-slate-600 dark:text-slate-300">Annuler</button><button type="button" onclick="applyPassageFilters()" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-brand-neon text-black text-xs font-bold hover:opacity-90"><i class="ph-bold ph-check"></i>Afficher les résultats</button></div>
+                <div class="passage-filter-modal-footer px-6 py-4 border-t border-slate-100 dark:border-white/5 flex items-center justify-between gap-3">
+                    <button type="button" onclick="clearPassageFilters()" class="passage-filter-clear inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-semibold"><i class="ph-bold ph-eraser"></i>Effacer les critères</button>
+                    <div class="flex gap-2"><button type="button" onclick="closePassageFiltersModal()" class="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 text-xs font-semibold text-slate-600 dark:text-slate-300"><i class="ph-bold ph-x mr-1"></i>Annuler</button><button type="button" id="passageFilterApplyBtn" onclick="applyPassageFilters(event)" class="passage-filter-apply inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold"><i class="ph-bold ph-check-circle"></i><span>Afficher les résultats</span></button></div>
                 </div>
             </div>
         </div>
@@ -1332,7 +1621,7 @@ def render_html() -> str:
         <div id="passagePatientEditModal" class="fixed inset-0 bg-slate-950/65 backdrop-blur-sm hidden items-center justify-center z-[85] p-4" onclick="if(event.target===this) closePassagePatientEditModal()">
             <form id="passagePatientEditForm" onsubmit="savePatientInfoFromPassage(event)" class="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-3xl bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 shadow-2xl">
                 <div class="sticky top-0 z-10 px-6 py-4 bg-white dark:bg-[#121c15] border-b border-slate-100 dark:border-white/5 flex items-center justify-between rounded-t-3xl">
-                    <div class="flex items-center gap-3"><span class="w-10 h-10 rounded-2xl bg-brand-neon/20 text-emerald-700 dark:text-brand-neon flex items-center justify-center"><i class="ph-bold ph-identification-card text-lg"></i></span><div><h2 class="text-sm font-bold text-slate-800 dark:text-white">Modifier la fiche patient</h2><p id="passagePatientEditSubtitle" class="text-[11px] text-slate-500 dark:text-slate-400">Les changements seront repris sur la demande d'examen.</p></div></div>
+                    <div class="flex items-center gap-3"><span class="w-10 h-10 rounded-2xl bg-brand-neon/20 text-emerald-700 dark:text-brand-neon flex items-center justify-center"><i class="ph-bold ph-identification-card text-lg"></i></span><div><h2 class="text-sm font-bold text-slate-800 dark:text-white">Corriger le dossier avant consultation</h2><p id="passagePatientEditSubtitle" class="text-[11px] text-slate-500 dark:text-slate-400">Identité, questionnaire médical et documents d’admission.</p></div></div>
                     <button type="button" onclick="closePassagePatientEditModal()" class="w-9 h-9 rounded-xl text-slate-400 hover:bg-slate-100 dark:hover:bg-white/5"><i class="ph-bold ph-x"></i></button>
                 </div>
                 <input type="hidden" id="passagePatientEditPassageId"><input type="hidden" id="passagePatientEditPatientId">
@@ -1341,11 +1630,36 @@ def render_html() -> str:
                     <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Prénom *</span><input id="passagePatientEditPrenom" required maxlength="100" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
                     <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Date de naissance *</span><input id="passagePatientEditDob" type="date" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
                     <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Genre *</span><select id="passagePatientEditGenre" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option>Homme</option><option>Femme</option><option>Autre</option></select></label>
+                    <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Groupe sanguin *</span><select id="passagePatientEditBloodGroup" required class="w-full px-3 py-2.5 rounded-xl border border-rose-200 dark:border-rose-900/40 bg-rose-50/40 dark:bg-rose-950/20 text-xs font-bold text-rose-700 dark:text-rose-300">{groupes_options}</select></label>
                     <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Téléphone principal *</span><input id="passagePatientEditPhone1" type="tel" required maxlength="30" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
                     <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Téléphone secondaire</span><input id="passagePatientEditPhone2" type="tel" maxlength="30" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
                     <label class="sm:col-span-2"><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">E-mail</span><input id="passagePatientEditEmail" type="email" maxlength="254" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
                     <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Wilaya *</span><select id="passagePatientEditWilaya" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"><option value="">Choisir une wilaya</option>{wilayas_options}</select></label>
                     <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Commune *</span><input id="passagePatientEditCommune" required maxlength="100" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></label>
+                    <div class="sm:col-span-2 rounded-2xl border border-slate-200 dark:border-white/10 p-4">
+                        <h3 class="text-xs font-bold text-slate-800 dark:text-white mb-3">Pièce d’identité et éléments biométriques</h3>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Type de pièce</span><select id="passagePatientEditIdentityType" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs">{identity_types_options}</select></label>
+                            <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Scan de la pièce</span><input id="passagePatientEditIdentityFile" type="file" accept="image/*,application/pdf" class="w-full text-xs" onchange="readPassagePatientFile(event, 'doc_identite')"></label>
+                            <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Photo du dossier</span><input id="passagePatientEditAvatarFile" type="file" accept="image/*" class="w-full text-xs" onchange="readPassagePatientFile(event, 'avatar')"></label>
+                            <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Photo de face</span><input id="passagePatientEditFaceFile" type="file" accept="image/*" class="w-full text-xs" onchange="readPassagePatientFile(event, 'photo_face')"></label>
+                            <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Profil droit</span><input id="passagePatientEditRightFile" type="file" accept="image/*" class="w-full text-xs" onchange="readPassagePatientFile(event, 'photo_profil_droit')"></label>
+                            <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Profil gauche</span><input id="passagePatientEditLeftFile" type="file" accept="image/*" class="w-full text-xs" onchange="readPassagePatientFile(event, 'photo_profil_gauche')"></label>
+                            <label><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Empreinte digitale</span><input id="passagePatientEditFingerprintFile" type="file" accept="image/*" class="w-full text-xs" onchange="readPassagePatientFile(event, 'empreinte_index')"></label>
+                        </div>
+                        <p class="mt-2 text-[10px] text-slate-400">Choisir un nouveau fichier remplace le document actuel. Laisser vide conserve les données existantes.</p>
+                        <div class="mt-3 border-t border-slate-100 dark:border-white/5 pt-3"><div class="flex items-center justify-between mb-2"><span class="text-[11px] font-semibold text-slate-600 dark:text-slate-300">Autres pièces du dossier patient</span><span id="passageEditPiecesCount" class="text-[10px] text-slate-400"></span></div><label class="cursor-pointer inline-flex px-3 py-2 rounded-lg bg-slate-100 dark:bg-white/5 text-[11px] font-semibold"><i class="ph-bold ph-upload-simple mr-1"></i>Ajouter une pièce<input type="file" accept="image/*,application/pdf" class="hidden" onchange="addPassagePatientPiece(event)"></label><div id="passageEditPiecesList" class="space-y-1.5 mt-2"></div></div>
+                    </div>
+                    <div class="sm:col-span-2 mt-2 rounded-2xl border border-sky-100 dark:border-sky-900/30 p-4">
+                        <h3 class="text-xs font-bold text-slate-800 dark:text-white mb-3">Informations médicales de l’admission</h3>
+                        <label class="block mb-4"><span class="block mb-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">Observation médicale</span><textarea id="passageEditObservation" rows="3" maxlength="5000" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs outline-none text-slate-800 dark:text-white"></textarea></label>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-x-5">{questionnaire_edit_html}</div>
+                    </div>
+                    <div class="sm:col-span-2 rounded-2xl border border-slate-200 dark:border-white/10 p-4">
+                        <div class="flex flex-wrap items-center justify-between gap-3 mb-3"><h3 class="text-xs font-bold text-slate-800 dark:text-white">Documents scannés du passage</h3><span id="passageEditDocsCount" class="text-[10px] text-slate-400"></span></div>
+                        <div class="flex flex-wrap items-end gap-2 mb-3"><label class="min-w-40 flex-1"><span class="block mb-1 text-[10px] text-slate-500">Type de document</span><select id="passageEditDocType" class="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs">{doc_types_options}</select></label><label class="cursor-pointer px-3 py-2 rounded-lg bg-slate-900 dark:bg-brand-neon text-white dark:text-black text-[11px] font-bold"><i class="ph-bold ph-upload-simple mr-1"></i>Ajouter un scan<input id="passageEditDocFile" type="file" accept="image/*,application/pdf" class="hidden" onchange="addPassageEditDocument(event)"></label></div>
+                        <div id="passageEditDocsList" class="space-y-1.5"></div>
+                    </div>
                 </div>
                 <div class="px-6 py-4 border-t border-slate-100 dark:border-white/5 bg-slate-50/70 dark:bg-black/10 flex justify-end gap-2 rounded-b-3xl">
                     <button type="button" onclick="closePassagePatientEditModal()" class="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 text-xs font-semibold text-slate-600 dark:text-slate-300">Annuler</button>
@@ -1356,29 +1670,122 @@ def render_html() -> str:
 
         <!-- TABLEAU DES PASSAGES -->
         <div class="bg-white dark:bg-[#121c15] rounded-3xl p-5 shadow-sm border border-slate-100 dark:border-white/5 flex flex-col transition-colors">
+            {'<div class="flex items-center gap-2 mb-2 text-slate-700"><i class="ph-bold ph-list-bullets text-violet-600"></i><h2 class="font-extrabold text-sm">Passages de radiologie</h2></div>' if is_radiology_mode else ''}
             <div class="overflow-x-auto">
                 <table id="passagesDataTable" data-style="classic" class="w-full min-w-[1080px] text-left text-xs table-fixed border-separate border-spacing-0">
                     <thead class="bg-slate-50 dark:bg-white/[0.035]">
                         <tr class="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                            <th class="w-[14%] py-3 pl-3 pr-2 rounded-l-xl font-bold">Passage / horaire</th>
-                            <th class="w-[23%] py-3 px-2 font-bold">Patient</th>
-                            <th class="w-[17%] py-3 px-2 font-bold">Médecin / type</th>
-                            <th class="w-[22%] py-3 px-2 font-bold">Prestations / actes</th>
-                            <th class="w-[15%] py-3 px-2 font-bold">Règlement</th>
-                            <th class="w-[9%] py-3 pl-2 pr-3 rounded-r-xl font-bold text-right">Actions</th>
+                            {table_headers_html}
                         </tr>
                     </thead>
                     <tbody id="passages-table-body" class="text-slate-700 dark:text-slate-300 font-medium"></tbody>
                 </table>
                 <style>
+                    /* Le questionnaire reste immobile lorsque la souris passe dessus. */
+                    #passageModal .passage-questionnaire-section:hover,
+                    #passageModal .passage-questionnaire-section :hover {{ transform:none !important; translate:none !important; scale:1 !important; }}
+                    #passageModal .passage-questionnaire-section {{ box-sizing:border-box; }}
+                    #view-reception[data-view-mode="radiologie"] .passage-style-switch {{ display:none; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable {{ min-width:1100px; border-collapse:collapse; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable thead {{ background:#fff; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable thead th {{ color:#94a3b8; font-size:9px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; border-bottom:1px solid #e2e8f0; }}
+                    #view-reception #passagesDataTable tbody tr.passage-menu-open {{ position:relative; z-index:80; }}
+                    #view-reception #passagesDataTable details.passage-action-menu[open] {{ position:relative; z-index:100; }}
+                    #view-reception #passagesDataTable .passage-action-menu-panel {{ z-index:9999; }}
+                    .passage-action-menu-portal {{ display:block; min-width:205px; padding:5px; overflow:visible; border:1px solid #dbe2ea; border-radius:14px; background:#fff; color:#334155; box-shadow:0 16px 40px rgba(15,23,42,.24); }}
+                    .passage-action-menu-portal .radio-menu-item {{ display:flex; width:100%; align-items:center; gap:8px; padding:9px 10px; border-radius:9px; text-align:left; font-size:11px; color:#334155; cursor:pointer; }}
+                    .passage-action-menu-portal .radio-menu-item:hover {{ background:#f1f5f9; }}
+                    .passage-action-menu-portal button {{ cursor:pointer; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable tbody tr:not(.passage-expand-details) {{ background:#fff; border-bottom:1px solid #e2e8f0; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable tbody tr:not(.passage-expand-details):hover {{ background:#f8fafc; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable tbody tr:not(.passage-expand-details) td {{ color:#111827; padding-top:12px; padding-bottom:12px; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable .radio-state {{ display:inline-flex; align-items:center; justify-content:center; padding:5px 10px; border-radius:9px; color:#fff; font-size:9px; line-height:1.1; font-weight:800; text-transform:uppercase; white-space:nowrap; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable .radio-state-result {{ background:linear-gradient(100deg,#22c7c0,#21c889); }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable .radio-state-muted {{ background:#f05245; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable .radio-state-passage {{ background:#7065df; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable details > summary {{ color:#fff; background:#7562e5; border:0; border-radius:9px; padding:9px 13px; box-shadow:0 3px 8px #7562e544; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable .radio-menu-item {{ display:flex; width:100%; align-items:center; gap:8px; padding:8px 10px; border-radius:8px; text-align:left; font-size:11px; color:#334155; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable .radio-menu-item:hover {{ background:#f1f5f9; }}
                     #passagesDataTable[data-style="cards"] {{ border-spacing: 0 9px; }}
                     #passagesDataTable[data-style="cards"] thead {{ background: #334155; }}
                     #passagesDataTable[data-style="cards"] thead tr {{ color: #fff; }}
                     #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) {{ background: #fff; box-shadow: 0 3px 12px rgba(15,23,42,.08); }}
-                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:first-child {{ border-radius: 14px 0 0 14px; }}
-                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:last-child {{ border-radius: 0 14px 14px 0; }}
+                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:first-child {{ border-left:1px solid #e2e8f0; border-radius:14px 0 0 14px; }}
+                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:last-child {{ border-right:1px solid #e2e8f0; border-radius:0 14px 14px 0; }}
                     #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td {{ border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; color: #1e293b; }}
+                    /* Garde les contenus à l'intérieur des deux bords arrondis de la ligne. */
+                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:first-child {{ box-sizing:border-box; padding-left:16px; overflow:hidden; }}
+                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:first-child > div:first-child {{ display:flex; flex-direction:column; align-items:flex-start; gap:4px; min-width:0; }}
+                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:first-child > div:first-child > span {{ max-width:100%; overflow-wrap:anywhere; line-height:1.35; }}
+                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:last-child {{ box-sizing:border-box; padding-right:16px; overflow:visible; }}
+                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:last-child > details {{ max-width:100%; }}
+                    #passagesDataTable[data-style="cards"] tbody tr:not(.passage-expand-details) td:last-child > details > summary {{ max-width:100%; white-space:nowrap; }}
                     #passagesDataTable[data-style="cards"] tbody tr.passage-expand-details td {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; color: #334155; }}
+                    #passagesDataTable[data-style="worklist"] {{ border-spacing: 0 8px; font-size:13px; }}
+                    #passagesDataTable[data-style="worklist"] thead {{ background: transparent; }}
+                    #passagesDataTable[data-style="worklist"] thead tr {{ color: #94a3b8; }}
+                    #passagesDataTable[data-style="worklist"] thead th {{ padding: 8px 12px; border:0; color: #64748b; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }}
+                    #passagesDataTable[data-style="worklist"] tbody tr:not(.passage-expand-details) {{ background: #f8fafc; transition: background-color .18s ease; }}
+                    #passagesDataTable[data-style="worklist"] tbody tr:not(.passage-expand-details):hover {{ background: #ecfdf5; }}
+                    #passagesDataTable[data-style="worklist"] tbody tr:not(.passage-expand-details) td {{ padding:12px; border:0; background:transparent; color: #1e293b; }}
+                    #passagesDataTable[data-style="worklist"] tbody tr:not(.passage-expand-details) td:first-child {{ border-radius: 12px 0 0 12px; }}
+                    #passagesDataTable[data-style="worklist"] tbody tr:not(.passage-expand-details) td:last-child {{ border-radius: 0 12px 12px 0; }}
+                    #passagesDataTable[data-style="worklist"] tbody tr.passage-expand-details td {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; color: #334155; }}
+                    #passagesDataTable[data-style="worklist"] .passage-worklist-name {{ color: #1e293b; font-size: 13px; font-weight: 800; line-height: 1.25; }}
+                    #passagesDataTable[data-style="worklist"] .passage-worklist-avatar {{ width: 36px; height: 36px; }}
+                    #passagesDataTable[data-style="worklist"] .passage-worklist-ref {{ display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 7px; background: #f1f5f9; color: #64748b; font-size: 9px; font-weight: 700; }}
+                    #passagesDataTable[data-style="worklist"] .passage-worklist-date-line {{ display:flex; align-items:center; flex-wrap:wrap; gap:3px 7px; }}
+                    #passagesDataTable[data-style="worklist"] .passage-worklist-date-line .passage-worklist-ref {{ padding:2px 5px; }}
+                    #passagesDataTable[data-style="worklist"] .passage-worklist-patient-primary {{ display:flex; align-items:center; flex-wrap:wrap; gap:4px 7px; }}
+                    #passagesDataTable[data-style="worklist"] .passage-worklist-patient-primary > div, #passagesDataTable[data-style="worklist"] .passage-worklist-patient-primary > span {{ margin:0; }}
+                    #passagesDataTable[data-style="worklist"] .passage-worklist-action {{ background:transparent; color:#4f46e5; border-color:transparent; padding:8px; font-size:12px; }}
+                    #passagesDataTable[data-style="worklist"] .passage-worklist-action:hover {{ background:#e0e7ff; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] {{ min-width:1000px; border-spacing:0; border-collapse:collapse; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] thead {{ background:#fff; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] thead th {{ padding:11px 14px; border:0; border-bottom:1px solid #e3e7ea; color:#8a96a4; font-size:9px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] thead th:nth-child(6), #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr:not(.passage-expand-details) td:nth-child(6) {{ display:none; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] thead th:nth-child(1), #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr:not(.passage-expand-details) td:nth-child(1) {{ width:29%; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] thead th:nth-child(2), #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr:not(.passage-expand-details) td:nth-child(2) {{ width:18%; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] thead th:nth-child(3), #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr:not(.passage-expand-details) td:nth-child(3) {{ width:29%; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] thead th:nth-child(4), #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr:not(.passage-expand-details) td:nth-child(4) {{ width:14%; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] thead th:nth-child(5), #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr:not(.passage-expand-details) td:nth-child(5) {{ width:10%; text-align:center; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr:not(.passage-expand-details) {{ background:#fff; border-bottom:1px solid #e5e9ed; transition:background .15s ease; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr.passage-essential-row:nth-of-type(4n+1) {{ background:#e9ecef; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr.passage-essential-row:nth-of-type(4n+3) {{ background:#fff; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr:not(.passage-expand-details):hover {{ background:#e3eee8; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr:not(.passage-expand-details) td {{ padding:8px 14px; border:0; background:transparent; color:#263849; vertical-align:middle; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-status {{ display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border-radius:7px; font-size:10px; font-weight:750; white-space:nowrap; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-status.bg-amber-100 {{ background:#fff1c2; color:#946000; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-status.bg-blue-100 {{ background:#e1edff; color:#235ca8; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-status.bg-emerald-100 {{ background:#e4f6eb; color:#16814f; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-status.bg-slate-100 {{ background:#eef1f4; color:#526173; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-name {{ color:#294766; font-size:14px; font-weight:750; line-height:1.25; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-avatar {{ width:42px; height:42px; border-radius:7px; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-date-line {{ display:flex; align-items:center; flex-wrap:wrap; gap:5px 8px; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-time {{ margin-top:3px; color:#718096; font-size:10px; font-weight:650; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-date-icon {{ margin-right:5px; color:#8092a5; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] td:nth-child(3) > div > span:not(.passage-essential-status) {{ display:block; width:fit-content; max-width:100%; padding:0; border:0; border-radius:0; background:transparent; color:#334155; font-size:11px; font-weight:700; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] td:nth-child(3) > div > span:not(.passage-essential-status)::before {{ content:'◈'; display:inline-block; margin-right:8px; color:#6382a2; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-action {{ display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:8px 10px; border:0; border-radius:8px; background:#b7f34a; color:#102315; font-size:10px; font-weight:800; box-shadow:none; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-action:hover {{ background:#a5e63b; }}
+                    #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] .passage-essential-patient-status, #view-reception[data-view-mode="general"] #passagesDataTable[data-style="essential"] tbody tr.passage-expand-details {{ display:none; }}
+                    #passageFiltersModal .passage-filter-modal-card {{ border-color:#d9e7df; box-shadow:0 28px 80px rgba(2,44,34,.35); }}
+                    #passageFiltersModal .passage-filter-modal-head {{ background:linear-gradient(118deg,#0b3328 0%,#12664e 58%,#19a276 100%); border-bottom:1px solid rgba(255,255,255,.14); }}
+                    #passageFiltersModal .passage-filter-modal-icon {{ color:#c7ff69; background:rgba(255,255,255,.13); border:1px solid rgba(255,255,255,.18); box-shadow:0 8px 22px rgba(0,0,0,.14); }}
+                    #passageFiltersModal .passage-filter-modal-body {{ background:linear-gradient(180deg,#f8fbf9 0%,#f1f7f4 100%); }}
+                    #passageFiltersModal .passage-filter-grid > label {{ display:block; padding:12px; border:1px solid #e2ebe5; border-radius:16px; background:rgba(255,255,255,.94); box-shadow:0 2px 7px rgba(15,50,35,.035); transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease; }}
+                    #passageFiltersModal .passage-filter-grid > label:focus-within {{ border-color:#67c99b; box-shadow:0 0 0 3px rgba(16,185,129,.12),0 6px 15px rgba(15,50,35,.06); transform:translateY(-1px); }}
+                    #passageFiltersModal .passage-filter-label, #passageFiltersModal .passage-filter-grid > label > span:first-child {{ display:flex; align-items:center; gap:7px; margin-bottom:8px; color:#475569; font-size:10px; font-weight:800; letter-spacing:.025em; }}
+                    #passageFiltersModal .passage-filter-label i {{ display:inline-flex; align-items:center; justify-content:center; width:23px; height:23px; border-radius:8px; background:#e8f7ef; color:#13835b; font-size:12px; }}
+                    #passageFiltersModal .passage-filter-grid input, #passageFiltersModal .passage-filter-grid select, #passageFiltersModal .passage-filter-search {{ min-height:40px; border:1px solid #dce6df; border-radius:11px; background:#f8faf9; color:#1e293b; transition:border-color .15s ease,background .15s ease; }}
+                    #passageFiltersModal .passage-filter-grid input:focus, #passageFiltersModal .passage-filter-grid select:focus {{ border-color:#34a879; background:#fff; outline:none; box-shadow:0 0 0 3px rgba(16,185,129,.1); }}
+                    #passageFiltersModal .passage-filter-search {{ padding-left:12px; }}
+                    #passageFiltersModal .passage-filter-search input {{ min-height:38px; border:0; box-shadow:none; background:transparent; }}
+                    #passageFiltersModal .passage-filter-modal-footer {{ background:#fff; }}
+                    #passageFiltersModal .passage-filter-clear {{ color:#64748b; background:#f1f5f9; }}
+                    #passageFiltersModal .passage-filter-clear:hover {{ color:#334155; background:#e2e8f0; }}
+                    #passageFiltersModal .passage-filter-apply {{ color:#102315; background:linear-gradient(110deg,#b7f34a,#7ed957); box-shadow:0 5px 14px rgba(113,191,48,.23); }}
+                    #passageFiltersModal .passage-filter-apply:hover {{ filter:brightness(.97); transform:translateY(-1px); }}
                 </style>
             </div>
 
@@ -1419,7 +1826,7 @@ def render_html() -> str:
                     <div class="flex items-center justify-between">
                         <label class="block text-xs font-bold text-slate-800 dark:text-white">1. Patient & Médecin Traitant *</label>
                         <div class="flex items-center gap-2">
-                            <button type="button" onclick="openFullPatientModal()" class="bg-brand-neon text-black px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm inline-flex items-center gap-1.5 hover:opacity-90 transition cursor-pointer">
+                            <button type="button" onclick="openPassagePatientForm()" class="bg-brand-neon text-black px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm inline-flex items-center gap-1.5 hover:opacity-90 transition cursor-pointer">
                                 <i class="ph-bold ph-user-plus"></i>
                                 <span>+ Nouveau Patient</span>
                             </button>
@@ -1434,9 +1841,9 @@ def render_html() -> str:
                     <div class="relative">
                         <div class="flex items-center bg-white dark:bg-[#121c15] rounded-2xl px-3.5 py-2.5 border border-slate-200 dark:border-white/10 focus-within:border-brand-neon">
                             <i class="ph ph-magnifying-glass text-slate-400 mr-2 text-base"></i>
-                            <input type="text" id="passagePatientSearchInput" oninput="searchPassagePatientLive()" placeholder="Nom, prénom, téléphone, dossier ou date de naissance..." class="w-full text-xs outline-none bg-transparent text-slate-800 dark:text-white font-bold">
+                            <input type="text" id="passagePatientSearchInput" oninput="searchPassagePatientLive()" onkeydown="handlePassagePatientSearchKeydown(event)" role="combobox" aria-autocomplete="list" aria-controls="passagePatientSearchResults" aria-expanded="false" placeholder="Nom, prénom, téléphone, dossier ou date de naissance..." class="w-full text-xs outline-none bg-transparent text-slate-800 dark:text-white font-bold">
                         </div>
-                        <div id="passagePatientSearchResults" class="hidden absolute top-full left-0 right-0 mt-1 bg-white dark:bg-[#121c15] rounded-2xl shadow-xl border border-slate-200 dark:border-white/10 max-h-48 overflow-y-auto z-30 divide-y divide-slate-100 dark:divide-white/5"></div>
+                        <div id="passagePatientSearchResults" role="listbox" class="hidden absolute top-full left-0 right-0 mt-1 bg-white dark:bg-[#121c15] rounded-2xl shadow-xl border border-slate-200 dark:border-white/10 max-h-48 overflow-y-auto z-30 divide-y divide-slate-100 dark:divide-white/5"></div>
                     </div>
 
                     <div id="patientSelectedSummaryCard" class="hidden p-3 bg-white dark:bg-[#121c15] rounded-2xl border border-brand-neon/40 flex items-center justify-between">
@@ -1456,9 +1863,9 @@ def render_html() -> str:
                         <div class="relative">
                             <div class="flex items-center bg-white dark:bg-[#121c15] rounded-2xl px-3.5 py-2 border border-slate-200 dark:border-white/10 focus-within:border-brand-neon">
                                 <i class="ph ph-stethoscope text-slate-400 mr-2 text-base"></i>
-                                <input type="text" id="passageMedecinTraitantSearchInput" oninput="searchPassageMedecinTraitantLive()" placeholder="Rechercher par nom du médecin traitant..." class="w-full text-xs outline-none bg-transparent text-slate-800 dark:text-white font-bold">
+                                <input type="text" id="passageMedecinTraitantSearchInput" oninput="searchPassageMedecinTraitantLive()" onkeydown="handlePassageMedecinTraitantSearchKeydown(event)" role="combobox" aria-autocomplete="list" aria-controls="passageMedecinTraitantSearchResults" aria-expanded="false" placeholder="Rechercher par nom du médecin traitant..." class="w-full text-xs outline-none bg-transparent text-slate-800 dark:text-white font-bold">
                             </div>
-                            <div id="passageMedecinTraitantSearchResults" class="hidden absolute top-full left-0 right-0 mt-1 bg-white dark:bg-[#121c15] rounded-2xl shadow-xl border border-slate-200 dark:border-white/10 max-h-48 overflow-y-auto z-30 divide-y divide-slate-100 dark:divide-white/5"></div>
+                            <div id="passageMedecinTraitantSearchResults" role="listbox" class="hidden absolute top-full left-0 right-0 mt-1 bg-white dark:bg-[#121c15] rounded-2xl shadow-xl border border-slate-200 dark:border-white/10 max-h-48 overflow-y-auto z-30 divide-y divide-slate-100 dark:divide-white/5"></div>
                         </div>
 
                         <div id="medecinTraitantSelectedCard" class="hidden mt-2 p-2.5 bg-brand-neon/10 rounded-2xl border border-brand-neon/30 flex items-center justify-between">
@@ -1468,6 +1875,22 @@ def render_html() -> str:
                             </div>
                             <button type="button" onclick="clearSelectedMedecinTraitant()" class="text-rose-500 text-xs font-bold px-2 py-1">Retirer</button>
                         </div>
+                    </div>
+                </div>
+
+                <div id="passagePersonalEditFields" class="hidden bg-white dark:bg-[#121c15] p-4 rounded-3xl border border-sky-200 dark:border-sky-900/40 space-y-3">
+                    <div><h4 class="text-xs font-bold text-slate-800 dark:text-white">Informations personnelles du patient</h4><p class="text-[10px] text-slate-500 mt-1">Corrigez ici l’identité et les coordonnées avant de poursuivre le passage.</p></div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">Nom *</span><input id="passageEditPatientNom" required disabled maxlength="100" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"></label>
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">Prénom *</span><input id="passageEditPatientPrenom" required disabled maxlength="100" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"></label>
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">Date de naissance *</span><input id="passageEditPatientDob" type="date" required disabled class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"></label>
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">Genre *</span><select id="passageEditPatientGenre" required disabled class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"><option>Homme</option><option>Femme</option><option>Autre</option></select></label>
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">Groupe sanguin *</span><select id="passageEditPatientBlood" required disabled class="w-full px-3 py-2.5 rounded-xl border border-rose-200 dark:border-rose-900/40 bg-rose-50/40 dark:bg-rose-950/20 text-xs font-bold text-rose-700 dark:text-rose-300">{groupes_options}</select></label>
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">Téléphone principal *</span><input id="passageEditPatientPhone1" type="tel" required disabled maxlength="30" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"></label>
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">Téléphone secondaire</span><input id="passageEditPatientPhone2" type="tel" disabled maxlength="30" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"></label>
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">E-mail</span><input id="passageEditPatientEmail" type="email" disabled maxlength="254" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"></label>
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">Wilaya *</span><select id="passageEditPatientWilaya" required disabled class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"><option value="">Choisir une wilaya</option>{wilayas_options}</select></label>
+                        <label><span class="block mb-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300">Commune *</span><input id="passageEditPatientCommune" required disabled maxlength="100" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 text-xs text-slate-800 dark:text-white"></label>
                     </div>
                 </div>
 
@@ -1552,7 +1975,7 @@ def render_html() -> str:
                 </div>
 
                 <!-- 5. ENCAISSEMENT & REMISE -->
-                <div class="bg-brand-neon/10 dark:bg-brand-neon/5 p-4 rounded-3xl border border-brand-neon/20 space-y-4">
+                <div id="passageFinancialSection" class="bg-brand-neon/10 dark:bg-brand-neon/5 p-4 rounded-3xl border border-brand-neon/20 space-y-4">
                     <div class="flex items-center justify-between border-b border-brand-neon/20 pb-2">
                         <h4 class="text-xs font-bold text-emerald-950 dark:text-brand-neon uppercase tracking-wider flex items-center gap-1.5">
                             <i class="ph-bold ph-credit-card text-base"></i>
@@ -1642,7 +2065,7 @@ def render_html() -> str:
                 </div>
 
                 <!-- 7. QUESTIONNAIRE MÉDICAL BILINGUE EXACT -->
-                <div class="bg-white dark:bg-[#121c15] p-5 rounded-3xl border border-slate-200 dark:border-white/10 space-y-4">
+                <div class="passage-questionnaire-section bg-white dark:bg-[#121c15] p-5 rounded-3xl border border-slate-200 dark:border-white/10 space-y-4">
                     <h4 class="text-xs font-bold text-slate-800 dark:text-white uppercase tracking-wider border-b border-slate-100 dark:border-white/5 pb-2">
                         📋 6. Questionnaire Médical & Antécédents
                     </h4>
@@ -1795,7 +2218,7 @@ def render_html() -> str:
         <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-4xl max-h-[96vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between bg-slate-50/50 dark:bg-black/20 flex-shrink-0">
                 <h3 class="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2">
-                    <i class="ph-bold ph-user-plus text-brand-neon"></i> Fiche Patient Complète (Sélection Automatique dans le Passage)
+                    <i class="ph-bold ph-user-plus text-brand-neon"></i> <span id="fullPatientModalTitle">Fiche Patient Complète (Sélection Automatique dans le Passage)</span>
                 </h3>
                 <button type="button" onclick="closeFullPatientModal()" class="text-slate-400 hover:text-white p-1">✕</button>
             </div>
@@ -1819,15 +2242,15 @@ def render_html() -> str:
                     </div>
                     <div class="grid grid-cols-3 gap-3">
                         <div class="bg-white dark:bg-black/30 p-2 rounded-2xl border border-slate-200 dark:border-white/10 flex items-center space-x-2.5">
-                            <img id="recPreviewFace" src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120" class="w-10 h-10 rounded-xl object-cover border border-brand-neon">
+                            <img id="recPreviewFace" src="/static/images/avatar-placeholder.svg?w=120" class="w-10 h-10 rounded-xl object-cover border border-brand-neon">
                             <span class="text-[11px] font-bold text-slate-800 dark:text-white">1. Face</span>
                         </div>
                         <div class="bg-white dark:bg-black/30 p-2 rounded-2xl border border-slate-200 dark:border-white/10 flex items-center space-x-2.5">
-                            <img id="recPreviewPDroit" src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120" class="w-10 h-10 rounded-xl object-cover border border-slate-200 opacity-40">
+                            <img id="recPreviewPDroit" src="/static/images/avatar-placeholder.svg?w=120" class="w-10 h-10 rounded-xl object-cover border border-slate-200 opacity-40">
                             <span class="text-[11px] font-bold text-slate-400">2. Profil Droit</span>
                         </div>
                         <div class="bg-white dark:bg-black/30 p-2 rounded-2xl border border-slate-200 dark:border-white/10 flex items-center space-x-2.5">
-                            <img id="recPreviewPGauche" src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120" class="w-10 h-10 rounded-xl object-cover border border-slate-200 opacity-40">
+                            <img id="recPreviewPGauche" src="/static/images/avatar-placeholder.svg?w=120" class="w-10 h-10 rounded-xl object-cover border border-slate-200 opacity-40">
                             <span class="text-[11px] font-bold text-slate-400">3. Profil Gauche</span>
                         </div>
                     </div>
@@ -1901,7 +2324,7 @@ def render_html() -> str:
 
                 <div class="flex items-center justify-end space-x-3 pt-3 border-t border-slate-100 dark:border-white/5">
                     <button type="button" onclick="closeFullPatientModal()" class="px-4 py-2 rounded-xl text-slate-400 hover:text-white text-xs font-semibold">Annuler</button>
-                    <button type="submit" class="px-6 py-2.5 rounded-xl bg-brand-neon text-black text-xs font-bold shadow-md">Enregistrer & Sélectionner</button>
+                    <button id="fullPatientModalSubmit" type="submit" class="px-6 py-2.5 rounded-xl bg-brand-neon text-black text-xs font-bold shadow-md">Enregistrer & Sélectionner</button>
                 </div>
             </form>
         </div>
@@ -2091,16 +2514,33 @@ def render_html() -> str:
         </div>
     </div>
 
+    {patient_form_component}
+
     <!-- SCRIPT DU MODULE ACCUEIL & PASSAGES -->
     <script>
         (function() {{
             const ALGERIA_WILAYAS_DATA = {wilayas_json};
+            const IS_RADIOLOGY_MODE = {str(is_radiology_mode).lower()};
             let passagesData = [];
+            let passageActionMenuCloseTimer = null;
             let canMagicDeletePassages = false;
             let canEditPatientInfo = false;
+            let currentPatientEditDocs = [];
+            let currentPatientEditQuestionnaire = {{}};
+            let currentPatientEditFiles = {{}};
+            let currentPatientEditPieces = [];
+            let passageEditMode = false;
+            let passageEditPatientData = null;
+            let passageEditPatientDraft = null;
             let filteredPassagesList = [];
             let receptionInitData = {{ patients: [], consultations: [], medecins_traitants: [], horaires_tarification: {{}}, clinic_name: '' }};
+            let passagePatientSearchMatches = [];
+            let passagePatientSearchActiveIndex = -1;
+            let passageMedecinSearchMatches = [];
+            let passageMedecinSearchActiveIndex = -1;
+            const normalizePassageSpecialite = value => String(value || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
             let currentPassageActs = [];
+            let currentPassageTypeValue = '';
             let currentPassageScannedDocs = [];
             let currentMatchingPrestations = [];
             let selectedPrestationTemp = null;
@@ -2109,8 +2549,11 @@ def render_html() -> str:
             let passageViewerDocs = [];
             let passageViewerDocIndex = 0;
             let passageViewerZoom = 1;
-            let passageDisplayStyle = 'classic';
-            try {{ passageDisplayStyle = localStorage.getItem('clinivaPassagesDisplayStyle') || 'classic'; }} catch (_) {{}}
+            let passageDisplayStyle = 'worklist';
+            try {{
+                const savedPassageStyle = localStorage.getItem('clinivaPassagesDisplayStyleV2');
+                passageDisplayStyle = ['classic', 'cards', 'worklist', 'essential'].includes(savedPassageStyle) ? savedPassageStyle : 'worklist';
+            }} catch (_) {{}}
 
             let currentPassagePage = 1;
             const PASSAGES_PER_PAGE = 15;
@@ -2120,12 +2563,23 @@ def render_html() -> str:
             // =================================================================
             window.loadReceptionPassagesModule = async function() {{
                 try {{
-                    const res = await fetch('/api/reception/passages');
+                    const res = await fetch('/api/reception/passages?service=' + (IS_RADIOLOGY_MODE ? 'radiologie' : 'autres'));
                     const data = await res.json();
                     passagesData = data.passages || [];
                     canMagicDeletePassages = data.can_magic_delete === true;
                     canEditPatientInfo = data.can_edit_patient_info === true;
                     receptionInitData = data.init_data || {{}};
+
+                    if (IS_RADIOLOGY_MODE) {{
+                        document.querySelectorAll('#passageFiltersModal label:has(#filterPassageNumero), #passageFiltersModal label:has(#filterPassageTelephone), #passageFiltersModal label:has(#filterPassageDateNaissance), #passageFiltersModal label:has(#filterPassageMedecin), #passageFiltersModal label:has(#filterPassageActe), #passageFiltersModal label:has(#filterPassageType), #passageFiltersModal label:has(#filterPassageStatut)').forEach(label => label.style.display = 'none');
+                        const modalityFilter = document.getElementById('filterPassageModalite');
+                        if (modalityFilter) {{
+                            const selected = modalityFilter.value;
+                            modalityFilter.replaceChildren(new Option('Toutes les modalités', ''));
+                            (receptionInitData.radiology_modalites || []).forEach(modality => modalityFilter.add(new Option(modality, modality)));
+                            modalityFilter.value = selected;
+                        }}
+                    }}
 
                     const typeFilter = document.getElementById('filterPassageType');
                     if (typeFilter) {{
@@ -2138,6 +2592,14 @@ def render_html() -> str:
 
                     const counter = document.getElementById('totalPassagesCount');
                     if (counter) counter.innerText = data.total_count || passagesData.length;
+                    const dateStartFilter = document.getElementById('filterPassageDateDebut');
+                    const dateEndFilter = document.getElementById('filterPassageDateFin');
+                    if (dateStartFilter && dateEndFilter && !dateStartFilter.value && !dateEndFilter.value) {{
+                        const today = new Date();
+                        const todayLocal = `${{today.getFullYear()}}-${{String(today.getMonth() + 1).padStart(2, '0')}}-${{String(today.getDate()).padStart(2, '0')}}`;
+                        dateStartFilter.value = todayLocal;
+                        dateEndFilter.value = todayLocal;
+                    }}
                     filterPassages();
                 }} catch (err) {{
                     console.error("Erreur chargement passages:", err);
@@ -2173,6 +2635,31 @@ def render_html() -> str:
                 if (modal) {{ modal.classList.add('hidden'); modal.classList.remove('flex'); }}
             }};
 
+            window.applyPassageDateShortcut = function(shortcut) {{
+                if (!shortcut) return;
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const start = new Date(today);
+                const end = new Date(today);
+                if (shortcut === 'yesterday') {{ start.setDate(start.getDate() - 1); end.setDate(end.getDate() - 1); }}
+                else if (shortcut === 'day_before') {{ start.setDate(start.getDate() - 2); end.setDate(end.getDate() - 2); }}
+                else if (shortcut === '3days') start.setDate(start.getDate() - 2);
+                else if (shortcut === '7weeks') start.setDate(start.getDate() - 48);
+                else if (shortcut === '15days') start.setDate(start.getDate() - 14);
+                else if (shortcut === 'month') {{
+                    const dayOfMonth = start.getDate();
+                    start.setDate(1);
+                    start.setMonth(start.getMonth() - 1);
+                    const lastDay = new Date(start.getFullYear(), start.getMonth() + 1, 0).getDate();
+                    start.setDate(Math.min(dayOfMonth, lastDay));
+                }}
+                const toISODate = date => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
+                const startInput = document.getElementById('filterPassageDateDebut');
+                const endInput = document.getElementById('filterPassageDateFin');
+                if (startInput) startInput.value = toISODate(start);
+                if (endInput) endInput.value = toISODate(end);
+            }};
+
             window.filterPassages = function() {{
                 const value = id => (document.getElementById(id)?.value || '').trim();
                 const q = value('filterPassageSearch').toLocaleLowerCase('fr');
@@ -2185,6 +2672,9 @@ def render_html() -> str:
                 const dateNaissance = value('filterPassageDateNaissance');
                 const dateDebut = value('filterPassageDateDebut');
                 const dateFin = value('filterPassageDateFin');
+                const modalite = value('filterPassageModalite').toLocaleLowerCase('fr');
+                const etat = value('filterPassageEtat');
+                const resultat = value('filterPassageResultat');
 
                 filteredPassagesList = passagesData.filter(p => {{
                     const patient = `${{p.nom || ''}} ${{p.prenom || ''}}`.toLocaleLowerCase('fr');
@@ -2201,18 +2691,25 @@ def render_html() -> str:
                         .flatMap(value => [String(value), Number(value).toLocaleString('fr-FR')]).join(' ');
                     const searchable = [patient, p.telephone_1 || '', dobRaw, dobISO, dobDisplay, p.type_passage || '', p.statut || '', p.date_passage || '', p.heure_passage || '', p.id_passage || '', medecinNom, actes, financialValues].join(' ').toLocaleLowerCase('fr');
                     const passageDate = String(p.date_passage || '').slice(0, 10);
+                    const resultAvailable = String(p.statut || '').toLocaleLowerCase('fr') === 'terminé'.toLocaleLowerCase('fr') || (p.documents_scannes || []).some(doc => /résultat|resultat|compte.?rendu|livret/i.test(String(doc.type || '')));
                     const idMatch = !numero || String(p.id_passage || '').replace(/^0+/, '').includes(numero);
-                    return (!q || searchable.includes(q)) && idMatch &&
+                    const patientSearchMatch = !q || patient.includes(q);
+                    const modalityMatch = !modalite || (p.modalites || []).some(item => String(item).toLocaleLowerCase('fr') === modalite);
+                    const doneMatch = !etat || (etat === 'fait' ? String(p.statut || '').toLocaleLowerCase('fr') === 'terminé' : String(p.statut || '').toLocaleLowerCase('fr') !== 'terminé');
+                    const resultMatch = !resultat || (resultat === 'disponible' ? resultAvailable : !resultAvailable);
+                    return (IS_RADIOLOGY_MODE ? patientSearchMatch : (!q || searchable.includes(q))) && (IS_RADIOLOGY_MODE || idMatch) &&
+                        (IS_RADIOLOGY_MODE ||
                         (!telephone || String(p.telephone_1 || '').replace(/\\s+/g, '').includes(telephone)) &&
                         (!dateNaissance || dobISO === dateNaissance) &&
                         (!medecin || medecinNom.includes(medecin)) &&
                         (!acte || actes.includes(acte)) &&
                         (!type || String(p.type_passage || '').toLocaleLowerCase('fr') === type) &&
-                        (!statut || String(p.statut || '').toLocaleLowerCase('fr') === statut) &&
-                        (!dateDebut || passageDate >= dateDebut) && (!dateFin || passageDate <= dateFin);
+                        (!statut || String(p.statut || '').toLocaleLowerCase('fr') === statut)) &&
+                        (!dateDebut || passageDate >= dateDebut) && (!dateFin || passageDate <= dateFin) &&
+                        (!IS_RADIOLOGY_MODE || (modalityMatch && doneMatch && resultMatch));
                 }});
 
-                const activeCount = [q, numero, telephone, dateNaissance, medecin, acte, type, statut, dateDebut, dateFin].filter(Boolean).length;
+                const activeCount = (IS_RADIOLOGY_MODE ? [q, dateDebut, dateFin, modalite, etat, resultat] : [q, numero, telephone, dateNaissance, medecin, acte, type, statut, dateDebut, dateFin]).filter(Boolean).length;
                 const countBadge = document.getElementById('passageFilterCount');
                 const clearButton = document.getElementById('clearPassageFiltersBtn');
                 const summary = document.getElementById('passageFilterSummary');
@@ -2225,19 +2722,30 @@ def render_html() -> str:
                 renderPassagesTable();
             }};
 
-            window.applyPassageFilters = function() {{
+            window.applyPassageFilters = function(event) {{
+                event?.preventDefault?.();
                 const dateDebut = document.getElementById('filterPassageDateDebut')?.value;
                 const dateFin = document.getElementById('filterPassageDateFin')?.value;
                 if (dateDebut && dateFin && dateDebut > dateFin) {{
                     alert("La date de début doit être antérieure ou égale à la date de fin.");
                     return;
                 }}
-                filterPassages();
-                closePassageFiltersModal();
+                try {{
+                    filterPassages();
+                    const resultCount = filteredPassagesList.length;
+                    closePassageFiltersModal();
+                    if (resultCount === 0) {{
+                        if (typeof window.showToast === 'function') window.showToast('Aucun passage ne correspond aux critères sélectionnés.', 'warning');
+                    }}
+                }} catch (error) {{
+                    console.error('Erreur lors de l’application des filtres des passages :', error);
+                    if (typeof window.showToast === 'function') window.showToast(error.message || 'Le filtre n’a pas pu être appliqué.', 'error');
+                    else alert(error.message || 'Le filtre n’a pas pu être appliqué.');
+                }}
             }};
 
             window.clearPassageFilters = function() {{
-                ['filterPassageSearch', 'filterPassageNumero', 'filterPassageTelephone', 'filterPassageDateNaissance', 'filterPassageMedecin', 'filterPassageActe', 'filterPassageType', 'filterPassageStatut', 'filterPassageDateDebut', 'filterPassageDateFin'].forEach(id => {{
+                ['filterPassageSearch', 'filterPassageNumero', 'filterPassageTelephone', 'filterPassageDateNaissance', 'filterPassageMedecin', 'filterPassageActe', 'filterPassageType', 'filterPassageStatut', 'filterPassageDateShortcut', 'filterPassageDateDebut', 'filterPassageDateFin', 'filterPassageModalite', 'filterPassageEtat', 'filterPassageResultat'].forEach(id => {{
                     const field = document.getElementById(id);
                     if (field) field.value = '';
                 }});
@@ -2249,32 +2757,77 @@ def render_html() -> str:
                     .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
             }}
 
-            window.openPassagePatientEditModal = function(passageId) {{
+            window.openPassagePatientEditModal = async function(passageId) {{
                 if (!canEditPatientInfo) return;
                 const patient = passagesData.find(p => Number(p.id_passage) === Number(passageId));
                 if (!patient) return;
-                const setValue = (id, value) => {{ const field = document.getElementById(id); if (field) field.value = value ?? ''; }};
-                setValue('passagePatientEditPassageId', patient.id_passage);
-                setValue('passagePatientEditPatientId', patient.id_patient);
-                setValue('passagePatientEditNom', patient.nom);
-                setValue('passagePatientEditPrenom', patient.prenom);
-                setValue('passagePatientEditDob', String(patient.date_naissance || '').slice(0, 10));
-                setValue('passagePatientEditGenre', patient.genre || 'Homme');
-                setValue('passagePatientEditPhone1', patient.telephone_1 === '-' ? '' : patient.telephone_1);
-                setValue('passagePatientEditPhone2', patient.telephone_2);
-                setValue('passagePatientEditEmail', patient.email === '-' ? '' : patient.email);
-                const wilaya = document.getElementById('passagePatientEditWilaya');
-                if (wilaya) {{
-                    const existing = Array.from(wilaya.options).some(option => option.value === (patient.wilaya || ''));
-                    if (!existing && patient.wilaya) wilaya.add(new Option(patient.wilaya, patient.wilaya));
-                    wilaya.value = patient.wilaya || '';
+                if (!patient.editable_pre_consultation) {{
+                    if (typeof window.showToast === 'function') window.showToast('Modification verrouillée : le passage a été encaissé ou la consultation DME a commencé.', 'warning');
+                    return;
                 }}
-                setValue('passagePatientEditCommune', patient.commune);
-                const subtitle = document.getElementById('passagePatientEditSubtitle');
-                if (subtitle) subtitle.textContent = `${{patient.nom || ''}} ${{patient.prenom || ''}} · #PASS-${{String(passageId).padStart(4, '0')}}`;
-                const modal = document.getElementById('passagePatientEditModal');
-                modal?.classList.remove('hidden');
-                modal?.classList.add('flex');
+                try {{
+                    const response = await fetch(`/api/reception/patient/edit-data/${{passageId}}`);
+                    const editData = await response.json();
+                    if (!response.ok) throw new Error(editData.detail || 'La fiche ne peut plus être modifiée.');
+                    Object.assign(patient, editData);
+                }} catch (error) {{
+                    if (typeof window.showToast === 'function') window.showToast(error.message, 'error');
+                    return;
+                }}
+                passageEditMode = true;
+                passageEditPatientData = {{ ...patient }};
+                passageEditPatientDraft = {{ ...patient }};
+                passageEditPatientData.id_passage = Number(passageId);
+                passageEditPatientDraft.id_passage = Number(passageId);
+                openPassageModal(true);
+                const setValue = (id, value) => {{ const field = document.getElementById(id); if (field) field.value = value ?? ''; }};
+                setValue('passageId', patient.id_passage);
+                selectPassagePatient(patient.id_patient);
+                selectPassageMedecinTraitant(Number(patient.medecin_traitant_id));
+                setValue('passageEditPatientNom', patient.nom);
+                setValue('passageEditPatientPrenom', patient.prenom);
+                setValue('passageEditPatientDob', String(patient.date_naissance || '').slice(0, 10));
+                setValue('passageEditPatientGenre', patient.genre || 'Homme');
+                setValue('passageEditPatientBlood', patient.groupe_sanguin || 'O+');
+                setValue('passageEditPatientPhone1', patient.telephone_1 === '-' ? '' : patient.telephone_1);
+                setValue('passageEditPatientPhone2', patient.telephone_2);
+                setValue('passageEditPatientEmail', patient.email === '-' ? '' : patient.email);
+                const patientWilaya = document.getElementById('passageEditPatientWilaya');
+                if (patientWilaya) {{
+                    if (patient.wilaya && !Array.from(patientWilaya.options).some(option => option.value === patient.wilaya)) patientWilaya.add(new Option(patient.wilaya, patient.wilaya));
+                    patientWilaya.value = patient.wilaya || '';
+                }}
+                setValue('passageEditPatientCommune', patient.commune);
+                populatePassageTypeSelect(patient.type_passage || '');
+                setValue('passageDate', String(patient.date_passage || '').slice(0, 10));
+                setValue('passageHeure', String(patient.heure_passage || '').slice(0, 5));
+                setValue('passageStatutSelect', 'En attente');
+                currentPassageActs = JSON.parse(JSON.stringify(patient.actes || []));
+                currentPassageScannedDocs = JSON.parse(JSON.stringify(patient.documents_scannes || []));
+                renderPassageActsTable();
+                renderPassageScannedDocsGallery();
+                setValue('passageObservation', patient.questionnaire?.observation_medicale || patient.questionnaire?.observation || '');
+                const qMap = {{ hospitalise: 'q_hospitalise', dossier_interne: 'q_dossier_interne', dossier_externe: 'q_dossier_externe', urgence_vitale: 'q_urgence_vitale', grossesse: 'q_grossesse', allergie: 'q_allergie', diabete: 'q_diabete', hta: 'q_hta', asthme: 'q_asthme', insuffisance_renale: 'q_insuffisance_renale', pace_maker: 'q_pace_maker', valve_cardiaque: 'q_valve_cardiaque', prothese_metallique: 'q_prothese_metallique' }};
+                Object.entries(qMap).forEach(([key, radioName]) => setRadioVal(radioName, patient.questionnaire?.[key] || 'NON'));
+                setValue('passageRemiseValeur', patient.remise_valeur ?? patient.remise ?? 0);
+                setRemiseType(patient.remise_type || 'DA');
+                setValue('passageAccordeurRemise', patient.accordeur_remise || '');
+                setValue('passageVersement', patient.versement || 0);
+                setValue('passageModePaiement', patient.mode_paiement || 'Espèces');
+                calculatePassageFinancials();
+                const title = document.getElementById('passageModalTitle');
+                if (title) title.textContent = `Corriger le passage #PASS-${{String(passageId).padStart(4, '0')}}`;
+                const saveLabel = document.querySelector('#btnSubmitPassage');
+                if (saveLabel) saveLabel.textContent = 'Enregistrer les corrections';
+                const newPatientButton = document.querySelector('#passageForm button[onclick="openPassagePatientForm()"] span');
+                if (newPatientButton) newPatientButton.textContent = 'Modifier la fiche patient';
+                const financialSection = document.getElementById('passageFinancialSection');
+                financialSection?.querySelectorAll('input,select,button').forEach(control => control.disabled = true);
+                const statusSelect = document.getElementById('passageStatutSelect');
+                if (statusSelect) statusSelect.disabled = true;
+                const changePatientButton = document.querySelector('#patientSelectedSummaryCard button[onclick="clearSelectedPatient()"]');
+                if (changePatientButton) changePatientButton.classList.add('hidden');
+                checkPassageFormValidity();
             }};
 
             window.closePassagePatientEditModal = function() {{
@@ -2282,6 +2835,77 @@ def render_html() -> str:
                 modal?.classList.add('hidden');
                 modal?.classList.remove('flex');
             }};
+
+            function renderPassageEditDocs() {{
+                const list = document.getElementById('passageEditDocsList');
+                const count = document.getElementById('passageEditDocsCount');
+                if (!list) return;
+                if (count) count.textContent = `${{currentPatientEditDocs.length}} document(s)`;
+                list.innerHTML = currentPatientEditDocs.length
+                    ? currentPatientEditDocs.map((doc, index) => `<div class="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-50 dark:bg-black/20 text-[11px]"><span class="min-w-0 truncate"><i class="ph-bold ph-file text-brand-neon mr-1"></i>${{escapePassageDisplay(doc.type || `Document ${{index + 1}}`)}}</span><span class="flex items-center gap-1"><button type="button" onclick="viewPassageEditDocument(${{index}})" class="px-2 py-1 rounded-lg text-sky-600 hover:bg-sky-50 dark:hover:bg-white/5">Voir</button><button type="button" onclick="removePassageEditDocument(${{index}})" class="px-2 py-1 rounded-lg text-rose-600 hover:bg-rose-50 dark:hover:bg-white/5">Retirer</button></span></div>`).join('')
+                    : '<div class="py-3 text-center text-[10px] text-slate-400">Aucun document scanné.</div>';
+            }}
+
+            window.viewPassageEditDocument = function(index) {{
+                const doc = currentPatientEditDocs[index];
+                if (doc) openPassageDocCollection(currentPatientEditDocs, index);
+            }};
+
+            window.removePassageEditDocument = function(index) {{
+                currentPatientEditDocs.splice(index, 1);
+                renderPassageEditDocs();
+            }};
+
+            window.addPassageEditDocument = function(event) {{
+                const file = event.target.files?.[0];
+                if (!file) return;
+                if (file.size > 12 * 1024 * 1024) {{
+                    alert('Chaque document doit faire moins de 12 Mo.');
+                    event.target.value = '';
+                    return;
+                }}
+                const reader = new FileReader();
+                reader.onload = () => {{
+                    currentPatientEditDocs.push({{
+                        type: document.getElementById('passageEditDocType')?.value || 'Document scanné',
+                        heure: new Date().toLocaleTimeString('fr-FR', {{ hour: '2-digit', minute: '2-digit' }}),
+                        data: reader.result
+                    }});
+                    renderPassageEditDocs();
+                    event.target.value = '';
+                }};
+                reader.readAsDataURL(file);
+            }};
+
+            window.readPassagePatientFile = function(event, field) {{
+                const file = event.target.files?.[0];
+                if (!file) return;
+                if (file.size > 12 * 1024 * 1024) {{
+                    alert('Chaque fichier doit faire moins de 12 Mo.');
+                    event.target.value = '';
+                    return;
+                }}
+                const reader = new FileReader();
+                reader.onload = () => {{ currentPatientEditFiles[field] = reader.result; }};
+                reader.readAsDataURL(file);
+            }};
+
+            function renderPassageEditPieces() {{
+                const list = document.getElementById('passageEditPiecesList');
+                const count = document.getElementById('passageEditPiecesCount');
+                if (count) count.textContent = `${{currentPatientEditPieces.length}} pièce(s)`;
+                if (!list) return;
+                list.innerHTML = currentPatientEditPieces.map((piece, index) => `<div class="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-50 dark:bg-black/20 text-[11px]"><span class="truncate">${{escapePassageDisplay(piece.type || `Pièce ${{index + 1}}`)}}</span><span class="flex gap-1"><button type="button" onclick="viewPassagePatientPiece(${{index}})" class="px-2 py-1 text-sky-600">Voir</button><button type="button" onclick="removePassagePatientPiece(${{index}})" class="px-2 py-1 text-rose-600">Retirer</button></span></div>`).join('') || '<div class="text-[10px] text-slate-400">Aucune autre pièce.</div>';
+            }}
+            window.addPassagePatientPiece = function(event) {{
+                const file = event.target.files?.[0]; if (!file) return;
+                if (file.size > 12 * 1024 * 1024) {{ alert('Chaque fichier doit faire moins de 12 Mo.'); event.target.value = ''; return; }}
+                const reader = new FileReader();
+                reader.onload = () => {{ currentPatientEditPieces.push({{ type: file.name, data: reader.result }}); renderPassageEditPieces(); event.target.value = ''; }};
+                reader.readAsDataURL(file);
+            }};
+            window.viewPassagePatientPiece = index => openPassageDocCollection(currentPatientEditPieces, index);
+            window.removePassagePatientPiece = index => {{ currentPatientEditPieces.splice(index, 1); renderPassageEditPieces(); }};
 
             window.savePatientInfoFromPassage = async function(event) {{
                 event.preventDefault();
@@ -2299,14 +2923,24 @@ def render_html() -> str:
                             id_patient: Number(value('passagePatientEditPatientId')),
                             nom: value('passagePatientEditNom'), prenom: value('passagePatientEditPrenom'),
                             date_naissance: value('passagePatientEditDob'), genre: value('passagePatientEditGenre'),
+                            groupe_sanguin: value('passagePatientEditBloodGroup'),
                             telephone_1: value('passagePatientEditPhone1'), telephone_2: value('passagePatientEditPhone2'),
-                            email: value('passagePatientEditEmail'), wilaya: value('passagePatientEditWilaya'), commune: value('passagePatientEditCommune')
+                            email: value('passagePatientEditEmail'), wilaya: value('passagePatientEditWilaya'), commune: value('passagePatientEditCommune'),
+                            type_piece_identite: value('passagePatientEditIdentityType'),
+                            ...currentPatientEditFiles,
+                            pieces_scannees: currentPatientEditPieces,
+                            questionnaire: {{
+                                ...currentPatientEditQuestionnaire,
+                                observation_medicale: value('passageEditObservation'),
+                                ...Object.fromEntries(Array.from(document.querySelectorAll('[id^="passageEditQuestionnaire_"]')).map(select => [select.id.replace('passageEditQuestionnaire_', ''), select.value]))
+                            }},
+                            documents_scannes: currentPatientEditDocs
                         }})
                     }});
                     const result = await response.json();
                     if (!response.ok || result.success === false) throw new Error(result.detail || result.message || 'La fiche patient n’a pas pu être mise à jour.');
                     closePassagePatientEditModal();
-                    if (typeof window.showToast === 'function') window.showToast('Fiche patient mise à jour. Demande d’examen régénérée avec les nouvelles informations.', 'success');
+                    if (typeof window.showToast === 'function') window.showToast('Dossier corrigé. La demande d’examen est régénérée avec les nouvelles informations.', 'success');
                     await loadReceptionPassagesModule();
                     openDemandeExamenModal(passageId);
                 }} catch (error) {{
@@ -2318,8 +2952,8 @@ def render_html() -> str:
             }};
 
             window.setPassageDisplayStyle = function(style) {{
-                passageDisplayStyle = style === 'cards' ? 'cards' : 'classic';
-                try {{ localStorage.setItem('clinivaPassagesDisplayStyle', passageDisplayStyle); }} catch (_) {{}}
+                passageDisplayStyle = ['classic', 'cards', 'worklist', 'essential'].includes(style) ? style : 'classic';
+                try {{ localStorage.setItem('clinivaPassagesDisplayStyleV2', passageDisplayStyle); }} catch (_) {{}}
                 renderPassagesTable();
             }};
 
@@ -2331,16 +2965,157 @@ def render_html() -> str:
                 if (button) button.textContent = open ? '−' : '+';
             }};
 
+            window.onPassageActionMenuToggle = function(menu) {{
+                if (!menu) return;
+                if (menu.open) {{
+                    document.querySelectorAll('#view-reception details.passage-action-menu[open]').forEach(other => {{
+                        if (other !== menu) other.open = false;
+                    }});
+                    const panel = menu.querySelector('.passage-action-menu-panel');
+                    if (panel) {{
+                        if (menu._passagePortal) menu._passagePortal.remove();
+                        const portal = panel.cloneNode(true);
+                        portal.classList.add('passage-action-menu-portal');
+                        portal.style.position = 'fixed';
+                        portal.style.zIndex = '100000';
+                        portal.style.right = 'auto';
+                        portal.style.display = 'block';
+                        menu._passagePortal = portal;
+                        portal._passageOwner = menu;
+                        panel.style.visibility = 'hidden';
+                        const sourceButtons = Array.from(panel.querySelectorAll('button'));
+                        const portalButtons = Array.from(portal.querySelectorAll('button'));
+                        portalButtons.forEach((button, index) => {{
+                            button.removeAttribute('onclick');
+                            button.addEventListener('click', event => {{
+                                event.preventDefault();
+                                sourceButtons[index]?.click();
+                                if (!menu.open) {{
+                                    portal.remove();
+                                    panel.style.visibility = '';
+                                    menu._passagePortal = null;
+                                }}
+                            }});
+                        }});
+                        portal.addEventListener('mouseenter', window.keepPassageActionMenuOpen);
+                        portal.addEventListener('mouseleave', () => window.schedulePassageActionMenuClose(menu));
+                        document.body.appendChild(portal);
+                        const anchor = menu.querySelector('summary').getBoundingClientRect();
+                        const width = Math.max(portal.offsetWidth || 192, 192);
+                        const height = portal.offsetHeight || 180;
+                        const left = Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8));
+                        const top = anchor.bottom + height + 8 <= window.innerHeight
+                            ? anchor.bottom : Math.max(8, anchor.top - height);
+                        portal.style.left = left + 'px';
+                        portal.style.top = top + 'px';
+                    }}
+                }} else {{
+                    const panel = menu.querySelector('.passage-action-menu-panel');
+                    if (panel) panel.style.visibility = '';
+                    if (menu._passagePortal) {{
+                        menu._passagePortal.remove();
+                        menu._passagePortal = null;
+                    }}
+                }}
+                menu.closest('tr')?.classList.toggle('passage-menu-open', menu.open);
+            }};
+
+            window.keepPassageActionMenuOpen = function() {{
+                if (passageActionMenuCloseTimer) clearTimeout(passageActionMenuCloseTimer);
+                passageActionMenuCloseTimer = null;
+            }};
+
+            window.schedulePassageActionMenuClose = function(menu) {{
+                if (passageActionMenuCloseTimer) clearTimeout(passageActionMenuCloseTimer);
+                passageActionMenuCloseTimer = setTimeout(() => {{
+                    const owner = menu?.matches?.('details.passage-action-menu') ? menu : menu?._passageOwner;
+                    if (owner?.open) owner.open = false;
+                    passageActionMenuCloseTimer = null;
+                }}, 220);
+            }};
+
+            window.closePassageActionMenu = function(element) {{
+                const panel = element?.closest?.('.passage-action-menu-panel');
+                const owner = panel?._passageOwner || element?.closest?.('details.passage-action-menu');
+                if (owner && owner.open) {{
+                    owner.open = false;
+                    window.onPassageActionMenuToggle(owner);
+                }}
+            }};
+
+            function renderRadiologyPassageRow(p, patientIdParam, passageIdParam, docsCount, actesHtml) {{
+                const status = String(p.statut || '');
+                const refund = String(p.statut_paiement || '').toLowerCase() === 'annulé';
+                const net = Math.max(0, Number(p.montant_total || 0) - Number(p.remise || 0));
+                const paid = Number(p.versement || 0);
+                const due = Math.max(0, net - paid);
+                const resultFound = status === 'Terminé' || (p.documents_scannes || []).some(doc => /résultat|resultat|compte.?rendu|livret/i.test(String(doc.type || '')));
+                const resultText = resultFound ? 'Résultat disponible' : 'Non disponible';
+                const resultClass = resultFound ? 'radio-state-result' : 'radio-state-muted';
+                const passageText = status === 'En attente' ? 'En attente' : (status === 'En cours' ? 'En cours' : 'Passage fait');
+                const paymentText = refund ? 'Remboursé' : (due > 0.009 ? (paid > 0 ? 'Régler' : 'Non payé') : 'Réglé');
+                const paymentClass = refund || paymentText === 'Non payé' ? 'radio-state-muted' : (paymentText === 'Régler' ? 'radio-state-passage' : 'radio-state-result');
+                const birth = String(p.date_naissance || '').slice(0, 10);
+                const birthText = birth && birth !== '-' ? new Date(birth + 'T00:00:00').toLocaleDateString('fr-FR') : 'Date de naissance inconnue';
+                const date = p.date_passage ? new Date(String(p.date_passage).slice(0, 10) + 'T00:00:00').toLocaleDateString('fr-FR') : '';
+                const visitText = [birthText, date, String(p.heure_passage || '').slice(0, 5)].filter(Boolean).join(' / ');
+                const doctor = [p.medecin_traitant_grade || 'Dr', p.medecin_traitant_nom || '', p.medecin_traitant_prenom || ''].filter(Boolean).join(' ');
+                const exam = (p.actes || []).map(act => act.nom || '').filter(Boolean).join(' · ') || p.type_passage || 'Examen non précisé';
+                const doctorSpecialty = String(p.medecin_traitant_specialite || '').trim();
+                const actions = [];
+                if (canEditPatientInfo && p.editable_pre_consultation) actions.push('<button type="button" onclick="closePassageActionMenu(this); openPassagePatientEditModal(' + passageIdParam + ')" class="radio-menu-item"><i class="ph-bold ph-identification-card"></i>Modifier le passage</button>');
+                if (docsCount > 0) actions.push('<button type="button" onclick="closePassageActionMenu(this); viewPassageDocsFromTable(' + passageIdParam + ')" class="radio-menu-item"><i class="ph-bold ph-folder-open"></i>Documents scannés (' + docsCount + ')</button>');
+                actions.push('<button type="button" onclick="closePassageActionMenu(this); openDmeFromPassage(' + patientIdParam + ',' + passageIdParam + ')" class="radio-menu-item"><i class="ph-bold ph-stethoscope"></i>Ouvrir le DME</button>');
+                actions.push('<button type="button" onclick="closePassageActionMenu(this); openDemandeExamenModal(' + passageIdParam + ')" class="radio-menu-item"><i class="ph-bold ph-file-text"></i>Demande d\\'examen</button>');
+                actions.push('<button type="button" onclick="closePassageActionMenu(this); deletePassage(' + passageIdParam + ')" class="radio-menu-item text-rose-600"><i class="ph-bold ph-trash"></i>Supprimer le passage</button>');
+                if (canMagicDeletePassages) actions.push('<button type="button" onclick="closePassageActionMenu(this); magicDeletePassage(' + passageIdParam + ')" class="radio-menu-item text-rose-700"><i class="ph-bold ph-magic-wand"></i>Suppression magique</button>');
+                return '<td class="radio-patient-cell"><div class="flex items-center gap-3">' +
+                    '<img src="' + escapePassageDisplay(p.avatar || '/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80') + '" class="w-12 h-12 shrink-0 rounded-xl object-cover border border-slate-200 shadow-sm">' +
+                    '<div class="min-w-0"><button type="button" onclick="openDmeFromPassage(' + patientIdParam + ',' + passageIdParam + ')" class="block text-left font-extrabold text-[15px] text-slate-900 uppercase leading-tight hover:text-violet-700">' +
+                    escapePassageDisplay((p.nom || '') + ' ' + (p.prenom || '')) + '</button><div class="mt-1 text-[11px] text-slate-500">' + escapePassageDisplay(visitText) + '</div></div></div></td>' +
+                    '<td class="radio-exam-cell"><div class="font-extrabold text-[15px] uppercase leading-tight text-slate-900">' + escapePassageDisplay(exam) +
+                    '</div><div class="mt-1 text-xs font-bold text-red-600"><i class="ph-bold ph-user-circle"></i> ' + escapePassageDisplay(doctor) + (doctorSpecialty ? ' | Sp: ' + escapePassageDisplay(doctorSpecialty) : '') + '</div></td>' +
+                    '<td class="text-center"><span class="radio-state ' + resultClass + '">' + resultText + '</span></td>' +
+                    '<td class="text-center"><span class="radio-state radio-state-passage">' + escapePassageDisplay(passageText) + '</span></td>' +
+                    '<td class="text-center"><span class="radio-state ' + paymentClass + '">' + escapePassageDisplay(paymentText) + '</span></td>' +
+                    '<td class="text-right pr-3"><details class="passage-action-menu relative z-10 inline-block text-left" onclick="event.stopPropagation()" ontoggle="onPassageActionMenuToggle(this)" onmouseenter="keepPassageActionMenuOpen()" onmouseleave="schedulePassageActionMenuClose(this)"><summary class="list-none cursor-pointer select-none inline-flex items-center gap-2 text-[11px] font-bold"><span>Détails</span><i class="ph-bold ph-identification-card"></i><i class="ph-bold ph-caret-down text-[9px]"></i></summary><div class="passage-action-menu-panel absolute right-0 top-full z-[9999] min-w-48 p-1 rounded-xl border border-slate-200 bg-white shadow-xl" onmouseenter="keepPassageActionMenuOpen()" onmouseleave="schedulePassageActionMenuClose(this)">' + actions.join('') + '</div></details></td>';
+            }}
+
             window.renderPassagesTable = function() {{
                 const tbody = document.getElementById('passages-table-body');
                 if (!tbody) return;
                 tbody.innerHTML = '';
                 const dataTable = document.getElementById('passagesDataTable');
                 if (dataTable) dataTable.dataset.style = passageDisplayStyle;
+                if (dataTable && !IS_RADIOLOGY_MODE) {{
+                    const headerRow = dataTable.querySelector('thead tr');
+                    if (headerRow) {{
+                        if (!headerRow._passageHeaderCells) {{
+                            headerRow._passageHeaderCells = Array.from(headerRow.children);
+                            headerRow._passageHeaderHtml = headerRow._passageHeaderCells.map(cell => cell.innerHTML);
+                        }}
+                        const headerCells = headerRow._passageHeaderCells;
+                        headerCells.forEach((cell, index) => {{ cell.innerHTML = headerRow._passageHeaderHtml[index]; cell.style.width = ''; }});
+                        const essentialOrder = passageDisplayStyle === 'essential' ? [1, 0, 3, 2, 5, 4] : [0, 1, 2, 3, 4, 5];
+                        headerRow.replaceChildren(...essentialOrder.map(index => headerCells[index]));
+                        if (passageDisplayStyle === 'essential') {{
+                            headerRow.children[0].style.width = '29%';
+                            headerRow.children[1].style.width = '18%';
+                            headerRow.children[2].style.width = '29%';
+                            headerRow.children[3].style.width = '14%';
+                            headerRow.children[4].style.width = '10%';
+                            headerRow.children[3].textContent = 'État du passage';
+                        }}
+                    }}
+                }}
                 document.getElementById('passageStyleClassicBtn')?.classList.toggle('bg-white', passageDisplayStyle === 'classic');
                 document.getElementById('passageStyleClassicBtn')?.classList.toggle('text-slate-900', passageDisplayStyle === 'classic');
                 document.getElementById('passageStyleCardsBtn')?.classList.toggle('bg-white', passageDisplayStyle === 'cards');
                 document.getElementById('passageStyleCardsBtn')?.classList.toggle('text-slate-900', passageDisplayStyle === 'cards');
+                document.getElementById('passageStyleWorklistBtn')?.classList.toggle('bg-white', passageDisplayStyle === 'worklist');
+                document.getElementById('passageStyleWorklistBtn')?.classList.toggle('text-slate-900', passageDisplayStyle === 'worklist');
+                document.getElementById('passageStyleEssentialBtn')?.classList.toggle('bg-white', passageDisplayStyle === 'essential');
+                document.getElementById('passageStyleEssentialBtn')?.classList.toggle('text-slate-900', passageDisplayStyle === 'essential');
 
                 const totalItems = filteredPassagesList.length;
                 const totalPages = Math.ceil(totalItems / PASSAGES_PER_PAGE) || 1;
@@ -2353,7 +3128,8 @@ def render_html() -> str:
                 const pageItems = filteredPassagesList.slice(startIndex, endIndex);
 
                 if (pageItems.length === 0) {{
-                    tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-slate-400">Aucun passage enregistré.</td></tr>';
+                    const emptyMessage = passagesData.length ? 'Aucun passage ne correspond aux critères. Modifiez ou effacez les filtres.' : 'Aucun passage enregistré.';
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center py-8 text-slate-400">${{emptyMessage}}</td></tr>`;
                 }} else {{
                     const statutBadges = {{
                         'En attente': 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800/40',
@@ -2361,12 +3137,12 @@ def render_html() -> str:
                         'Terminé': 'bg-brand-neon/20 text-emerald-800 dark:text-brand-neon border-brand-neon/30'
                     }};
 
-                    pageItems.forEach(p => {{
+                    pageItems.forEach((p, rowIndex) => {{
                         const tr = document.createElement('tr');
-                        tr.className = "align-top odd:bg-white even:bg-slate-50/50 dark:odd:bg-transparent dark:even:bg-white/[0.018] border-b border-slate-100 dark:border-white/5 hover:bg-emerald-50/70 dark:hover:bg-brand-neon/[0.045] transition-colors";
+                        tr.className = "align-top odd:bg-white even:bg-slate-50/50 dark:odd:bg-transparent dark:even:bg-white/[0.018] border-b border-slate-100 dark:border-white/5 hover:bg-emerald-50/70 dark:hover:bg-brand-neon/[0.045] transition-colors" + (passageDisplayStyle === 'essential' ? ' passage-essential-row' : '');
 
                         const actesBadges = (p.actes && p.actes.length > 0) 
-                            ? p.actes.map(a => `<span class="block w-fit max-w-full px-2 py-1 rounded-lg text-[10px] font-bold bg-slate-100 dark:bg-black/30 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-white/10 break-words">${{a.nom}}</span>`).join('')
+                            ? p.actes.map(a => `<span class="block w-fit max-w-full px-2 py-1 rounded-lg text-[10px] font-bold bg-slate-100 dark:bg-black/30 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-white/10 break-words">${{escapePassageDisplay(a.nom || a.designation || a.libelle || 'Prestation non précisée')}}</span>`).join('')
                             : `<span class="text-slate-400 italic text-[11px]">Aucun acte</span>`;
 
                         const montantTotal = parseFloat(p.montant_total || 0);
@@ -2396,29 +3172,29 @@ def render_html() -> str:
                         const docsCount = p.documents_scannes ? p.documents_scannes.length : 0;
                         const patientIdParam = Number(p.id_patient || 0);
                         const passageIdParam = Number(p.id_passage || 0);
+                        const essentialState = String(p.statut || 'Non renseigné');
+                        const essentialStateTone = essentialState === 'En attente' ? 'bg-amber-100 text-amber-800' : (essentialState === 'En cours' ? 'bg-blue-100 text-blue-800' : (essentialState === 'Terminé' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700'));
+                        const essentialStateIcon = essentialState === 'En attente' ? 'ph-clock' : (essentialState === 'En cours' ? 'ph-spinner-gap' : (essentialState === 'Terminé' ? 'ph-check-circle' : 'ph-info'));
 
                         tr.innerHTML = `
                             <td class="py-4 pl-3 pr-2">
-                                <div class="text-slate-400 font-mono text-[10px]">#PASS-${{String(p.id_passage).padStart(4, '0')}}</div>
-                                <div class="mt-2 font-semibold text-slate-700 dark:text-slate-200">${{p.date_passage}}</div>
-                                <div class="text-[11px] text-slate-500 dark:text-slate-400">${{p.heure_passage}}</div>
+                                <div class="${{passageDisplayStyle === 'worklist' ? 'passage-worklist-date-line' : (passageDisplayStyle === 'essential' ? 'passage-essential-date-line' : '')}}"><span class="${{passageDisplayStyle === 'worklist' ? 'passage-worklist-ref' : 'text-slate-400 font-mono text-[10px]'}}">#PASS-${{String(p.id_passage || '').padStart(4, '0')}}</span><span class="font-semibold text-slate-700 dark:text-slate-200">${{passageDisplayStyle === 'essential' ? '<i class="ph-bold ph-calendar-blank passage-essential-date-icon"></i>' : ''}}${{escapePassageDisplay(p.date_passage || 'Date inconnue')}}</span></div>
+                                <div class="${{passageDisplayStyle === 'worklist' ? 'mt-0.5' : (passageDisplayStyle === 'essential' ? 'passage-essential-time' : 'mt-2')}} text-[11px] text-slate-500 dark:text-slate-400">${{passageDisplayStyle === 'essential' ? '<i class="ph-bold ph-clock passage-essential-date-icon"></i>' : ''}}${{escapePassageDisplay(p.heure_passage || 'Heure inconnue')}}</div>
                             </td>
                             <td class="py-4 px-2">
                                 <div class="flex items-start gap-2.5 cursor-pointer group min-w-0" onclick="openDmeFromPassage(${{patientIdParam}}, ${{passageIdParam}})" title="Cliquer pour ouvrir le Dossier Médical Électronique (DME)">
-                                <button type="button" onclick="event.stopPropagation(); togglePassageDetails(${{passageIdParam}})" id="passageExpandBtn-${{passageIdParam}}" class="${{passageDisplayStyle === 'cards' ? '' : 'hidden'}} w-5 h-5 shrink-0 mt-1 rounded-full text-emerald-600 font-black border border-emerald-200 hover:bg-emerald-50" title="Afficher les détails">+</button>
-                                <img src="${{p.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80'}}" class="w-8 h-8 shrink-0 rounded-full object-cover border border-slate-200 dark:border-white/10 shadow-sm">
+                                <button type="button" onclick="event.stopPropagation(); togglePassageDetails(${{passageIdParam}})" id="passageExpandBtn-${{passageIdParam}}" class="${{['cards', 'worklist'].includes(passageDisplayStyle) ? '' : 'hidden'}} w-5 h-5 shrink-0 mt-1 rounded-full text-emerald-600 font-black border border-emerald-200 hover:bg-emerald-50" title="Afficher les détails">+</button>
+                                <img src="${{p.avatar || '/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80'}}" class="${{passageDisplayStyle === 'worklist' ? 'passage-worklist-avatar' : (passageDisplayStyle === 'essential' ? 'passage-essential-avatar' : 'w-8 h-8')}} shrink-0 rounded-full object-cover border border-slate-200 dark:border-white/10 shadow-sm">
                                 <div class="min-w-0">
-                                    <div class="font-bold text-slate-800 dark:text-slate-100 text-xs group-hover:text-brand-neon transition flex items-center gap-1">
-                                        <span class="break-words">${{p.nom}} ${{p.prenom}}</span>
-                                    </div>
-                                    <div class="mt-1 text-[10px] text-slate-400 font-mono break-all">${{p.telephone_1 || '-'}}</div>
-                                    <div class="mt-1.5"><span class="inline-flex px-2 py-0.5 rounded-full text-[9px] font-bold border ${{statutBadges[p.statut] || 'bg-slate-100 text-slate-600 border-slate-200'}}">${{p.statut || 'Statut inconnu'}}</span></div>
+                                    <div class="${{passageDisplayStyle === 'worklist' ? 'passage-worklist-patient-primary' : ''}}"><div class="${{passageDisplayStyle === 'worklist' ? 'passage-worklist-name' : (passageDisplayStyle === 'essential' ? 'passage-essential-name' : 'font-bold text-slate-800 dark:text-slate-100 text-xs')}} group-hover:text-brand-neon transition flex items-center gap-1">
+                                        <span class="break-words">${{escapePassageDisplay([p.nom, p.prenom].filter(Boolean).join(' ') || 'Patient sans nom')}}</span>
+                                    </div><div class="${{passageDisplayStyle === 'worklist' ? '' : 'mt-1.5'}} passage-essential-patient-status"><span class="inline-flex px-2 py-0.5 rounded-full text-[9px] font-bold border ${{statutBadges[p.statut] || 'bg-slate-100 text-slate-600 border-slate-200'}}">${{p.statut || 'Statut inconnu'}}</span></div></div>
+                                    <div class="${{passageDisplayStyle === 'worklist' ? 'mt-0.5' : 'mt-1'}} text-[10px] text-slate-500 font-mono break-all">${{p.telephone_1 || '-'}}</div>
                                 </div>
                                 </div>
                             </td>
                             <td class="py-4 px-2">
-                                <div>${{medTraitantBadge}}</div>
-                                <div class="mt-2"><span class="inline-block max-w-full px-2 py-1 rounded-xl text-[10px] font-bold bg-slate-100 dark:bg-black/30 border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 break-words">${{p.type_passage}}</span></div>
+                                ${{passageDisplayStyle === 'essential' ? `<span class="passage-essential-status ${{essentialStateTone}}"><i class="ph-bold ${{essentialStateIcon}}"></i>${{escapePassageDisplay(essentialState)}}</span>` : `<div>${{medTraitantBadge}}</div><div class="mt-2"><span class="inline-block max-w-full px-2 py-1 rounded-xl text-[10px] font-bold bg-slate-100 dark:bg-black/30 border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 break-words">${{escapePassageDisplay(p.type_passage || 'Type non précisé')}}</span></div>`}}
                             </td>
                             <td class="py-4 px-2"><div class="space-y-1.5">${{actesBadges}}</div></td>
                             <td class="py-4 px-2">
@@ -2426,12 +3202,12 @@ def render_html() -> str:
                                 <div class="mt-2 border-l-2 border-slate-200 dark:border-white/10 pl-2">${{versementResteHtml}}</div>
                             </td>
                             <td class="py-4 pl-2 pr-3 text-right">
-                                <details class="relative inline-block text-left" onclick="event.stopPropagation()">
-                                    <summary class="list-none cursor-pointer select-none inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-black/20 hover:bg-slate-50 dark:hover:bg-white/5 text-[10px] font-bold text-slate-700 dark:text-slate-200" title="Actions du patient">
-                                        <i class="ph-bold ph-dots-three-outline-vertical"></i><span>Actions</span>
+                                        <details class="passage-action-menu relative z-10 inline-block text-left" onclick="event.stopPropagation()" ontoggle="onPassageActionMenuToggle(this)" onmouseenter="keepPassageActionMenuOpen()" onmouseleave="schedulePassageActionMenuClose(this)">
+                                    <summary class="list-none cursor-pointer select-none inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-black/20 hover:bg-slate-50 dark:hover:bg-white/5 text-[10px] font-bold text-slate-700 dark:text-slate-200 ${{passageDisplayStyle === 'worklist' ? 'passage-worklist-action' : (passageDisplayStyle === 'essential' ? 'passage-essential-action' : '')}}" title="Actions du patient">
+                                        <i class="ph-bold ph-dots-three-outline-vertical"></i><span>Actions</span><i class="ph-bold ph-caret-down text-[9px]"></i>
                                     </summary>
-                                    <div class="absolute right-0 top-full mt-1 z-30 min-w-48 p-1 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#121c15] shadow-xl">
-                                        ${{canEditPatientInfo ? `<button type="button" onclick="this.closest('details').open=false; openPassagePatientEditModal(${{passageIdParam}})" class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-white/5"><i class="ph-bold ph-identification-card text-sky-500"></i>Modifier fiche patient</button>` : ''}}
+                                    <div class="passage-action-menu-panel absolute right-0 top-full z-[9999] min-w-48 p-1 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#121c15] shadow-xl">
+                                        ${{canEditPatientInfo && p.editable_pre_consultation ? `<button type="button" onclick="this.closest('details').open=false; openPassagePatientEditModal(${{passageIdParam}})" class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-white/5"><i class="ph-bold ph-identification-card text-sky-500"></i>Modifier avec le formulaire passage</button>` : ''}}
                                         ${{docsCount > 0 ? `<button type="button" onclick="this.closest('details').open=false; viewPassageDocsFromTable(${{passageIdParam}})" class="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-white/5"><span><i class="ph-bold ph-folder-open mr-1.5 text-brand-neon"></i>Documents scannés</span><span class="text-[10px] font-bold">${{docsCount}}</span></button>` : `<div class="px-2.5 py-2 text-[10px] text-slate-400 italic">Aucun document scanné</div>`}}
                                         <button type="button" onclick="this.closest('details').open=false; openDmeFromPassage(${{patientIdParam}}, ${{passageIdParam}})" class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-white/5"><i class="ph-bold ph-stethoscope text-brand-neon"></i>Ouvrir le DME</button>
                                         <button type="button" onclick="this.closest('details').open=false; openDemandeExamenModal(${{passageIdParam}})" class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-white/5"><i class="ph-bold ph-file-text text-brand-neon"></i>Demande d'examen</button>
@@ -2441,6 +3217,14 @@ def render_html() -> str:
                                 </details>
                             </td>
                         `;
+                        if (passageDisplayStyle === 'essential' && !IS_RADIOLOGY_MODE) {{
+                            const cells = Array.from(tr.children);
+                            [1, 0, 3, 2, 5, 4].forEach(index => tr.appendChild(cells[index]));
+                        }}
+                        if (IS_RADIOLOGY_MODE) {{
+                            tr.className = 'radiology-passage-row';
+                            tr.innerHTML = renderRadiologyPassageRow(p, patientIdParam, passageIdParam, docsCount, actesBadges);
+                        }}
                         tbody.appendChild(tr);
                         const detailRow = document.createElement('tr');
                         detailRow.id = `passageDetails-${{passageIdParam}}`;
@@ -2531,7 +3315,48 @@ def render_html() -> str:
             // =================================================================
             // 3. AUTO-SÉLECTION NOUVEAU PATIENT COMPLET (Z-[100])
             // =================================================================
+            window.openPassagePatientForm = function() {{
+                if (passageEditMode) {{
+                    window.openFullPatientModal();
+                    return;
+                }}
+                if (typeof window.openPatientModal !== 'function') {{
+                    alert("Le formulaire complet du module Patients n'a pas pu être initialisé. Rechargez le module puis réessayez.");
+                    return;
+                }}
+                window.onPatientCreatedForPassage = async function(patient) {{
+                    try {{
+                        await window.loadReceptionPassagesModule();
+                        window.selectPassagePatient(Number(patient.id));
+                        window.checkPassageFormValidity();
+                    }} catch (err) {{
+                        console.error('Patient créé, mais impossible de le sélectionner dans le passage :', err);
+                        alert('Le patient a été créé. Recherchez-le dans le formulaire pour le sélectionner.');
+                    }} finally {{
+                        window.onPatientCreatedForPassage = null;
+                    }}
+                }};
+                const patientModal = document.getElementById('patientModal');
+                if (patientModal) patientModal.classList.add('z-[120]');
+                window.openPatientModal();
+            }};
+
             window.openFullPatientModal = function() {{
+                if (passageEditMode && passageEditPatientDraft) {{
+                    passageEditPatientDraft = {{
+                        ...passageEditPatientDraft,
+                        nom: document.getElementById('passageEditPatientNom')?.value || passageEditPatientDraft.nom,
+                        prenom: document.getElementById('passageEditPatientPrenom')?.value || passageEditPatientDraft.prenom,
+                        date_naissance: document.getElementById('passageEditPatientDob')?.value || passageEditPatientDraft.date_naissance,
+                        genre: document.getElementById('passageEditPatientGenre')?.value || passageEditPatientDraft.genre,
+                        groupe_sanguin: document.getElementById('passageEditPatientBlood')?.value || passageEditPatientDraft.groupe_sanguin,
+                        telephone_1: document.getElementById('passageEditPatientPhone1')?.value || passageEditPatientDraft.telephone_1,
+                        telephone_2: document.getElementById('passageEditPatientPhone2')?.value || '',
+                        email: document.getElementById('passageEditPatientEmail')?.value || '',
+                        wilaya: document.getElementById('passageEditPatientWilaya')?.value || passageEditPatientDraft.wilaya,
+                        commune: document.getElementById('passageEditPatientCommune')?.value || passageEditPatientDraft.commune
+                    }};
+                }}
                 const form = document.getElementById('receptionFullPatientForm');
                 if (form) form.reset();
 
@@ -2542,12 +3367,42 @@ def render_html() -> str:
                 document.getElementById('recPatEmpreinte').value = '';
                 document.getElementById('recPatAgeDisplay').value = '';
 
-                const def = 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120';
+                const def = '/static/images/avatar-placeholder.svg?w=120';
                 document.getElementById('recPreviewFace').src = def;
                 document.getElementById('recPreviewPDroit').src = def;
                 document.getElementById('recPreviewPGauche').src = def;
 
                 handleRecPatWilayaChange();
+                const title = document.getElementById('fullPatientModalTitle');
+                const submit = document.getElementById('fullPatientModalSubmit');
+                if (passageEditMode && passageEditPatientDraft) {{
+                    const p = passageEditPatientDraft;
+                    document.getElementById('recPatNom').value = p.nom || '';
+                    document.getElementById('recPatPrenom').value = p.prenom || '';
+                    document.getElementById('recPatDob').value = String(p.date_naissance || '').slice(0, 10);
+                    document.getElementById('recPatGenre').value = p.genre || 'Homme';
+                    document.getElementById('recPatGroupe').value = p.groupe_sanguin || 'O+';
+                    document.getElementById('recPatTel1').value = p.telephone_1 === '-' ? '' : (p.telephone_1 || '');
+                    document.getElementById('recPatTel2').value = p.telephone_2 || '';
+                    document.getElementById('recPatEmail').value = p.email === '-' ? '' : (p.email || '');
+                    document.getElementById('recPatWilaya').value = p.wilaya || '';
+                    handleRecPatWilayaChange();
+                    document.getElementById('recPatCommune').value = p.commune || '';
+                    document.getElementById('recPatAvatar').value = p.avatar || '';
+                    document.getElementById('recPatPhotoFace').value = p.photo_face || '';
+                    document.getElementById('recPatPhotoPDroit').value = p.photo_profil_droit || '';
+                    document.getElementById('recPatPhotoPGauche').value = p.photo_profil_gauche || '';
+                    document.getElementById('recPatEmpreinte').value = p.empreinte_index || '';
+                    document.getElementById('recPreviewFace').src = p.photo_face || p.avatar || def;
+                    document.getElementById('recPreviewPDroit').src = p.photo_profil_droit || def;
+                    document.getElementById('recPreviewPGauche').src = p.photo_profil_gauche || def;
+                    calculateRecPatAge();
+                    if (title) title.textContent = 'Modifier la fiche patient';
+                    if (submit) submit.textContent = 'Valider les informations patient';
+                }} else {{
+                    if (title) title.textContent = 'Fiche Patient Complète (Sélection Automatique dans le Passage)';
+                    if (submit) submit.textContent = 'Enregistrer & Sélectionner';
+                }}
                 document.getElementById('receptionFullPatientModal').classList.remove('hidden');
             }};
 
@@ -2592,6 +3447,7 @@ def render_html() -> str:
             window.handleFullPatientSubmit = async function(e) {{
                 e.preventDefault();
                 const payload = {{
+                    ...(passageEditPatientDraft || {{}}),
                     nom: document.getElementById('recPatNom').value.trim(),
                     prenom: document.getElementById('recPatPrenom').value.trim(),
                     date_naissance: document.getElementById('recPatDob').value,
@@ -2602,14 +3458,37 @@ def render_html() -> str:
                     wilaya: document.getElementById('recPatWilaya').value,
                     commune: document.getElementById('recPatCommune').value,
                     groupe_sanguin: document.getElementById('recPatGroupe').value,
-                    type_piece_identite: "Carte Chifa",
+                    type_piece_identite: passageEditPatientDraft?.type_piece_identite || "Carte Chifa",
                     avatar: document.getElementById('recPatAvatar').value,
                     photo_face: document.getElementById('recPatPhotoFace').value,
                     photo_profil_droit: document.getElementById('recPatPhotoPDroit').value,
                     photo_profil_gauche: document.getElementById('recPatPhotoPGauche').value,
                     empreinte_index: document.getElementById('recPatEmpreinte').value,
-                    pieces_scannees: []
+                    pieces_scannees: passageEditPatientDraft?.pieces_scannees || []
                 }};
+
+                if (passageEditMode) {{
+                    passageEditPatientDraft = payload;
+                    passageEditPatientData = payload;
+                    document.getElementById('passageEditPatientNom').value = payload.nom;
+                    document.getElementById('passageEditPatientPrenom').value = payload.prenom;
+                    document.getElementById('passageEditPatientDob').value = payload.date_naissance;
+                    document.getElementById('passageEditPatientGenre').value = payload.genre;
+                    document.getElementById('passageEditPatientBlood').value = payload.groupe_sanguin;
+                    document.getElementById('passageEditPatientPhone1').value = payload.telephone_1;
+                    document.getElementById('passageEditPatientPhone2').value = payload.telephone_2;
+                    document.getElementById('passageEditPatientEmail').value = payload.email;
+                    const inlineWilaya = document.getElementById('passageEditPatientWilaya');
+                    if (inlineWilaya && payload.wilaya && !Array.from(inlineWilaya.options).some(option => option.value === payload.wilaya)) inlineWilaya.add(new Option(payload.wilaya, payload.wilaya));
+                    if (inlineWilaya) inlineWilaya.value = payload.wilaya;
+                    document.getElementById('passageEditPatientCommune').value = payload.commune;
+                    closeFullPatientModal();
+                    const selected = (receptionInitData.patients || []).find(p => Number(p.id) === Number(payload.id_patient || payload.id));
+                    if (selected) Object.assign(selected, payload);
+                    selectPassagePatient(Number(payload.id_patient || payload.id));
+                    if (typeof window.showToast === 'function') window.showToast('Les informations patient seront enregistrées avec la correction du passage.', 'success');
+                    return;
+                }}
 
                 try {{
                     const res = await fetch('/api/patients-module/save', {{
@@ -2697,8 +3576,28 @@ def render_html() -> str:
                     ? receptionInitData.user_specialites
                     : [];
 
+                if (IS_RADIOLOGY_MODE && specs.length > 0) {{
+                    const preferred = specs.find(s => /radiolog|imagerie/i.test(String(s))) || specs[0];
+                    const selected = selectedVal || preferred;
+                    select.innerHTML = specs.map(s => {{
+                        const isSel = String(selected).trim().toLowerCase() === String(s).trim().toLowerCase() ? 'selected' : '';
+                        return '<option value="' + s + '" ' + isSel + '>🩺 ' + s + '</option>';
+                    }}).join('');
+                    select.value = selected;
+                    currentPassageTypeValue = select.value;
+                    return;
+                }}
+
+                if (IS_RADIOLOGY_MODE) {{
+                    select.innerHTML = '<option value="Radiologie" selected>🩻 Radiologie</option>';
+                    select.value = 'Radiologie';
+                    currentPassageTypeValue = select.value;
+                    return;
+                }}
+
                 if (specs.length === 0) {{
                     select.innerHTML = '<option value="" disabled selected>⚠️ Aucune spécialité cochée dans votre profil</option>';
+                    currentPassageTypeValue = '';
                     return;
                 }}
 
@@ -2707,15 +3606,53 @@ def render_html() -> str:
                     return `<option value="${{s}}" ${{isSel}}>🩺 ${{s}}</option>`;
                 }}).join('');
 
+                if (selectedVal && !specs.some(s => s.trim().toLowerCase() === selectedVal.trim().toLowerCase())) {{
+                    select.add(new Option(`🩺 ${{selectedVal}}`, selectedVal, true, true));
+                }}
+
                 if (selectedVal && specs.includes(selectedVal)) {{
                     select.value = selectedVal;
                 }} else if (specs.length > 0) {{
                     select.value = specs[0];
                 }}
+                currentPassageTypeValue = select.value;
             }};
 
             window.onPassageTypeChange = function() {{
+                const select = document.getElementById('passageTypeSelect');
                 const input = document.getElementById('prestationSearchInput');
+                const selectedType = select?.value || '';
+                const normalizedSelected = normalizePassageSpecialite(selectedType);
+
+                const incompatibleIndexes = currentPassageActs.reduce((indexes, act, index) => {{
+                    let actSpecialite = act.specialite || '';
+                    if (!actSpecialite) {{
+                        const matchingConsultation = (receptionInitData.consultations || []).find(c =>
+                            normalizePassageSpecialite(c.designation) === normalizePassageSpecialite(act.nom)
+                        );
+                        actSpecialite = matchingConsultation?.specialite || '';
+                    }}
+                    const normalizedAct = normalizePassageSpecialite(actSpecialite);
+                    if (normalizedAct && normalizedAct !== normalizedSelected) indexes.push(index);
+                    return indexes;
+                }}, []);
+
+                if (incompatibleIndexes.length) {{
+                    const removedNames = incompatibleIndexes.map(index => currentPassageActs[index].nom).filter(Boolean);
+                    const confirmed = window.confirm(
+                        `Le tableau contient ${{incompatibleIndexes.length}} prestation(s) d'une autre discipline : ${{removedNames.join(', ')}}.\\n\\nLes retirer pour continuer avec « ${{selectedType}} » ?`
+                    );
+                    if (!confirmed) {{
+                        if (select && currentPassageTypeValue) select.value = currentPassageTypeValue;
+                        return;
+                    }}
+                    const incompatibleSet = new Set(incompatibleIndexes);
+                    currentPassageActs = currentPassageActs.filter((_, index) => !incompatibleSet.has(index));
+                    renderPassageActsTable();
+                }}
+
+                currentPassageTypeValue = selectedType;
+                selectedPrestationTemp = null;
                 if (input) input.value = '';
                 searchPrestationsLive();
             }};
@@ -2723,10 +3660,15 @@ def render_html() -> str:
             window.searchPassagePatientLive = function() {{
                 const q = (document.getElementById('passagePatientSearchInput')?.value || '').toLowerCase().trim();
                 const dropdown = document.getElementById('passagePatientSearchResults');
+                const input = document.getElementById('passagePatientSearchInput');
                 if (!dropdown) return;
 
                 if (!q) {{
                     dropdown.classList.add('hidden');
+                    input?.setAttribute('aria-expanded', 'false');
+                    input?.removeAttribute('aria-activedescendant');
+                    passagePatientSearchMatches = [];
+                    passagePatientSearchActiveIndex = -1;
                     return;
                 }}
 
@@ -2744,14 +3686,16 @@ def render_html() -> str:
                         dobDisplay.toLowerCase().includes(q) ||
                         (qDigits.length >= 4 && dobDigits.includes(qDigits));
                 }});
+                passagePatientSearchMatches = matches;
+                passagePatientSearchActiveIndex = matches.length ? 0 : -1;
 
                 if (matches.length === 0) {{
                     dropdown.innerHTML = '<div class="p-3 text-xs text-slate-400 italic text-center">Aucun patient trouvé.</div>';
                 }} else {{
-                    dropdown.innerHTML = matches.map(p => `
-                        <div onclick="selectPassagePatient(${{p.id}})" class="p-2.5 hover:bg-brand-neon/10 flex items-center justify-between cursor-pointer transition">
+                    dropdown.innerHTML = matches.map((p, index) => `
+                        <button type="button" id="passagePatientOption-${{p.id}}" role="option" aria-selected="${{index === 0}}" onclick="selectPassagePatient(${{p.id}})" onmouseenter="setPassagePatientSearchActive(${{index}})" class="w-full text-left p-2.5 ${{index === 0 ? 'bg-brand-neon/10' : ''}} hover:bg-brand-neon/10 flex items-center justify-between cursor-pointer transition">
                             <div class="flex items-center space-x-2.5">
-                                <img src="${{p.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80'}}" class="w-8 h-8 rounded-full object-cover border border-slate-200">
+                                <img src="${{p.avatar || '/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80'}}" class="w-8 h-8 rounded-full object-cover border border-slate-200">
                                 <div>
                                     <span class="text-xs font-bold text-slate-800 dark:text-slate-100">${{p.nom}} ${{p.prenom}}</span>
                                     <span class="text-[10px] text-slate-400 block font-mono">#DOS-${{String(p.id).padStart(4, '0')}} | Tél: ${{p.telephone_1}}</span>
@@ -2759,10 +3703,49 @@ def render_html() -> str:
                                 </div>
                             </div>
                             <span class="px-2 py-0.5 rounded text-[10px] font-black bg-rose-50 text-rose-600 border border-rose-200">${{p.groupe_sanguin || 'O+'}}</span>
-                        </div>
+                        </button>
                     `).join('');
                 }}
                 dropdown.classList.remove('hidden');
+                input?.setAttribute('aria-expanded', 'true');
+                window.setPassagePatientSearchActive(passagePatientSearchActiveIndex);
+            }};
+
+            window.setPassagePatientSearchActive = function(index) {{
+                const dropdown = document.getElementById('passagePatientSearchResults');
+                const input = document.getElementById('passagePatientSearchInput');
+                if (!dropdown || index < 0 || index >= passagePatientSearchMatches.length) return;
+                passagePatientSearchActiveIndex = index;
+                dropdown.querySelectorAll('[role="option"]').forEach((option, optionIndex) => {{
+                    const active = optionIndex === index;
+                    option.setAttribute('aria-selected', String(active));
+                    option.classList.toggle('bg-brand-neon/10', active);
+                    if (active) {{
+                        input?.setAttribute('aria-activedescendant', option.id);
+                        option.scrollIntoView({{ block: 'nearest' }});
+                    }}
+                }});
+            }};
+
+            window.handlePassagePatientSearchKeydown = function(event) {{
+                const dropdown = document.getElementById('passagePatientSearchResults');
+                if (!dropdown || dropdown.classList.contains('hidden')) return;
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {{
+                    if (!passagePatientSearchMatches.length) return;
+                    event.preventDefault();
+                    const direction = event.key === 'ArrowDown' ? 1 : -1;
+                    const count = passagePatientSearchMatches.length;
+                    const next = (passagePatientSearchActiveIndex + direction + count) % count;
+                    window.setPassagePatientSearchActive(next);
+                }} else if (event.key === 'Enter' && passagePatientSearchMatches.length) {{
+                    event.preventDefault();
+                    const index = passagePatientSearchActiveIndex >= 0 ? passagePatientSearchActiveIndex : 0;
+                    window.selectPassagePatient(passagePatientSearchMatches[index].id);
+                }} else if (event.key === 'Escape') {{
+                    dropdown.classList.add('hidden');
+                    event.currentTarget.setAttribute('aria-expanded', 'false');
+                    event.currentTarget.removeAttribute('aria-activedescendant');
+                }}
             }};
 
             window.selectPassagePatient = function(patientId) {{
@@ -2772,9 +3755,13 @@ def render_html() -> str:
                 document.getElementById('passagePatientId').value = patient.id;
                 document.getElementById('passagePatientSearchInput').value = `${{patient.nom}} ${{patient.prenom}}`;
                 document.getElementById('passagePatientSearchResults').classList.add('hidden');
+                document.getElementById('passagePatientSearchInput')?.setAttribute('aria-expanded', 'false');
+                document.getElementById('passagePatientSearchInput')?.removeAttribute('aria-activedescendant');
+                passagePatientSearchMatches = [];
+                passagePatientSearchActiveIndex = -1;
 
                 const card = document.getElementById('patientSelectedSummaryCard');
-                document.getElementById('selectedPatientAvatar').src = patient.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80';
+                document.getElementById('selectedPatientAvatar').src = patient.avatar || '/static/images/avatar-placeholder.svg?w=120&auto=format&fit=crop&q=80';
                 document.getElementById('selectedPatientName').innerText = `${{patient.nom}} ${{patient.prenom}}`;
                 document.getElementById('selectedPatientDetails').innerText = `#DOS-${{String(patient.id).padStart(4, '0')}} | Tél: ${{patient.telephone_1}} | Groupe: ${{patient.groupe_sanguin || 'O+'}}`;
                 card.classList.remove('hidden');
@@ -2786,16 +3773,23 @@ def render_html() -> str:
                 document.getElementById('passagePatientId').value = '';
                 document.getElementById('passagePatientSearchInput').value = '';
                 document.getElementById('patientSelectedSummaryCard').classList.add('hidden');
+                passagePatientSearchMatches = [];
+                passagePatientSearchActiveIndex = -1;
                 checkPassageFormValidity();
             }};
 
             window.searchPassageMedecinTraitantLive = function() {{
                 const q = (document.getElementById('passageMedecinTraitantSearchInput')?.value || '').toLowerCase().trim();
                 const dropdown = document.getElementById('passageMedecinTraitantSearchResults');
+                const input = document.getElementById('passageMedecinTraitantSearchInput');
                 if (!dropdown) return;
 
                 if (!q) {{
                     dropdown.classList.add('hidden');
+                    input?.setAttribute('aria-expanded', 'false');
+                    input?.removeAttribute('aria-activedescendant');
+                    passageMedecinSearchMatches = [];
+                    passageMedecinSearchActiveIndex = -1;
                     return;
                 }}
 
@@ -2803,18 +3797,59 @@ def render_html() -> str:
                     (`${{d.grade || ''}} ${{d.nom || ''}} ${{d.prenom || ''}}`).toLowerCase().includes(q) ||
                     (d.telephone && d.telephone.includes(q))
                 );
+                passageMedecinSearchMatches = matches;
+                passageMedecinSearchActiveIndex = matches.length ? 0 : -1;
 
                 if (!matches.length) {{
                     dropdown.innerHTML = '<div class="p-3 text-center text-xs text-slate-400 italic">Aucun médecin traitant trouvé.</div>';
                 }} else {{
-                    dropdown.innerHTML = matches.map(d => `
-                        <div onclick="selectPassageMedecinTraitant(${{d.id}})" class="p-2.5 hover:bg-brand-neon/10 cursor-pointer">
+                    dropdown.innerHTML = matches.map((d, index) => `
+                        <button type="button" id="passageMedecinOption-${{d.id}}" role="option" aria-selected="${{index === 0}}" onclick="selectPassageMedecinTraitant(${{d.id}})" onmouseenter="setPassageMedecinSearchActive(${{index}})" class="w-full text-left p-2.5 ${{index === 0 ? 'bg-brand-neon/10' : ''}} hover:bg-brand-neon/10 cursor-pointer transition">
                             <div class="text-xs font-bold text-slate-800 dark:text-slate-100">${{d.grade || 'Dr'}} ${{d.nom || ''}} ${{d.prenom || ''}}</div>
                             <div class="text-[10px] text-slate-400">${{d.wilaya || 'Algérie'}}${{d.telephone ? ' • ' + d.telephone : ''}}</div>
-                        </div>
+                        </button>
                     `).join('');
                 }}
                 dropdown.classList.remove('hidden');
+                input?.setAttribute('aria-expanded', 'true');
+                window.setPassageMedecinSearchActive(passageMedecinSearchActiveIndex);
+            }};
+
+            window.setPassageMedecinSearchActive = function(index) {{
+                const dropdown = document.getElementById('passageMedecinTraitantSearchResults');
+                const input = document.getElementById('passageMedecinTraitantSearchInput');
+                if (!dropdown || index < 0 || index >= passageMedecinSearchMatches.length) return;
+                passageMedecinSearchActiveIndex = index;
+                dropdown.querySelectorAll('[role="option"]').forEach((option, optionIndex) => {{
+                    const active = optionIndex === index;
+                    option.setAttribute('aria-selected', String(active));
+                    option.classList.toggle('bg-brand-neon/10', active);
+                    if (active) {{
+                        input?.setAttribute('aria-activedescendant', option.id);
+                        option.scrollIntoView({{ block: 'nearest' }});
+                    }}
+                }});
+            }};
+
+            window.handlePassageMedecinTraitantSearchKeydown = function(event) {{
+                const dropdown = document.getElementById('passageMedecinTraitantSearchResults');
+                if (!dropdown || dropdown.classList.contains('hidden')) return;
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {{
+                    if (!passageMedecinSearchMatches.length) return;
+                    event.preventDefault();
+                    const direction = event.key === 'ArrowDown' ? 1 : -1;
+                    const count = passageMedecinSearchMatches.length;
+                    const next = (passageMedecinSearchActiveIndex + direction + count) % count;
+                    window.setPassageMedecinSearchActive(next);
+                }} else if (event.key === 'Enter' && passageMedecinSearchMatches.length) {{
+                    event.preventDefault();
+                    const index = passageMedecinSearchActiveIndex >= 0 ? passageMedecinSearchActiveIndex : 0;
+                    window.selectPassageMedecinTraitant(passageMedecinSearchMatches[index].id);
+                }} else if (event.key === 'Escape') {{
+                    dropdown.classList.add('hidden');
+                    event.currentTarget.setAttribute('aria-expanded', 'false');
+                    event.currentTarget.removeAttribute('aria-activedescendant');
+                }}
             }};
 
             window.selectPassageMedecinTraitant = function(doctorId) {{
@@ -2824,6 +3859,10 @@ def render_html() -> str:
                 document.getElementById('passageMedecinTraitantId').value = doc.id;
                 document.getElementById('passageMedecinTraitantSearchInput').value = `${{doc.grade || 'Dr'}} ${{doc.nom || ''}} ${{doc.prenom || ''}}`;
                 document.getElementById('passageMedecinTraitantSearchResults').classList.add('hidden');
+                document.getElementById('passageMedecinTraitantSearchInput')?.setAttribute('aria-expanded', 'false');
+                document.getElementById('passageMedecinTraitantSearchInput')?.removeAttribute('aria-activedescendant');
+                passageMedecinSearchMatches = [];
+                passageMedecinSearchActiveIndex = -1;
 
                 const card = document.getElementById('medecinTraitantSelectedCard');
                 document.getElementById('selectedMedecinTraitantName').innerText = `${{doc.grade || 'Dr'}} ${{doc.nom || ''}} ${{doc.prenom || ''}}`;
@@ -2837,6 +3876,8 @@ def render_html() -> str:
                 document.getElementById('passageMedecinTraitantId').value = '';
                 document.getElementById('passageMedecinTraitantSearchInput').value = '';
                 document.getElementById('medecinTraitantSelectedCard').classList.add('hidden');
+                passageMedecinSearchMatches = [];
+                passageMedecinSearchActiveIndex = -1;
                 checkPassageFormValidity();
             }};
 
@@ -2849,14 +3890,21 @@ def render_html() -> str:
                 if (!dropdown) return;
 
                 const selectedType = (document.getElementById('passageTypeSelect')?.value || '').toLowerCase().trim();
+                const normalizedSelectedType = normalizePassageSpecialite(selectedType);
 
                 currentMatchingPrestations = (receptionInitData.consultations || []).filter(c => {{
                     const matchesQuery = !q || (c.designation && c.designation.toLowerCase().includes(q)) || (c.categorie && c.categorie.toLowerCase().includes(q));
-                    const matchesType = !selectedType || (c.specialite && c.specialite.toLowerCase().trim() === selectedType);
+                    const normalizedCategory = String(c.categorie || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+                    const matchesType = IS_RADIOLOGY_MODE
+                        ? normalizedCategory.includes('radiolog') && normalizedCategory.includes('medical')
+                        : (!normalizedSelectedType || normalizePassageSpecialite(c.specialite) === normalizedSelectedType);
                     return matchesQuery && matchesType;
                 }}).map(c => ({{
                     nom: c.designation,
                     categorie: c.categorie,
+                    specialite: c.specialite,
+                    modalite: c.modalite || '',
+                    transmettre_hl7: c.transmettre_hl7 === true,
                     prix_jour: parseFloat(c.tarif || 0),
                     prix_nuit: parseFloat(c.tarif_nuit || c.tarif || 0)
                 }}));
@@ -2915,6 +3963,10 @@ def render_html() -> str:
 
                 currentPassageActs.push({{
                     nom: selectedPrestationTemp.nom,
+                    categorie: selectedPrestationTemp.categorie,
+                    specialite: selectedPrestationTemp.specialite,
+                    modalite: selectedPrestationTemp.modalite || '',
+                    transmettre_hl7: selectedPrestationTemp.transmettre_hl7 === true,
                     periode: periode,
                     quantite: quantite,
                     tarif: tarif,
@@ -3243,7 +4295,9 @@ def render_html() -> str:
             // =================================================================
             // 10. SOUMISSION DU PASSAGE AVEC CHARGEMENT SUR LE BOUTON
             // =================================================================
-            window.openPassageModal = function() {{
+            window.openPassageModal = function(isEditing = false) {{
+                passageEditMode = Boolean(isEditing);
+                if (!passageEditMode) {{ passageEditPatientData = null; passageEditPatientDraft = null; }}
                 const form = document.getElementById('passageForm');
                 if (form) form.reset();
 
@@ -3272,7 +4326,20 @@ def render_html() -> str:
                 ];
                 qKeys.forEach(k => setRadioVal(k, 'NON'));
 
-                document.getElementById('passageModalTitle').innerText = "Enregistrer un Passage Patient";
+                document.getElementById('passageModalTitle').innerText = passageEditMode ? "Corriger les informations du passage" : "Enregistrer un Passage Patient";
+                const saveButton = document.getElementById('btnSubmitPassage');
+                if (saveButton) saveButton.textContent = passageEditMode ? 'Enregistrer les corrections' : 'Enregistrer & Émettre Demande';
+                const financialSection = document.getElementById('passageFinancialSection');
+                financialSection?.querySelectorAll('input,select,button').forEach(control => control.disabled = passageEditMode);
+                const personalEditFields = document.getElementById('passagePersonalEditFields');
+                personalEditFields?.classList.toggle('hidden', !passageEditMode);
+                personalEditFields?.querySelectorAll('input,select').forEach(control => control.disabled = !passageEditMode);
+                const statusSelect = document.getElementById('passageStatutSelect');
+                if (statusSelect) statusSelect.disabled = passageEditMode;
+                const newPatientButton = document.querySelector('#passageForm button[onclick="openPassagePatientForm()"] span');
+                if (newPatientButton) newPatientButton.textContent = passageEditMode ? "Modifier la fiche patient" : "+ Nouveau Patient";
+                const changePatientButton = document.querySelector('#patientSelectedSummaryCard button[onclick="clearSelectedPatient()"]');
+                if (changePatientButton) changePatientButton.classList.toggle('hidden', passageEditMode);
                 document.getElementById('passageModal').classList.remove('hidden');
                 checkPassageFormValidity();
             }};
@@ -3336,6 +4403,56 @@ def render_html() -> str:
                             prothese_metallique: getRadioVal('q_prothese_metallique')
                         }}
                     }};
+
+                    if (passageEditMode) {{
+                        const patientInfo = passageEditPatientDraft || {{}};
+                        const correctionPayload = {{
+                            id_passage: Number(document.getElementById('passageId').value),
+                            id_patient: Number(patientId),
+                            nom: document.getElementById('passageEditPatientNom').value.trim(),
+                            prenom: document.getElementById('passageEditPatientPrenom').value.trim(),
+                            date_naissance: document.getElementById('passageEditPatientDob').value,
+                            genre: document.getElementById('passageEditPatientGenre').value,
+                            groupe_sanguin: document.getElementById('passageEditPatientBlood').value,
+                            telephone_1: document.getElementById('passageEditPatientPhone1').value.trim(),
+                            telephone_2: document.getElementById('passageEditPatientPhone2').value.trim(),
+                            email: document.getElementById('passageEditPatientEmail').value.trim(),
+                            wilaya: document.getElementById('passageEditPatientWilaya').value,
+                            commune: document.getElementById('passageEditPatientCommune').value.trim(),
+                            type_piece_identite: patientInfo.type_piece_identite || 'Carte Chifa',
+                            doc_identite: patientInfo.doc_identite || '', avatar: patientInfo.avatar || '',
+                            photo_face: patientInfo.photo_face || '', photo_profil_droit: patientInfo.photo_profil_droit || '',
+                            photo_profil_gauche: patientInfo.photo_profil_gauche || '', empreinte_index: patientInfo.empreinte_index || '',
+                            pieces_scannees: patientInfo.pieces_scannees || [],
+                            date_passage: document.getElementById('passageDate').value,
+                            heure_passage: document.getElementById('passageHeure').value,
+                            type_passage: document.getElementById('passageTypeSelect').value,
+                            medecin_traitant_id: Number(doctorId),
+                            actes: currentPassageActs,
+                            documents_scannes: currentPassageScannedDocs,
+                            questionnaire: {{
+                                observation_medicale: document.getElementById('passageObservation')?.value?.trim() || '',
+                                hospitalise: getRadioVal('q_hospitalise'), dossier_interne: getRadioVal('q_dossier_interne'),
+                                dossier_externe: getRadioVal('q_dossier_externe'), urgence_vitale: getRadioVal('q_urgence_vitale'),
+                                grossesse: getRadioVal('q_grossesse'), allergie: getRadioVal('q_allergie'),
+                                diabete: getRadioVal('q_diabete'), hta: getRadioVal('q_hta'), asthme: getRadioVal('q_asthme'),
+                                insuffisance_renale: getRadioVal('q_insuffisance_renale'), pace_maker: getRadioVal('q_pace_maker'),
+                                valve_cardiaque: getRadioVal('q_valve_cardiaque'), prothese_metallique: getRadioVal('q_prothese_metallique')
+                            }}
+                        }};
+                        const response = await fetch('/api/reception/patient/update-from-passage', {{
+                            method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify(correctionPayload)
+                        }});
+                        const result = await response.json();
+                        if (!response.ok || result.success === false) throw new Error(result.detail || result.message || 'La correction du passage a échoué.');
+                        passageEditMode = false;
+                        closePassageModal();
+                        await loadReceptionPassagesModule();
+                        if (typeof window.showToast === 'function') window.showToast('Passage corrigé. La demande d’examen a été régénérée.', 'success');
+                        openDemandeExamenModal(Number(document.getElementById('passageId')?.value || correctionPayload.id_passage));
+                        return;
+                    }}
 
                     const res = await fetch('/api/reception/save', {{
                         method: 'POST',

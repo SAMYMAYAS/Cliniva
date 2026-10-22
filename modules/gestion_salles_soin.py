@@ -81,6 +81,40 @@ class RoomManager:
             rows = cursor.fetchall()
             return [r["nom"] for r in rows]
 
+    def get_room_types(self) -> List[Dict[str, Any]]:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT id, nom FROM room_types ORDER BY LOWER(nom), nom;")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def add_room_type(self, name: str) -> Dict[str, Any]:
+        name = " ".join(str(name or "").split())
+        if not name:
+            return {"success": False, "message": "Saisissez le nom du type de salle."}
+        if len(name) > 80:
+            return {"success": False, "message": "Le nom du type ne peut pas dépasser 80 caractères."}
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO room_types (nom) VALUES (%s)
+                ON CONFLICT DO NOTHING
+                RETURNING id, nom;
+            """, (name,))
+            created = cursor.fetchone()
+            if not created:
+                return {"success": False, "message": "Ce type de salle existe déjà."}
+        return {"success": True, "message": "Type de salle ajouté.", "type": dict(created)}
+
+    def delete_room_type(self, type_id: int) -> Dict[str, Any]:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT nom FROM room_types WHERE id = %s;", (type_id,))
+            room_type = cursor.fetchone()
+            if not room_type:
+                return {"success": False, "message": "Type de salle introuvable."}
+            cursor.execute("SELECT 1 FROM rooms WHERE types @> %s::jsonb LIMIT 1;", (json.dumps([room_type["nom"]]),))
+            if cursor.fetchone():
+                return {"success": False, "message": "Ce type est utilisé par au moins une salle. Retirez-le d’abord des salles concernées."}
+            cursor.execute("DELETE FROM room_types WHERE id = %s;", (type_id,))
+        return {"success": True, "message": "Type de salle supprimé."}
+
     def save(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Ajoute ou modifie une salle."""
         room_id = data.get("id")
@@ -95,6 +129,11 @@ class RoomManager:
                 "success": False,
                 "message": "La Désignation, la Spécialité et au moins un Type d'espace sont requis.",
             }
+
+        available_types = {item["nom"] for item in self.get_room_types()}
+        types_list = list(dict.fromkeys(str(item).strip() for item in types_list if str(item).strip()))
+        if not types_list or any(item not in available_types for item in types_list):
+            return {"success": False, "message": "Sélectionnez uniquement des types de salle enregistrés."}
 
         types_json = json.dumps(types_list)
 
@@ -135,6 +174,7 @@ async def api_get_rooms():
             "rooms": room_manager.get_all(),
             "total_count": room_manager.count(),
             "specialites": room_manager.get_specialites(),
+            "room_types": room_manager.get_room_types(),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -148,6 +188,16 @@ async def api_save_room(payload: Dict[str, Any]):
 @rooms_router.post("/delete")
 async def api_delete_room(payload: Dict[str, Any]):
     return room_manager.delete(payload.get("id"))
+
+
+@rooms_router.post("/types/save")
+async def api_add_room_type(payload: Dict[str, Any]):
+    return room_manager.add_room_type(payload.get("nom", ""))
+
+
+@rooms_router.post("/types/delete")
+async def api_delete_room_type(payload: Dict[str, Any]):
+    return room_manager.delete_room_type(payload.get("id"))
 
 
 # ============================================================================
@@ -175,11 +225,14 @@ def render_html() -> str:
                 <h1 class="text-2xl font-extrabold tracking-tight mb-1">Salles de Consultation & Espaces de Soins</h1>
                 <p class="text-xs text-slate-300">Répertoire des cabinets de consultation, blocs opératoires, salles de soins et plateaux techniques.</p>
             </div>
-            <div class="flex items-center gap-3">
+            <div class="flex flex-wrap items-center gap-3">
                 <div class="bg-white/10 px-4 py-2 rounded-2xl backdrop-blur-sm border border-white/10 text-xs">
                     <span class="text-slate-300">Total Espaces:</span> 
                     <strong id="totalRoomsCount" class="text-brand-neon font-black text-sm ml-1">0</strong>
                 </div>
+                <button type="button" onclick="openRoomTypesModal()" class="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-4 py-2.5 rounded-2xl font-bold text-xs border border-white/15 transition">
+                    <i class="ph-bold ph-tag text-base"></i><span>Types de salle</span>
+                </button>
                 <button onclick="openRoomModal()" class="flex items-center gap-2 bg-brand-neon hover:bg-brand-neonDark text-black px-5 py-2.5 rounded-2xl font-bold text-xs shadow-md shadow-brand-neon/20 transition">
                     <i class="ph-bold ph-plus-circle text-base"></i>
                     <span>Nouvelle Salle</span>
@@ -261,7 +314,7 @@ def render_html() -> str:
                         <label class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">Type(s) d'espace (Multi-sélection autorisée) *</label>
                         <span class="text-[10px] text-slate-400">Cochez une ou plusieurs options</span>
                     </div>
-                    <div class="grid grid-cols-2 gap-2">
+                    <div id="roomTypeCheckboxes" class="grid grid-cols-2 gap-2">
                         {types_checkboxes}
                     </div>
                 </div>
@@ -274,11 +327,31 @@ def render_html() -> str:
         </div>
     </div>
 
+    <div id="roomTypesModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center hidden z-[60] p-4" onclick="if(event.target===this)closeRoomTypesModal()">
+        <section role="dialog" aria-modal="true" aria-labelledby="roomTypesModalTitle" class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-xl max-h-[88vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
+            <header class="px-6 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between bg-slate-50/70 dark:bg-black/20">
+                <div class="flex items-center gap-3"><div class="w-10 h-10 rounded-2xl bg-brand-neon/20 text-emerald-700 dark:text-brand-neon flex items-center justify-center"><i class="ph-bold ph-tag text-lg"></i></div><div><h2 id="roomTypesModalTitle" class="text-base font-extrabold text-slate-800 dark:text-white">Types de salle</h2><p class="text-[11px] text-slate-500">Ajoutez les types disponibles dans les fiches de salle.</p></div></div>
+                <button type="button" onclick="closeRoomTypesModal()" aria-label="Fermer" class="p-2 rounded-xl text-slate-500 hover:bg-slate-200 dark:hover:bg-white/10"><i class="ph-bold ph-x text-lg"></i></button>
+            </header>
+            <div class="p-5 space-y-4 overflow-y-auto">
+                <form onsubmit="handleRoomTypeSubmit(event)" class="flex flex-col sm:flex-row gap-2">
+                    <input id="newRoomTypeName" type="text" maxlength="80" required placeholder="Ex. Salle de kinésithérapie" class="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-semibold text-slate-800 outline-none focus:border-emerald-500 dark:border-white/10 dark:bg-black/30 dark:text-white">
+                    <button type="submit" class="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-neon px-4 py-2.5 text-xs font-extrabold text-black hover:bg-brand-neonDark"><i class="ph-bold ph-plus"></i>Ajouter le type</button>
+                </form>
+                <div><h3 class="mb-2 text-[10px] font-extrabold uppercase tracking-wider text-slate-500">Types disponibles</h3><div id="roomTypesList" class="space-y-2"><p class="rounded-xl bg-slate-50 p-3 text-xs text-slate-500 dark:bg-white/5">Chargement…</p></div></div>
+                <p class="text-[10px] leading-5 text-slate-500">Un type déjà utilisé par une salle ne peut pas être supprimé. Retirez-le d’abord de cette salle.</p>
+            </div>
+        </section>
+    </div>
+
     <!-- SCRIPT JAVASCRIPT DU MODULE -->
     <script>
         (function() {{
             let roomsData = [];
             let availableSpecialites = [];
+            let roomTypesData = [];
+
+            const escapeRoomHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[character]));
 
             const typeBadgesColors = {{
                 'Consultation': 'bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-300 border-sky-200 dark:border-sky-800/40',
@@ -296,13 +369,79 @@ def render_html() -> str:
                     const data = await res.json();
                     roomsData = data.rooms || [];
                     availableSpecialites = data.specialites || [];
+                    roomTypesData = data.room_types || [];
+                    const checkedTypes = [...document.querySelectorAll('.room-type-check:checked')].map(input => input.value);
+                    populateRoomTypeCheckboxes(checkedTypes);
 
                     document.getElementById('totalRoomsCount').innerText = data.total_count || roomsData.length;
                     renderRoomsTable(roomsData);
                     populateSpecialiteSelect();
+                    renderRoomTypesList();
                 }} catch (e) {{
                     console.error("Erreur de chargement des salles:", e);
                 }}
+            }};
+
+            window.populateRoomTypeCheckboxes = function(selected = []) {{
+                const container = document.getElementById('roomTypeCheckboxes');
+                if (!container) return;
+                if (!roomTypesData.length) {{
+                    container.innerHTML = '<p class="col-span-2 rounded-xl bg-amber-50 p-3 text-xs text-amber-800">Aucun type de salle n’est configuré. Ajoutez-en un avec le bouton « Types de salle ».</p>';
+                    return;
+                }}
+                container.innerHTML = roomTypesData.map(item => `
+                    <label class="flex items-center gap-2.5 p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 hover:bg-brand-neon/10 cursor-pointer transition">
+                        <input type="checkbox" value="${{escapeRoomHtml(item.nom)}}" class="room-type-check rounded text-brand-neon focus:ring-brand-neon" ${{selected.includes(item.nom) ? 'checked' : ''}}>
+                        <span class="text-xs font-semibold text-slate-700 dark:text-slate-300">${{escapeRoomHtml(item.nom)}}</span>
+                    </label>`).join('');
+            }};
+
+            window.renderRoomTypesList = function() {{
+                const container = document.getElementById('roomTypesList');
+                if (!container) return;
+                container.innerHTML = roomTypesData.length ? roomTypesData.map(item => `
+                    <div class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 dark:border-white/10 dark:bg-black/20">
+                        <span class="flex min-w-0 items-center gap-2 text-xs font-bold text-slate-700 dark:text-slate-200"><i class="ph-bold ph-tag text-emerald-600"></i><span class="truncate">${{escapeRoomHtml(item.nom)}}</span></span>
+                        <button type="button" onclick="deleteRoomType(${{Number(item.id)}})" title="Supprimer si le type n’est utilisé par aucune salle" class="shrink-0 rounded-lg p-2 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-500/10"><i class="ph-bold ph-trash"></i></button>
+                    </div>`).join('') : '<p class="rounded-xl bg-slate-50 p-3 text-xs text-slate-500 dark:bg-white/5">Aucun type configuré.</p>';
+            }};
+
+            window.openRoomTypesModal = function() {{
+                renderRoomTypesList();
+                const modal = document.getElementById('roomTypesModal');
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+                document.getElementById('newRoomTypeName')?.focus();
+            }};
+
+            window.closeRoomTypesModal = function() {{
+                const modal = document.getElementById('roomTypesModal');
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }};
+
+            window.handleRoomTypeSubmit = async function(event) {{
+                event.preventDefault();
+                const input = document.getElementById('newRoomTypeName');
+                const response = await fetch('/api/rooms/types/save', {{
+                    method: 'POST', headers: {{'Content-Type':'application/json'}}, body: JSON.stringify({{nom: input.value}})
+                }});
+                const result = await response.json();
+                if (!result.success) {{ alert(result.message || 'Impossible d’ajouter ce type.'); return; }}
+                input.value = '';
+                await loadRoomsModule();
+                input.focus();
+            }};
+
+            window.deleteRoomType = async function(id) {{
+                const item = roomTypesData.find(type => Number(type.id) === Number(id));
+                if (!item || !confirm(`Supprimer le type « ${{item.nom}} » ?`)) return;
+                const response = await fetch('/api/rooms/types/delete', {{
+                    method: 'POST', headers: {{'Content-Type':'application/json'}}, body: JSON.stringify({{id}})
+                }});
+                const result = await response.json();
+                if (!result.success) {{ alert(result.message || 'Impossible de supprimer ce type.'); return; }}
+                await loadRoomsModule();
             }};
 
             window.populateSpecialiteSelect = function() {{

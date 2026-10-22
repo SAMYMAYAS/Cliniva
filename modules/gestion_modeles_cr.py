@@ -27,19 +27,6 @@ BASE_CR_TEMPLATE_PATH = os.path.abspath(
     os.path.join(MODEL_TEMPLATE_DIR, "BASE_CR_TYPE.docx")
 )
 
-MODALITES_RADIOLOGIQUES: List[str] = [
-    "IRM",
-    "Scanner (TDM)",
-    "Échographie",
-    "Radiographie Standard",
-    "Mammographie",
-    "Panoramique Dentaire / Cone Beam",
-    "Ostéodensitométrie",
-    "Scintigraphie",
-    "Endoscopie",
-    "Consultation Clinique",
-]
-
 DEFAULT_HTML_REPORT_TEMPLATE = """<p><strong><span style="text-decoration: underline; font-size: 12pt;">INDICATION CLINIQUE :</span></strong></p>
 <p style="font-size: 12pt;">Bilan d'exploration et contrôle radiologique.</p>
 <p style="font-size: 12pt;">&nbsp;</p>
@@ -142,12 +129,17 @@ class ReportTemplateManager:
             row = cursor.fetchone()
             return row["total"] if row else 0
 
-    def get_services(self) -> List[str]:
-        """Récupère les services enregistrés dans la clinique."""
+    def get_modalites(self) -> List[str]:
+        """Récupère le catalogue des modalités géré dans Gestion des spécialités."""
         with get_db_cursor() as cursor:
-            cursor.execute("SELECT nom_service FROM clinic_services ORDER BY nom_service ASC;")
-            rows = cursor.fetchall()
-            return [r["nom_service"] for r in rows]
+            cursor.execute("SELECT nom FROM ref_modalites ORDER BY nom ASC;")
+            return [r["nom"] for r in cursor.fetchall()]
+
+    def get_services(self) -> List[str]:
+        """Récupère les spécialités disponibles dans le référentiel système."""
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT nom FROM ref_specialites ORDER BY nom ASC;")
+            return [r["nom"] for r in cursor.fetchall()]
 
     def save(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Crée ou modifie un modèle de compte rendu."""
@@ -231,11 +223,12 @@ async def api_get_cr_templates():
     try:
         templates = manager.get_all()
         total = manager.count()
+        modalites = manager.get_modalites()
         services = manager.get_services()
         return {
             "templates": templates,
             "total_count": total,
-            "modalites": MODALITES_RADIOLOGIQUES,
+            "modalites": modalites,
             "services": services,
         }
     except Exception as exc:
@@ -325,8 +318,8 @@ def render_html() -> str:
     """Génère l'HTML complet avec Dark Mode, Modales A4 et pagination par 15."""
     return """
     <!-- Librairies pour l'éditeur A4 et l'export PDF -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/tinymce/6.8.3/tinymce.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script src="/static/vendor/tinymce/tinymce.min.js"></script>
+    <script src="/static/vendor/js/html2pdf.bundle.min.js"></script>
 
     <style>
         .a4-page-sheet {
@@ -385,10 +378,18 @@ def render_html() -> str:
         </div>
 
         <!-- BARRE DE RECHERCHE -->
-        <div class="flex items-center bg-white dark:bg-[#121c15] p-3.5 rounded-3xl shadow-sm border border-slate-100 dark:border-white/5 transition-colors">
-            <div class="flex items-center gap-2.5 bg-slate-50 dark:bg-black/30 rounded-2xl px-4 py-2 border border-slate-200/80 dark:border-white/10 w-full md:w-96">
+        <div class="flex flex-col lg:flex-row lg:items-center gap-3 bg-white dark:bg-[#121c15] p-3.5 rounded-3xl shadow-sm border border-slate-100 dark:border-white/5 transition-colors">
+            <div class="flex items-center gap-2.5 bg-slate-50 dark:bg-black/30 rounded-2xl px-4 py-2 border border-slate-200/80 dark:border-white/10 w-full lg:flex-1">
                 <i class="ph ph-magnifying-glass text-slate-400 text-base"></i>
                 <input type="text" id="searchCrTemplateInput" oninput="filterCrTemplates()" placeholder="Rechercher par désignation, modalité, service, type (Word/HTML)..." class="w-full text-xs outline-none bg-transparent text-slate-700 dark:text-slate-200">
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full lg:w-auto lg:min-w-[24rem]">
+                <select id="crTemplateFilterModalite" onchange="filterCrTemplates()" aria-label="Filtrer par modalité" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none bg-slate-50 dark:bg-black/30 text-slate-700 dark:text-slate-200">
+                    <option value="">Toutes les modalités</option>
+                </select>
+                <select id="crTemplateFilterService" onchange="filterCrTemplates()" aria-label="Filtrer par service rattaché" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none bg-slate-50 dark:bg-black/30 text-slate-700 dark:text-slate-200">
+                    <option value="">Toutes les spécialités</option>
+                </select>
             </div>
         </div>
 
@@ -632,19 +633,19 @@ def render_html() -> str:
 
             window.filterCrTemplates = function() {
                 const q = (document.getElementById('searchCrTemplateInput')?.value || '').toLowerCase().trim();
-                if (!q) {
-                    filteredCrTemplatesList = crTemplatesData;
-                } else {
-                    filteredCrTemplatesList = crTemplatesData.filter(t => 
-                        (t.designation && t.designation.toLowerCase().includes(q)) || 
-                        (t.modalite && t.modalite.toLowerCase().includes(q)) || 
-                        (t.service && t.service.toLowerCase().includes(q)) || 
-                        (t.type_modele && t.type_modele.toLowerCase().includes(q)) || 
-                        (t.utilisateur && t.utilisateur.toLowerCase().includes(q)) || 
-                        (t.date_heure_ajout && t.date_heure_ajout.toLowerCase().includes(q)) || 
-                        String(t.id).includes(q)
-                    );
-                }
+                const modalite = document.getElementById('crTemplateFilterModalite')?.value || '';
+                const service = document.getElementById('crTemplateFilterService')?.value || '';
+                filteredCrTemplatesList = crTemplatesData.filter(t => {
+                    const matchesText = !q ||
+                        (t.designation && t.designation.toLowerCase().includes(q)) ||
+                        (t.modalite && t.modalite.toLowerCase().includes(q)) ||
+                        (t.service && t.service.toLowerCase().includes(q)) ||
+                        (t.type_modele && t.type_modele.toLowerCase().includes(q)) ||
+                        (t.utilisateur && t.utilisateur.toLowerCase().includes(q)) ||
+                        (t.date_heure_ajout && t.date_heure_ajout.toLowerCase().includes(q)) ||
+                        String(t.id).includes(q);
+                    return matchesText && (!modalite || t.modalite === modalite) && (!service || t.service === service);
+                });
                 currentCrPage = 1;
                 renderCrTemplatesTable();
             };
@@ -760,14 +761,26 @@ def render_html() -> str:
             window.populateCrDropdowns = function() {
                 const selectMod = document.getElementById('crTemplateModalite');
                 const selectServ = document.getElementById('crTemplateService');
+                const filterMod = document.getElementById('crTemplateFilterModalite');
+                const filterServ = document.getElementById('crTemplateFilterService');
 
-                if (selectMod && crModalitesList.length > 0) {
-                    selectMod.innerHTML = crModalitesList.map(m => `<option value="${m}">${m}</option>`).join('');
+                if (selectMod) {
+                    selectMod.innerHTML = crModalitesList.length
+                        ? crModalitesList.map(m => `<option value="${m}">${m}</option>`).join('')
+                        : '<option value="">Aucune modalité configurée</option>';
                 }
-                if (selectServ && crServicesList.length > 0) {
-                    selectServ.innerHTML = crServicesList.map(s => `<option value="${s}">${s}</option>`).join('');
-                } else if (selectServ) {
-                    selectServ.innerHTML = '<option value="Service Imagerie">Service Imagerie</option><option value="Service Radiologie">Service Radiologie</option><option value="Consultations">Consultations</option>';
+                if (selectServ) {
+                    selectServ.innerHTML = crServicesList.length
+                        ? crServicesList.map(s => `<option value="${s}">${s}</option>`).join('')
+                        : '<option value="">Aucune spécialité configurée</option>';
+                }
+                if (filterMod) {
+                    filterMod.innerHTML = '<option value="">Toutes les modalités</option>' +
+                        crModalitesList.map(m => `<option value="${m}">${m}</option>`).join('');
+                }
+                if (filterServ) {
+                    filterServ.innerHTML = '<option value="">Toutes les spécialités</option>' +
+                        crServicesList.map(s => `<option value="${s}">${s}</option>`).join('');
                 }
             };
 
@@ -874,7 +887,16 @@ def render_html() -> str:
 
                 document.getElementById('crTemplateId').value = t.id;
                 document.getElementById('crTemplateDesignation').value = t.designation;
+                // Conserve une ancienne valeur de modèle si elle a depuis été retirée du référentiel.
+                const modaliteSelect = document.getElementById('crTemplateModalite');
+                if (t.modalite && !crModalitesList.includes(t.modalite)) {
+                    modaliteSelect.add(new Option(`${t.modalite} (ancienne valeur)`, t.modalite), 0);
+                }
                 document.getElementById('crTemplateModalite').value = t.modalite;
+                const serviceSelect = document.getElementById('crTemplateService');
+                if (t.service && !crServicesList.includes(t.service)) {
+                    serviceSelect.add(new Option(`${t.service} (ancienne valeur)`, t.service), 0);
+                }
                 document.getElementById('crTemplateService').value = t.service;
 
                 const radio = document.querySelector(`input[name="crTypeRadio"][value="${t.type_modele}"]`);

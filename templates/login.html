@@ -4,22 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cliniva - Connexion Sécurisée</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/@phosphor-icons/web"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    fontFamily: { sans: ['"Plus Jakarta Sans"', 'sans-serif'] },
-                    colors: {
-                        brand: { neon: '#8be140', neonDark: '#75c832', darkBg: '#070b08', cardDark: '#0f1712' }
-                    }
-                }
-            }
-        }
-    </script>
+    <link rel="stylesheet" href="/static/css/app.css">
+    <link rel="stylesheet" href="/static/vendor/phosphor/regular/style.css">
+    <link rel="stylesheet" href="/static/vendor/phosphor/bold/style.css">
+    <link rel="stylesheet" href="/static/vendor/phosphor/light/style.css">
     <style>
         .login-glow {
             background: radial-gradient(circle at 50% 30%, #15381d 0%, #070b08 80%);
@@ -135,5 +123,6 @@
             }
         }
     </script>
+    <script src="/static/js/interface_zoom.js"></script>
 </body>
 </html>

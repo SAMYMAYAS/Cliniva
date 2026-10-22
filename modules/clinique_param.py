@@ -305,7 +305,7 @@ def render_html() -> str:
 
             <div class="flex flex-col sm:flex-row items-center gap-5 p-4 rounded-2xl bg-slate-50 dark:bg-black/20 border border-slate-200/60 dark:border-white/5">
                 <div class="relative group shrink-0">
-                    <img id="clinicLogoPreview" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80" class="w-20 h-20 rounded-2xl object-cover border border-slate-200 dark:border-white/10 shadow-sm">
+                    <img id="clinicLogoPreview" src="/static/images/avatar-placeholder.svg?w=100&auto=format&fit=crop&q=80" class="w-20 h-20 rounded-2xl object-cover border border-slate-200 dark:border-white/10 shadow-sm">
                     <label for="clinicLogoUpload" class="absolute inset-0 bg-black/50 rounded-2xl flex items-center justify-center text-white opacity-0 group-hover:opacity-100 cursor-pointer transition-opacity">
                         <i class="ph-bold ph-camera text-2xl"></i>
                     </label>

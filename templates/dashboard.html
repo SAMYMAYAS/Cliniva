@@ -4,34 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cliniva - Clinic Management Dashboard</title>
-    <!-- Tailwind CSS CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Phosphor Icons CDN -->
-    <script src="https://unpkg.com/@phosphor-icons/web"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['"Plus Jakarta Sans"', 'sans-serif'],
-                    },
-                    colors: {
-                        brand: {
-                            neon: '#8be140',
-                            neonDark: '#75c832',
-                            darkBg: '#0b160f',
-                            cardDark: '#121c15',
-                            cardBorder: 'rgba(255, 255, 255, 0.08)',
-                        }
-                    }
-                }
-            }
-        }
-    </script>
+    <link rel="stylesheet" href="/static/css/app.css">
+    <link rel="stylesheet" href="/static/vendor/phosphor/regular/style.css">
+    <link rel="stylesheet" href="/static/vendor/phosphor/bold/style.css">
+    <link rel="stylesheet" href="/static/vendor/phosphor/light/style.css">
     <style>
         .custom-glass {
             background: rgba(18, 28, 21, 0.7);
@@ -41,8 +17,115 @@
         .sidebar-glow {
             background: radial-gradient(circle at 50% 20%, #17381f 0%, #0a130c 80%);
         }
+        #sidebar { transition: width .24s ease, flex-basis .24s ease, padding .24s ease, transform .3s ease; }
+        #sidebar.sidebar-collapsed { width: 5.25rem; flex-basis: 5.25rem; padding: .75rem; }
+            #sidebar.sidebar-collapsed > div:first-child > div:first-child { flex-direction: column; justify-content: center; gap: .55rem; padding: .35rem 0; }
+            #sidebar.sidebar-collapsed > div:first-child > div:first-child > svg { width: 2.5rem; height: 2.5rem; }
+            #sidebar.sidebar-collapsed > div:first-child > div:first-child > div { display: none; }
+            #sidebar.sidebar-collapsed #sidebarCollapseButton { margin-left: 0; }
+            #sidebar.sidebar-collapsed .sidebar-section-label,
+            #sidebar.sidebar-collapsed .sidebar-nav-btn span,
+            #sidebar.sidebar-collapsed .sidebar-sub-btn span,
+            #sidebar.sidebar-collapsed .sidebar-group-btn > span > span,
+            #sidebar.sidebar-collapsed .sidebar-group-btn > div > span,
+            #sidebar.sidebar-collapsed .sidebar-group-btn > i:last-child,
+            #sidebar.sidebar-collapsed #settings-submenu,
+            #sidebar.sidebar-collapsed #dicom-submenu,
+            #sidebar.sidebar-collapsed .sidebar-help-label,
+            #sidebar.sidebar-collapsed #sidebarProfileCopy { display: none !important; }
+            #sidebar.sidebar-collapsed .sidebar-nav-btn,
+            #sidebar.sidebar-collapsed .sidebar-sub-btn,
+            #sidebar.sidebar-collapsed .sidebar-group-btn,
+            #sidebar.sidebar-collapsed .sidebar-help-link { justify-content: center; gap: 0; padding: .7rem .45rem; text-align: center; }
+            #sidebar.sidebar-collapsed .sidebar-nav-btn i,
+            #sidebar.sidebar-collapsed .sidebar-group-btn > span > i,
+            #sidebar.sidebar-collapsed .sidebar-help-link > i { margin: 0; font-size: 1.25rem; }
+            #sidebar.sidebar-collapsed #sidebarProfile { justify-content: center; gap: .35rem; padding: .35rem; flex-direction: column; }
+            #sidebar.sidebar-collapsed #sidebarProfile > div { justify-content: center; }
+        #sidebar.sidebar-collapsed #sidebarProfile img { width: 2.25rem; height: 2.25rem; }
         .banner-glow {
             background: radial-gradient(circle at 60% 50%, #153e20 0%, #0e1711 75%);
+        }
+        /* Dashboard : identité premium, locale et sans dépendance CDN. */
+        #dashboardOverview { --dash-line:rgba(21,66,42,.09); }
+        #dashboardOverview .dashboard-hero { position:relative; isolation:isolate; overflow:hidden; padding:1.45rem 1.55rem; border:1px solid rgba(255,255,255,.12); border-radius:1.65rem; background:radial-gradient(ellipse at 82% 10%,rgba(143,235,79,.24),transparent 33%),radial-gradient(ellipse at 68% 110%,rgba(22,163,111,.28),transparent 42%),linear-gradient(118deg,#0c1b13 0%,#123322 55%,#173e2a 100%); box-shadow:0 18px 42px rgba(12,41,25,.18); }
+        #dashboardOverview .dashboard-hero::after { content:""; position:absolute; z-index:-1; width:17rem; height:17rem; right:13%; top:-11rem; border:1px solid rgba(198,255,164,.13); border-radius:50%; box-shadow:0 0 0 26px rgba(198,255,164,.035),0 0 0 54px rgba(198,255,164,.025); }
+        #dashboardOverview .dashboard-hero h1 { color:#fff; letter-spacing:-.045em; font-size:clamp(1.55rem,2.2vw,2.1rem); }
+        #dashboardOverview .dashboard-eyebrow { color:#b5ef8c; }
+        #dashboardOverview .dashboard-subtitle { color:rgba(240,251,242,.68); }
+        #dashboardOverview .dashboard-controls { position:relative; z-index:1; }
+        #dashboardOverview .dashboard-period { border-color:rgba(255,255,255,.18); background:rgba(255,255,255,.09); color:#f5fff5; box-shadow:0 8px 24px rgba(0,0,0,.12); backdrop-filter:blur(10px); }
+        #dashboardOverview .dashboard-period select { color:#fff; }
+        #dashboardOverview .dashboard-period option { color:#10251a; }
+        #dashboardOverview .dashboard-targets { background:#a8ec69; color:#102016; box-shadow:0 8px 22px rgba(123,208,69,.2); }
+        #dashboardOverview .dashboard-targets:hover { background:#c1f28e; }
+        #dashboardOverview .dashboard-kpi-card,#dashboardOverview section.rounded-3xl,#dashboardOverview article { border-color:var(--dash-line); background:linear-gradient(145deg,#fff 0%,#fbfdfb 100%); box-shadow:0 5px 18px rgba(24,58,38,.045),0 1px 2px rgba(24,58,38,.035); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; }
+        #dashboardOverview .dashboard-kpi-card { min-height:9.1rem; padding:1.15rem; }
+        #dashboardOverview .dashboard-kpi-card::before { content:""; position:absolute; inset:0 0 auto; height:3px; background:linear-gradient(90deg,#72cf4c,#21a77b); opacity:.85; }
+        #dashboardOverview .dashboard-kpi-card:hover,#dashboardOverview section.rounded-3xl:hover,#dashboardOverview article:hover { transform:translateY(-3px); border-color:rgba(36,151,91,.2); box-shadow:0 14px 30px rgba(24,58,38,.09); }
+        #dashboardOverview section.rounded-3xl { border-radius:1.45rem; padding:1.3rem; }
+        #dashboardOverview section.rounded-3xl h2 { letter-spacing:-.025em; }
+        #dashboardOverview article:not(.dashboard-kpi-card) { border-radius:1.35rem; padding:1.2rem; }
+        #dashboardOverview .dashboard-chart-bar { box-shadow:0 5px 12px rgba(16,137,80,.18); }
+        #dashboardOverview .dashboard-donut { filter:drop-shadow(0 8px 14px rgba(15,43,27,.12)); }
+        #dashboardOverview .dashboard-progress { box-shadow:0 2px 8px rgba(16,137,80,.12); }
+        .dark #dashboardOverview { --dash-line:rgba(197,255,212,.09); }
+        .dark #dashboardOverview .dashboard-kpi-card,.dark #dashboardOverview section.rounded-3xl,.dark #dashboardOverview article { background:linear-gradient(145deg,#142019,#101812); box-shadow:0 8px 24px rgba(0,0,0,.18); }
+        @media(max-width:640px) { #dashboardOverview .dashboard-hero { padding:1.15rem; border-radius:1.35rem; } #dashboardOverview .dashboard-hero h1 { font-size:1.55rem; } #dashboardOverview .dashboard-controls { width:100%; } #dashboardOverview .dashboard-period { flex:1; min-width:0; justify-content:space-between; } #dashboardOverview .dashboard-targets { min-height:44px; } #dashboardOverview .dashboard-kpi-card { min-height:8.2rem; padding:.9rem; border-radius:1.2rem; } #dashboardOverview section.rounded-3xl { padding:1rem; border-radius:1.2rem; } #dashboardOverview article:not(.dashboard-kpi-card) { padding:1rem; } }
+        @media(max-width:370px) { #dashboardOverview .dashboard-kpi-grid { grid-template-columns:1fr; } }
+        @media(prefers-reduced-motion:reduce) { #dashboardOverview .dashboard-kpi-card,#dashboardOverview section.rounded-3xl,#dashboardOverview article { transition:none; } #dashboardOverview .dashboard-kpi-card:hover,#dashboardOverview section.rounded-3xl:hover,#dashboardOverview article:hover { transform:none; } }
+        #dashboardOverview .dashboard-toolbar { border:1px solid rgba(21,66,42,.09); border-radius:1.25rem; background:rgba(255,255,255,.82); box-shadow:0 5px 18px rgba(24,58,38,.04); }
+        .dark #dashboardOverview .dashboard-toolbar { border-color:rgba(197,255,212,.09); background:rgba(18,28,21,.88); }
+        #dashboardOverview .dashboard-filter-input { min-height:42px; border:1px solid #dce6de; border-radius:.8rem; background:#fff; padding:.55rem .7rem; color:#173323; font-size:.8rem; font-weight:650; }
+        .dark #dashboardOverview .dashboard-filter-input { border-color:rgba(255,255,255,.12); background:#0c130e; color:#effcf0; }
+        #dashboardOverview .dashboard-chart-columns { grid-auto-flow:column; grid-auto-columns:minmax(2rem,1fr); }
+        /* Présentation secondaire inspirée des tableaux de bord Maximum Admin. */
+        #dashboardOverview[data-dashboard-style="maximum"] { --dash-line:rgba(148,163,184,.16); padding:1.15rem; border:1px solid rgba(148,163,184,.14); border-radius:1.7rem; background:radial-gradient(ellipse at 8% 0%,rgba(37,99,235,.16),transparent 34%),linear-gradient(145deg,#0b1220,#111827 55%,#0f172a); color:#e2e8f0; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-hero { border-color:rgba(148,163,184,.15); border-radius:1.25rem; background:linear-gradient(115deg,#101827,#172554 65%,#1e3a8a); box-shadow:0 16px 38px rgba(2,6,23,.3); }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-hero::after { border-color:rgba(191,219,254,.17); box-shadow:0 0 0 26px rgba(191,219,254,.045),0 0 0 54px rgba(191,219,254,.025); }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-eyebrow { color:#93c5fd; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-hero h1 { color:#f8fafc; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-subtitle { color:#b6c5db; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-kpi-card,
+        #dashboardOverview[data-dashboard-style="maximum"] section.rounded-3xl,
+        #dashboardOverview[data-dashboard-style="maximum"] article:not(.dashboard-kpi-card) { border-color:rgba(148,163,184,.14)!important; background:linear-gradient(145deg,#182235,#131c2b)!important; box-shadow:0 10px 26px rgba(2,6,23,.2)!important; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-kpi-card::before { background:linear-gradient(90deg,#38bdf8,#818cf8,#c084fc); }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-kpi-card:hover,
+        #dashboardOverview[data-dashboard-style="maximum"] section.rounded-3xl:hover,
+        #dashboardOverview[data-dashboard-style="maximum"] article:hover { border-color:rgba(96,165,250,.42)!important; box-shadow:0 16px 34px rgba(2,6,23,.34)!important; }
+        #dashboardOverview[data-dashboard-style="maximum"] h2,
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-kpi-card p.text-slate-900,
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-kpi-card p.dark\:text-white { color:#f1f5f9!important; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-kpi-card p.text-slate-500,
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-kpi-card p.dark\:text-slate-400,
+        #dashboardOverview[data-dashboard-style="maximum"] section p.text-slate-400,
+        #dashboardOverview[data-dashboard-style="maximum"] section span.text-slate-400 { color:#9fb0c7!important; }
+        #dashboardOverview[data-dashboard-style="maximum"] .text-slate-500,
+        #dashboardOverview[data-dashboard-style="maximum"] .text-slate-600,
+        #dashboardOverview[data-dashboard-style="maximum"] .text-slate-700,
+        #dashboardOverview[data-dashboard-style="maximum"] .text-slate-800,
+        #dashboardOverview[data-dashboard-style="maximum"] .dark\:text-slate-300,
+        #dashboardOverview[data-dashboard-style="maximum"] .dark\:text-slate-400 { color:#bac8da!important; }
+        #dashboardOverview[data-dashboard-style="maximum"] .text-slate-900,
+        #dashboardOverview[data-dashboard-style="maximum"] .dark\:text-white { color:#f1f5f9!important; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-toolbar { border-color:rgba(148,163,184,.15); background:rgba(15,23,42,.88); box-shadow:0 10px 26px rgba(2,6,23,.16); }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-toolbar label { color:#a9b8cc; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-filter-input { border-color:#334155; background:#0f172a; color:#e2e8f0; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-style-switch { border-color:rgba(191,219,254,.25); background:rgba(15,23,42,.5); color:#dbeafe; }
+        #dashboardOverview .dashboard-style-switch[aria-pressed="true"] { background:#dbeafe; color:#172554; border-color:#dbeafe; }
+        #dashboardOverview[data-dashboard-style="maximum"] .dashboard-style-switch[aria-pressed="true"] { background:#60a5fa; color:#081427; border-color:#60a5fa; }
+        @media(max-width:640px) { #dashboardOverview[data-dashboard-style="maximum"] { padding:.65rem; border-radius:1.2rem; } }
+        .dashboard-sr-only { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
+        #dashboardPrintStage { display:none; }
+        @media print {
+            @page { size:A4; margin:12mm; }
+            body.dashboard-print-active > *:not(#dashboardPrintStage) { display:none !important; }
+            body.dashboard-print-active #dashboardPrintStage { display:block !important; color:#17251c; background:#fff; font:10pt Arial,sans-serif; }
+            #dashboardPrintStage h1 { margin:0 0 4mm; font-size:20pt; }
+            #dashboardPrintStage .dashboard-print-meta { margin-bottom:7mm; color:#53665a; }
+            #dashboardPrintStage section,#dashboardPrintStage article { break-inside:avoid; margin:0 0 5mm; border:1px solid #dce6de; border-radius:10px; padding:12px; background:#fff !important; box-shadow:none !important; }
+            #dashboardPrintStage button { display:none !important; }
+            #dashboardPrintStage * { color:#17251c !important; }
         }
         /* Style fin de scrollbar pour ne pas encombrer l'écran */
         ::-webkit-scrollbar {
@@ -85,17 +168,18 @@
                         <span class="block text-[25px] leading-none font-black tracking-tight text-white">Cliniva<span class="text-brand-neon">.</span></span>
                         <span class="block mt-1.5 text-[9px] font-bold uppercase tracking-[.2em] text-slate-400">Medical management</span>
                     </div>
+                    <button id="sidebarCollapseButton" type="button" onclick="event.stopPropagation();toggleSidebarCollapse()" class="grid ml-auto h-9 w-9 flex-shrink-0 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-brand-neon" title="Réduire la barre latérale" aria-label="Réduire la barre latérale" aria-expanded="true"><i id="sidebarCollapseIcon" class="ph-bold ph-sidebar-simple text-lg"></i></button>
                 </div>
 
                 <!-- Navigation Principale -->
                 <div class="mt-6 space-y-5">
                     <div>
-                        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider px-3 mb-2">Navigation</p>
+                        <p class="sidebar-section-label text-xs font-semibold text-slate-400 uppercase tracking-wider px-3 mb-2">Navigation</p>
                         <nav class="space-y-1">
 <!-- Dashboard -->
     <button onclick="loadModule('operations')" data-module="operations" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 bg-brand-neon text-black font-semibold rounded-2xl transition shadow-md shadow-brand-neon/30 text-left">
         <i class="ph-bold ph-squares-four text-xl"></i>
-        <span>Dashboard</span>
+        <span>{% if user.role == 'Administrateur' or user.permissions.dash_view %}Dashboard{% else %}Accueil{% endif %}</span>
     </button>
 
     <!-- Passages -->
@@ -103,6 +187,50 @@
         <i class="ph ph-door-open text-xl"></i>
         <span>Accueil & Passages</span>
     </button>
+
+    <button onclick="loadModule('gestion_radiologie')" data-module="gestion_radiologie" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph-bold ph-scan text-xl text-brand-neon"></i>
+        <span>Attente Radiologie</span>
+    </button>
+
+    {% if user.role == 'Administrateur' or user.permissions.reception_view %}
+    <div>
+                        <button type="button" onclick="toggleDicomMenu()" aria-controls="dicom-submenu" aria-expanded="false" class="sidebar-group-btn w-full flex items-center justify-between gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+            <span class="flex items-center gap-3.5"><i class="ph-bold ph-share-network text-xl text-brand-neon"></i><span>DICOM Communication</span></span>
+            <i id="dicom-chevron" class="ph ph-caret-down text-xs transition-transform duration-200"></i>
+        </button>
+        <div id="dicom-submenu" class="hidden mt-1 ml-5 pl-3 pr-1 py-1 space-y-0.5 border-l-2 border-brand-neon/30">
+            <button onclick="loadModule('gestion_worklist')" data-module="gestion_worklist" class="sidebar-sub-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                <i class="ph-bold ph-list-magnifying-glass text-sm text-brand-neon flex-shrink-0"></i>
+                <span>Modalité Worklist</span>
+            </button>
+            {% if user.role == 'Administrateur' %}
+                <button onclick="loadModule('gestion_dicom_print')" data-module="gestion_dicom_print" class="sidebar-sub-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                    <i class="ph-bold ph-printer text-sm text-brand-neon flex-shrink-0"></i>
+                    <span>DICOM Print</span>
+                </button>
+                <button onclick="loadModule('gestion_pacs_server')" data-module="gestion_pacs_server" class="sidebar-sub-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                    <i class="ph-bold ph-hard-drives text-sm text-brand-neon flex-shrink-0"></i>
+                    <span>PACS Server</span>
+                </button>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if user.role == 'Administrateur' %}
+    <button onclick="loadModule('gestion_telephonie_ip')" data-module="gestion_telephonie_ip" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph-bold ph-phone-call text-xl text-brand-neon"></i>
+        <span>Téléphonie IP</span>
+    </button>
+    {% endif %}
+
+    {% if user.role == 'Administrateur' %}
+    <button onclick="loadModule('gestion_backup')" data-module="gestion_backup" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph-bold ph-shield-check text-xl text-brand-neon"></i>
+        <span>Sauvegarde complète</span>
+    </button>
+    {% endif %}
 
     {% if user.role == 'Administrateur' or user.permissions.rdv_view %}
     <button onclick="loadModule('gestion_rendezvous')" data-module="gestion_rendezvous" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
@@ -114,6 +242,11 @@
 <button onclick="loadModule('gestion_dme')" data-module="gestion_dme" class="sidebar-nav-btn w-full text-left flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150">
     <i class="ph ph-stethoscope text-xl text-brand-neon"></i>
     <span>Dossier Médical (DME)</span>
+</button>
+
+<button onclick="loadModule('gestion_serveur_impression')" data-module="gestion_serveur_impression" class="sidebar-nav-btn w-full text-left flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150">
+    <i class="ph-bold ph-printer text-xl text-brand-neon"></i>
+    <span>Serveur d’impression</span>
 </button>
 
                             {% if user.permissions.cash_collect or user.permissions.cash_collect_rest or user.permissions.cash_refund or user.permissions.cash_remise or user.permissions.cash_reports %}
@@ -136,6 +269,13 @@
         <i class="ph ph-stethoscope text-xl"></i>
         <span>Médecins Traitants</span>
     </button>
+
+    {% if user.role == 'Administrateur' or user.permissions.kacel_job_view or user.permissions.kacel_job_manage_companies or user.permissions.kacel_job_manage_conventions %}
+    <button onclick="loadModule('gestion_kacel_job')" data-module="gestion_kacel_job" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph-bold ph-briefcase text-xl text-emerald-400"></i>
+        <span>Kacel Job</span>
+    </button>
+    {% endif %}
 
     <!-- Médicaments -->
     <button onclick="loadModule('gestion_medicaments')" data-module="gestion_medicaments" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
@@ -169,7 +309,7 @@
 
                     <!-- BOUTON SETTINGS AVEC ACCORDÉON -->
                     <div>
-                        <button onclick="toggleSettingsMenu()" class="w-full flex items-center justify-between px-3.5 py-2 text-slate-400 hover:text-white text-sm transition rounded-xl hover:bg-white/5 group">
+                        <button onclick="toggleSettingsMenu()" class="sidebar-group-btn w-full flex items-center justify-between px-3.5 py-2 text-slate-400 hover:text-white text-sm transition rounded-xl hover:bg-white/5 group">
                             <div class="flex items-center gap-3">
                                 <i class="ph ph-gear text-lg group-hover:text-brand-neon transition"></i>
                                 <span class="font-medium">Settings</span>
@@ -215,20 +355,20 @@
                     </div>
 
                     <!-- Help Centre -->
-                    <a href="#" class="flex items-center gap-3 px-3.5 py-2 text-slate-400 hover:text-white text-sm transition">
+                    <a href="#" class="sidebar-help-link flex items-center gap-3 px-3.5 py-2 text-slate-400 hover:text-white text-sm transition">
                         <i class="ph ph-question text-lg"></i>
-                        <span>Help Centre</span>
+                        <span class="sidebar-help-label">Help Centre</span>
                     </a>
                 </nav>
 
                 <!-- Carte Profil Manager -->
                 <!-- Carte Profil Utilisateur Connecté Dynamique -->
-                <div class="flex items-center justify-between p-2 rounded-2xl bg-black/40 border border-white/5">
+                <div id="sidebarProfile" class="flex items-center justify-between p-2 rounded-2xl bg-black/40 border border-white/5">
                     <div class="flex items-center gap-2.5">
                         <img class="w-9 h-9 rounded-xl object-cover ring-2 ring-brand-neon/40"
                              src="{{ user.avatar}}"
                              alt="{{ user.prenom }}">
-                        <div>
+                        <div id="sidebarProfileCopy">
                             <p class="text-xs font-semibold text-white leading-tight">{{ user.prenom }} {{ user.nom
                                 }}</p>
                             <p class="text-[10px] text-slate-400">{{ user.role }}</p>
@@ -267,6 +407,17 @@
                 </div>
 
                 <div class="flex items-center justify-end gap-3.5">
+                    <div data-interface-zoom-controls hidden role="group" aria-label="Zoom de l’interface" style="align-items:center;white-space:nowrap;background:white;border:1px solid #cbd5e1;border-radius:999px;padding:3px;color:#334155">
+                        <button type="button" data-interface-zoom-action="out" aria-label="Réduire l’affichage" title="Réduire (Ctrl −)" style="padding:4px 10px;font-size:18px">−</button>
+                        <button type="button" data-interface-zoom-action="reset" data-interface-zoom-percent title="Taille normale (Ctrl 0)" style="padding:4px 8px;font-size:12px;font-weight:700">100 %</button>
+                        <button type="button" data-interface-zoom-action="in" aria-label="Agrandir l’affichage" title="Agrandir (Ctrl +)" style="padding:4px 10px;font-size:18px">+</button>
+                    </div>
+                    {% if app_restart_allowed %}
+                    <button type="button" onclick="restartClinivaApplication()" class="inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-brand-neon shadow-sm transition" title="Redémarrer Cliniva">
+                        <i class="ph-bold ph-arrows-clockwise text-base"></i>
+                        <span class="hidden lg:inline text-xs font-semibold">Redémarrer</span>
+                    </button>
+                    {% endif %}
                     <div class="flex items-center p-1 bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 rounded-full shadow-sm">
                         <button id="theme-moon-btn" onclick="setTheme('dark')" class="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-white transition">
                             <i class="ph-bold ph-moon text-base"></i>
@@ -299,54 +450,331 @@
 
             <div id="dynamic-content-area" class="flex-1 flex flex-col transition-all duration-300 pb-6">
 
-                <!-- VUE PAR DÉFAUT : OPERATIONS -->
-                <section class="bg-white dark:bg-[#121c15] rounded-3xl p-6 border border-slate-100 dark:border-white/5 shadow-sm flex-1 transition-colors duration-300">
-                    <div class="flex items-center justify-between mb-5">
-                        <h3 class="text-lg font-bold text-slate-900 dark:text-white">Operations</h3>
-                        <a href="#" class="text-xs font-semibold text-emerald-600 dark:text-brand-neon hover:underline">View All</a>
+                {% if data.can_dashboard %}
+                <div id="dashboardExportModal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-slate-950/65 p-4" role="dialog" aria-modal="true" aria-labelledby="dashboardExportTitle" onclick="if(event.target===this)closeDashboardExportModal()">
+                    <div class="w-full max-w-xl rounded-3xl border border-white/10 bg-white p-5 shadow-2xl dark:bg-[#121c15] sm:p-6">
+                        <div class="flex items-start justify-between gap-4"><div><span class="text-[11px] font-black uppercase tracking-[.18em] text-emerald-700 dark:text-brand-neon">Rapport personnalisé</span><h2 id="dashboardExportTitle" class="mt-1 text-xl font-black text-slate-900 dark:text-white">Choisir les éléments à imprimer</h2><p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Coche les indicateurs et graphiques à inclure.</p></div><button type="button" onclick="closeDashboardExportModal()" class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:bg-white/10 dark:text-white" aria-label="Fermer"><i class="ph-bold ph-x"></i></button></div>
+                        <fieldset class="mt-5 grid gap-2 sm:grid-cols-2"><legend class="dashboard-sr-only">Éléments du rapport</legend>
+                            {% for key, label in [('kpis','Indicateurs clés'),('evolution','Évolution des passages'),('status','Répartition des états'),('states','États dans le temps'),('activity','Activité comparée'),('services','Services et prestations'),('objectives','Objectifs mensuels'),('system','Caisse, PACS et DICOM Print'),('modalities','Modalités PACS')] %}
+                            {% if (key in ['kpis','evolution','status','states','services'] and data.can_reception) or (key == 'activity' and (data.can_reception or data.can_dme or data.can_cash)) or (key == 'objectives' and (data.can_reception or data.can_dme)) or (key == 'system' and (data.can_cash or data.can_pacs or data.can_print)) or (key == 'modalities' and data.can_pacs and data.pacs_modalities) %}
+                            <label class="flex min-h-12 items-center gap-3 rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-emerald-400 dark:border-white/10 dark:text-slate-200"><input type="checkbox" name="dashboard-export-section" value="{{ key }}" checked class="h-4 w-4 accent-emerald-600"><span>{{ label }}</span></label>
+                            {% endif %}
+                            {% endfor %}
+                        </fieldset>
+                        <div class="mt-6 flex flex-wrap justify-end gap-2"><button type="button" onclick="closeDashboardExportModal()" class="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-bold text-slate-600 dark:border-white/10 dark:text-slate-300">Annuler</button><button type="button" onclick="printDashboardSelection('pdf')" class="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-700 px-4 text-sm font-bold text-white hover:bg-emerald-800"><i class="ph-bold ph-file-pdf"></i>Exporter PDF</button><button type="button" onclick="printDashboardSelection('print')" class="inline-flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white hover:bg-slate-700 dark:bg-white dark:text-slate-900"><i class="ph-bold ph-printer"></i>Imprimer</button></div>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if user.role == 'Administrateur' and data.can_dashboard %}
+                <section id="dashboardOverview" class="dashboard-overview space-y-5" aria-label="Tableau de bord Cliniva">
+                    <div class="dashboard-hero flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <p class="dashboard-eyebrow text-xs font-bold uppercase tracking-[.18em] text-emerald-700 dark:text-brand-neon">Pilotage Cliniva</p>
+                            <h1 class="mt-1 text-2xl font-black text-slate-900 dark:text-white">Activité du système</h1>
+                            <p class="dashboard-subtitle mt-1 text-sm text-slate-500 dark:text-slate-400">Indicateurs réels · {{ data.period_label }}</p>
+                        </div>
+                        <div class="dashboard-controls flex flex-wrap items-center gap-2">
+                        <div class="inline-flex items-center gap-1 rounded-2xl border border-white/15 bg-white/10 p-1" role="group" aria-label="Style du tableau de bord">
+                            <button id="dashboardStyleCliniva" type="button" onclick="setDashboardStyle('cliniva')" class="dashboard-style-switch inline-flex min-h-10 items-center gap-2 rounded-xl border border-transparent px-3 text-xs font-bold transition" aria-pressed="false"><i class="ph-bold ph-squares-four"></i><span>Cliniva</span></button>
+                            <button id="dashboardStyleMaximum" type="button" onclick="setDashboardStyle('maximum')" class="dashboard-style-switch inline-flex min-h-10 items-center gap-2 rounded-xl border border-transparent px-3 text-xs font-bold transition" aria-pressed="false"><i class="ph-bold ph-moon-stars"></i><span>Maximum</span></button>
+                        </div>
+                        {% if user.role == 'Administrateur' and data.can_dashboard %}
+                        <button type="button" onclick="document.getElementById('dashboardTargetsModal').classList.remove('hidden');document.getElementById('dashboardTargetsModal').classList.add('flex')" class="dashboard-targets inline-flex items-center gap-2 rounded-2xl bg-emerald-700 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-800"><i class="ph-bold ph-target text-lg"></i><span>Objectifs mensuels</span></button>
+                        {% endif %}
+                        {% if data.can_reception or data.can_dme or data.can_cash or data.can_pacs or data.can_print %}
+                        <button type="button" onclick="openDashboardExportModal()" class="inline-flex min-h-11 items-center gap-2 rounded-2xl border border-white/20 bg-white/10 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-white/20" aria-haspopup="dialog"><i class="ph-bold ph-file-pdf text-lg"></i><span>Imprimer / PDF</span></button>
+                        {% endif %}
+                        </div>
                     </div>
 
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-left text-xs border-collapse">
-                            <thead>
-                                <tr class="text-slate-400 dark:text-slate-500 font-semibold border-b border-slate-100 dark:border-white/5">
-                                    <th class="pb-3 pl-2">Patient Name</th>
-                                    <th class="pb-3">Date Of Operation</th>
-                                    <th class="pb-3">Duration</th>
-                                    <th class="pb-3">Follow-Up Date</th>
-                                    <th class="pb-3 pr-2 text-right">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-slate-50 dark:divide-white/5">
-                                {% for op in data.operation_records %}
-                                <tr class="hover:bg-slate-50/70 dark:hover:bg-white/[0.02] transition">
-                                    <td class="py-3.5 pl-2">
-                                        <div class="flex items-center gap-3">
-                                            <img class="w-9 h-9 rounded-full object-cover ring-1 ring-black/5 dark:ring-white/10" src="{{ op.avatar_url }}" alt="{{ op.patient_name }}">
-                                            <span class="font-bold text-slate-800 dark:text-slate-200 text-sm">{{ op.patient_name }}</span>
-                                        </div>
-                                    </td>
-                                    <td class="py-3.5 font-medium text-slate-700 dark:text-slate-300">{{ op.date_of_operation }}</td>
-                                    <td class="py-3.5 font-medium text-slate-700 dark:text-slate-300">{{ op.duration }}</td>
-                                    <td class="py-3.5 font-medium text-slate-700 dark:text-slate-300">{{ op.follow_up_date }}</td>
-                                    <td class="py-3.5 pr-2 text-right">
-                                        <div class="inline-flex items-center gap-2">
-                                            <button class="p-1.5 text-sky-500 hover:bg-sky-50 dark:hover:bg-sky-500/10 rounded-lg transition"><i class="ph ph-note-pencil text-base"></i></button>
-                                            <button class="p-1.5 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-500/10 rounded-lg transition"><i class="ph ph-trash text-base"></i></button>
-                                        </div>
-                                    </td>
-                                </tr>
+                    <form class="dashboard-toolbar flex flex-wrap items-end gap-3 p-3" onsubmit="applyDashboardFilters(event)" aria-label="Filtres de période du tableau de bord">
+                        <label class="min-w-40 flex-1 text-[11px] font-bold uppercase tracking-wide text-slate-500">Période rapide
+                            <select id="dashboardPeriod" class="dashboard-filter-input mt-1 w-full" onchange="setDashboardPeriodControls()">
+                                <option value="today" {% if data.period == 'today' %}selected{% endif %}>Aujourd’hui</option>
+                                <option value="yesterday" {% if data.period == 'yesterday' %}selected{% endif %}>Hier</option>
+                                <option value="day_before" {% if data.period == 'day_before' %}selected{% endif %}>Avant-hier</option>
+                                <option value="7d" {% if data.period == '7d' %}selected{% endif %}>7 derniers jours</option>
+                                <option value="30d" {% if data.period == '30d' %}selected{% endif %}>30 derniers jours</option>
+                                <option value="month" {% if data.period == 'month' %}selected{% endif %}>Mois spécifique</option>
+                                <option value="custom" {% if data.period == 'custom' or request.query_params.get('date_debut') %}selected{% endif %}>Intervalle personnalisé</option>
+                            </select>
+                        </label>
+                        <label id="dashboardDateFromWrap" class="min-w-40 flex-1 text-[11px] font-bold uppercase tracking-wide text-slate-500">Date 1 · début
+                            <input id="dashboardDateFrom" type="date" class="dashboard-filter-input mt-1 w-full" value="{{ data.date_from }}" aria-label="Date de début">
+                        </label>
+                        <label id="dashboardDateToWrap" class="min-w-40 flex-1 text-[11px] font-bold uppercase tracking-wide text-slate-500">Date 2 · fin
+                            <input id="dashboardDateTo" type="date" class="dashboard-filter-input mt-1 w-full" value="{{ data.date_to }}" aria-label="Date de fin">
+                        </label>
+                        <label id="dashboardMonthWrap" class="hidden min-w-40 flex-1 text-[11px] font-bold uppercase tracking-wide text-slate-500">Mois
+                            <input id="dashboardMonth" type="month" class="dashboard-filter-input mt-1 w-full" value="{{ data.date_from[:7] }}" aria-label="Mois à analyser">
+                        </label>
+                        <button type="submit" class="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2"><i class="ph-bold ph-magnifying-glass"></i>Analyser</button>
+                    </form>
+
+                    {% if data.can_reception %}
+                    <div class="dashboard-kpi-grid grid grid-cols-2 gap-3 xl:grid-cols-4" data-export-key="kpis" data-export-title="Indicateurs clés">
+                        {% set cards = [
+                            ('Patients reçus', data.patients_seen|default(0), 'ph-users-three', 'from-emerald-500 to-teal-600', 'Patients distincts sur la période'),
+                            ('Passages', data.passages_total, 'ph-door-open', 'from-sky-500 to-blue-600', 'Passages enregistrés'),
+                            ('En attente', data.passages_pending, 'ph-clock-countdown', 'from-amber-400 to-orange-500', 'À prendre en charge'),
+                            ('En cours', data.passages_active, 'ph-activity', 'from-violet-500 to-purple-600', 'Prise en charge active'),
+                            ('Terminés', data.passages_done, 'ph-check-circle', 'from-lime-500 to-green-600', 'Passages finalisés'),
+                            ('Attente moyenne', data.avg_wait_minutes ~ ' min', 'ph-hourglass-medium', 'from-orange-400 to-rose-500', 'Attente actuelle des patients du jour'),
+                            ('Nouveaux patients', data.patients_new, 'ph-user-plus', 'from-cyan-500 to-sky-600', 'Fiches créées sur la période'),
+                            ('Patients dans Cliniva', data.patients_total, 'ph-identification-card', 'from-indigo-500 to-blue-700', 'Total des fiches patient'),
+                            ('Consultations DME', data.consultations, 'ph-stethoscope', 'from-rose-500 to-pink-600', 'Consultations enregistrées'),
+                            ('Comptes rendus', data.reports, 'ph-file-text', 'from-fuchsia-500 to-violet-600', 'Créés sur la période'),
+                            ('Livrets validés', data.booklets, 'ph-book-open-text', 'from-indigo-500 to-violet-600', 'Ajoutés aux dossiers'),
+                            ('Rendez-vous', data.appointments, 'ph-calendar-check', 'from-blue-500 to-cyan-600', 'Dont ' ~ data.appointments_pending ~ ' en attente')
+                        ] %}
+                        {% for title, value, icon, tone, hint in cards %}
+                            {% if (title not in ['Consultations DME', 'Comptes rendus', 'Livrets validés'] or data.can_dme) and (title != 'Rendez-vous' or data.can_rdv) %}
+                            <article class="dashboard-kpi-card relative overflow-hidden rounded-3xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/5 dark:bg-[#121c15] sm:p-5">
+                                <div class="absolute -right-5 -top-6 h-24 w-24 rounded-full bg-gradient-to-br {{ tone }} opacity-[.09]"></div>
+                                <div class="relative flex items-start justify-between gap-2">
+                                    <div><p class="text-xs font-semibold text-slate-500 dark:text-slate-400">{{ title }}</p><p class="mt-2 text-3xl font-black tracking-tight text-slate-900 dark:text-white">{{ value }}</p></div>
+                                    <span class="grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br {{ tone }} text-white shadow-md"><i class="ph-bold {{ icon }} text-xl"></i></span>
+                                </div>
+                                <p class="relative mt-3 text-[11px] text-slate-400">{{ hint }}</p>
+                            </article>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
+
+                    <div class="grid gap-5 xl:grid-cols-[1.5fr_1fr]">
+                        <section data-export-key="evolution" data-export-title="Évolution des passages" class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]">
+                            <div class="flex items-center justify-between gap-3">
+                                <div><h2 class="font-extrabold text-slate-900 dark:text-white">Évolution des passages</h2><p class="mt-1 text-xs text-slate-400">Tendance · {{ data.period_label }}</p></div>
+                                <span class="grid h-9 w-9 place-items-center rounded-xl bg-sky-50 text-sky-600 dark:bg-sky-500/10 dark:text-sky-300"><i class="ph-bold ph-chart-line-up text-lg"></i></span>
+                            </div>
+                            <div class="mt-5 flex h-40 items-end gap-2 sm:gap-3">
+                                {% for point in data.passages_series %}
+                                <div class="group flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-2" title="{{ point.value }} passage(s)">
+                                    <span class="text-[10px] font-bold text-slate-500">{{ point.value }}</span>
+                                    <div class="w-full max-w-10 rounded-t-xl bg-gradient-to-t from-emerald-600 to-lime-400 transition hover:brightness-110" style="height: {{ point.height }}%"></div>
+                                    <span class="text-[9px] text-slate-400 sm:text-[10px]">{{ point.label }}</span>
+                                </div>
                                 {% endfor %}
-                            </tbody>
-                        </table>
+                            </div>
+                        </section>
+
+                        <section data-export-key="status" data-export-title="État des passages" class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]">
+                            <h2 class="font-extrabold text-slate-900 dark:text-white">État des passages</h2>
+                            <p class="mt-1 text-xs text-slate-400">Répartition sur {{ data.period_label|lower }}</p>
+                            {% set state_total = data.passages_pending + data.passages_active + data.passages_done %}
+                            {% set pending_pct = (data.passages_pending * 100 / state_total if state_total else 0)|round(1) %}
+                            {% set active_pct = (data.passages_active * 100 / state_total if state_total else 0)|round(1) %}
+                            {% set done_pct = (100 - pending_pct - active_pct if state_total else 0)|round(1) %}
+                            <div class="mt-4 flex flex-col items-center gap-5 sm:flex-row sm:justify-center">
+                                <div class="relative grid h-36 w-36 shrink-0 place-items-center rounded-full shadow-inner" style="{% if state_total %}background: conic-gradient(#f59e0b 0% {{ pending_pct }}%, #0ea5e9 {{ pending_pct }}% {{ (pending_pct + active_pct)|round(1) }}%, #10b981 {{ (pending_pct + active_pct)|round(1) }}% 100%){% else %}background:#e2e8f0{% endif %}">
+                                    <div class="grid h-24 w-24 place-content-center rounded-full bg-white text-center dark:bg-[#121c15]"><b class="text-2xl font-black text-slate-900 dark:text-white">{{ state_total }}</b><span class="text-[9px] font-bold uppercase tracking-wider text-slate-400">passages</span></div>
+                                </div>
+                                <div class="w-full max-w-48 space-y-3">
+                                    {% for label, value, color, pct in [('En attente', data.passages_pending, 'bg-amber-400', pending_pct), ('En cours', data.passages_active, 'bg-sky-500', active_pct), ('Terminés', data.passages_done, 'bg-emerald-500', done_pct)] %}
+                                    <div class="flex items-center justify-between gap-3"><span class="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300"><i class="h-2.5 w-2.5 rounded-full {{ color }}"></i>{{ label }}</span><span class="text-xs font-black text-slate-800 dark:text-white">{{ value }} <small class="font-medium text-slate-400">{{ pct }}%</small></span></div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <button onclick="loadModule('gestion_passages')" class="mt-5 inline-flex items-center gap-2 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 transition hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-brand-neon"><i class="ph-bold ph-arrow-right"></i>Ouvrir les passages</button>
+                        </section>
+                    </div>
+                    {% if data.can_reception and data.passage_status_series %}
+                    {% set status_peak = data.passage_status_series|map(attribute='total')|max %}
+                    <section data-export-key="states" data-export-title="États des passages dans le temps" class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]">
+                        <div class="flex flex-wrap items-center justify-between gap-3"><div><h2 class="font-extrabold text-slate-900 dark:text-white">Évolution des états</h2><p class="mt-1 text-xs text-slate-400">Attente, prise en charge et finalisation · {{ data.period_label }}</p></div>
+                            <div class="flex gap-3 text-[10px] font-bold text-slate-500"><span class="inline-flex items-center gap-1"><i class="h-2.5 w-2.5 rounded-full bg-amber-400"></i>Attente</span><span class="inline-flex items-center gap-1"><i class="h-2.5 w-2.5 rounded-full bg-sky-500"></i>En cours</span><span class="inline-flex items-center gap-1"><i class="h-2.5 w-2.5 rounded-full bg-emerald-500"></i>Terminés</span></div>
+                        </div>
+                        <div class="dashboard-chart-columns mt-5 grid items-end gap-2 overflow-x-auto pb-1" style="min-height:160px">
+                            {% for point in data.passage_status_series %}
+                            <div class="flex min-w-8 flex-col items-center gap-2" title="{{ point.label }} · {{ point.pending }} en attente · {{ point.active }} en cours · {{ point.done }} terminés">
+                                <div class="flex h-32 w-full max-w-10 flex-col-reverse overflow-hidden rounded-t-lg bg-slate-100 dark:bg-white/5">
+                                    <span class="w-full bg-emerald-500" style="height:{{ (point.done * 100 / status_peak if status_peak else 0)|round|int }}%"></span>
+                                    <span class="w-full bg-sky-500" style="height:{{ (point.active * 100 / status_peak if status_peak else 0)|round|int }}%"></span>
+                                    <span class="w-full bg-amber-400" style="height:{{ (point.pending * 100 / status_peak if status_peak else 0)|round|int }}%"></span>
+                                </div><span class="whitespace-nowrap text-[9px] font-semibold text-slate-400">{{ point.label }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </section>
+                    {% endif %}
+
+                    <div class="grid gap-5 xl:grid-cols-2">
+                        <div class="contents" data-export-key="services" data-export-title="Activité par service et prestations">
+                        {% if data.top_services %}
+                        <section class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><div><h2 class="font-extrabold text-slate-900 dark:text-white">Activité par service</h2><p class="mt-1 text-xs text-slate-400">Spécialités les plus actives · {{ data.period_label }}</p></div><i class="ph-bold ph-buildings text-2xl text-teal-600"></i></div>{% set service_peak = data.top_services|map(attribute='value')|max %}<div class="mt-5 space-y-4">{% for item in data.top_services %}<div><div class="mb-1.5 flex justify-between gap-3 text-xs"><span class="truncate font-semibold text-slate-600 dark:text-slate-300">{{ item.label }}</span><b class="text-slate-900 dark:text-white">{{ item.value }}</b></div><div class="h-2.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10"><div class="h-full rounded-full bg-gradient-to-r from-teal-500 to-emerald-400" style="width:{{ (item.value * 100 / service_peak if service_peak else 0)|round|int }}%"></div></div></div>{% endfor %}</div></section>
+                        {% endif %}
+                        {% if data.top_procedures %}
+                        <section class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><div><h2 class="font-extrabold text-slate-900 dark:text-white">Prestations les plus demandées</h2><p class="mt-1 text-xs text-slate-400">Top 5 · {{ data.period_label }}</p></div><i class="ph-bold ph-chart-bar-horizontal text-2xl text-sky-600"></i></div>{% set act_peak = data.top_procedures|map(attribute='value')|max %}<div class="mt-5 space-y-4">{% for item in data.top_procedures %}<div><div class="mb-1.5 flex justify-between gap-3 text-xs"><span class="truncate font-semibold text-slate-600 dark:text-slate-300">{{ item.label }}</span><b class="text-slate-900 dark:text-white">{{ item.value }}</b></div><div class="h-2.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10"><div class="h-full rounded-full bg-gradient-to-r from-sky-600 to-cyan-400" style="width:{{ (item.value * 100 / act_peak if act_peak else 0)|round|int }}%"></div></div></div>{% endfor %}</div></section>
+                        {% endif %}
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    {% if data.activity_series %}
+                    {% set passage_peak = data.activity_series|map(attribute='passages')|max %}
+                    {% set consultation_peak = data.activity_series|map(attribute='consultations')|max %}
+                    {% set cash_peak = data.activity_series|map(attribute='encaissements')|max %}
+                    <section data-export-key="activity" data-export-title="Activité comparée" class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]">
+                        <div class="flex flex-wrap items-start justify-between gap-3">
+                            <div><h2 class="font-extrabold text-slate-900 dark:text-white">Activité comparée</h2><p class="mt-1 text-xs text-slate-400">Passages, consultations et encaissements · {{ data.period_label }}</p></div>
+                            <div class="flex flex-wrap gap-3 text-[10px] font-bold text-slate-500">
+                                {% if data.can_reception %}<span class="inline-flex items-center gap-1.5"><i class="h-2.5 w-2.5 rounded-full bg-emerald-500"></i>Passages</span>{% endif %}
+                                {% if data.can_dme %}<span class="inline-flex items-center gap-1.5"><i class="h-2.5 w-2.5 rounded-full bg-violet-500"></i>Consultations</span>{% endif %}
+                                {% if data.can_cash %}<span class="inline-flex items-center gap-1.5"><i class="h-2.5 w-2.5 rounded-full bg-sky-500"></i>Encaissements</span>{% endif %}
+                            </div>
+                        </div>
+                        <div class="dashboard-chart-columns mt-6 grid items-end gap-2 overflow-x-auto pb-1" style="min-height:190px">
+                            {% for point in data.activity_series %}
+                            <div class="flex min-w-8 flex-col items-center gap-2" title="{{ point.label }} · {{ point.passages }} passages · {{ point.consultations }} consultations · {{ point.encaissements|round|int }} DA">
+                                <div class="flex h-36 w-full items-end justify-center gap-0.5 border-b border-slate-100 dark:border-white/10">
+                                    {% if data.can_reception %}<span class="w-1/4 max-w-3 rounded-t-md bg-emerald-500" style="height:{{ (point.passages * 100 / passage_peak if passage_peak else 0)|round|int }}%"></span>{% endif %}
+                                    {% if data.can_dme %}<span class="w-1/4 max-w-3 rounded-t-md bg-violet-500" style="height:{{ (point.consultations * 100 / consultation_peak if consultation_peak else 0)|round|int }}%"></span>{% endif %}
+                                    {% if data.can_cash %}<span class="w-1/4 max-w-3 rounded-t-md bg-sky-500" style="height:{{ (point.encaissements * 100 / cash_peak if cash_peak else 0)|round|int }}%"></span>{% endif %}
+                                </div>
+                                <span class="whitespace-nowrap text-[9px] font-semibold text-slate-400">{{ point.label }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <p class="mt-2 text-[10px] text-slate-400">Chaque série est normalisée séparément pour rendre les tendances comparables. Sur une longue période, les valeurs sont regroupées par semaine ou par mois.</p>
+                    </section>
+                    {% endif %}
+
+                    {% if data.can_reception or data.can_dme %}
+                    <section data-export-key="objectives" data-export-title="Objectifs du mois" class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]">
+                        <div class="mb-4 flex items-center justify-between gap-3"><div><h2 class="font-extrabold text-slate-900 dark:text-white">Objectifs du mois</h2><p class="mt-1 text-xs text-slate-400">Progression depuis le premier jour du mois</p></div><i class="ph-bold ph-target text-2xl text-emerald-600"></i></div>
+                        <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                            {% if data.can_reception %}
+                            {% set progress = (data.month_passages * 100 / data.target_passages if data.target_passages else 0)|round|int %}
+                            <div class="rounded-2xl bg-slate-50 p-4 dark:bg-white/[.04]"><div class="flex justify-between gap-2"><span class="text-xs font-bold text-slate-600 dark:text-slate-300">Passages</span><span class="text-xs font-extrabold text-slate-800 dark:text-white">{{ data.month_passages }}{% if data.target_passages %} / {{ data.target_passages }}{% endif %}</span></div><div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-white/10"><div class="h-full rounded-full bg-emerald-500" style="width: {{ [progress, 100]|min }}%"></div></div><p class="mt-2 text-[10px] text-slate-400">{% if data.target_passages %}{{ progress }} % de l’objectif{% else %}Objectif non défini{% endif %}</p></div>
+                            {% set progress = (data.month_new_patients * 100 / data.target_patients if data.target_patients else 0)|round|int %}
+                            <div class="rounded-2xl bg-slate-50 p-4 dark:bg-white/[.04]"><div class="flex justify-between gap-2"><span class="text-xs font-bold text-slate-600 dark:text-slate-300">Nouveaux patients</span><span class="text-xs font-extrabold text-slate-800 dark:text-white">{{ data.month_new_patients }}{% if data.target_patients %} / {{ data.target_patients }}{% endif %}</span></div><div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-white/10"><div class="h-full rounded-full bg-sky-500" style="width: {{ [progress, 100]|min }}%"></div></div><p class="mt-2 text-[10px] text-slate-400">{% if data.target_patients %}{{ progress }} % de l’objectif{% else %}Objectif non défini{% endif %}</p></div>
+                            {% endif %}
+                            {% if data.can_dme %}
+                            {% set progress = (data.month_consultations * 100 / data.target_consultations if data.target_consultations else 0)|round|int %}
+                            <div class="rounded-2xl bg-slate-50 p-4 dark:bg-white/[.04]"><div class="flex justify-between gap-2"><span class="text-xs font-bold text-slate-600 dark:text-slate-300">Consultations DME</span><span class="text-xs font-extrabold text-slate-800 dark:text-white">{{ data.month_consultations }}{% if data.target_consultations %} / {{ data.target_consultations }}{% endif %}</span></div><div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-white/10"><div class="h-full rounded-full bg-violet-500" style="width: {{ [progress, 100]|min }}%"></div></div><p class="mt-2 text-[10px] text-slate-400">{% if data.target_consultations %}{{ progress }} % de l’objectif{% else %}Objectif non défini{% endif %}</p></div>
+                            {% endif %}
+                        </div>
+                    </section>
+                    {% endif %}
+
+                    {% if data.can_dme %}
+                    <section data-export-key="consumption-report" data-export-title="Rapport des consommations" class="overflow-hidden rounded-3xl border border-indigo-100 bg-white shadow-sm dark:border-indigo-400/15 dark:bg-[#121c15]">
+                        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-indigo-100 bg-gradient-to-r from-indigo-50 to-white px-5 py-4 dark:border-white/10 dark:from-indigo-400/10 dark:to-[#121c15]">
+                            <div><p class="text-[10px] font-bold uppercase tracking-[.16em] text-indigo-600 dark:text-indigo-300">Suivi médical</p><h2 class="mt-1 flex items-center gap-2 text-base font-extrabold text-slate-900 dark:text-white"><i class="ph-bold ph-first-aid-kit text-indigo-600 dark:text-indigo-300"></i>Rapport des consommations</h2><p class="mt-1 text-xs text-slate-500">Médicaments et dispositifs · filtres par utilisateur, service, salle et période</p></div>
+                            <div class="flex items-center gap-2"><span id="dashboardConsumptionCount" class="rounded-xl bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700 dark:bg-indigo-400/10 dark:text-indigo-200">0 résultat</span><button type="button" onclick="loadDashboardConsumptionReport()" class="inline-flex min-h-10 items-center gap-2 rounded-xl border border-indigo-200 px-3 text-xs font-bold text-indigo-700 transition hover:bg-indigo-50 dark:border-indigo-400/20 dark:text-indigo-200 dark:hover:bg-indigo-400/10"><i class="ph-bold ph-arrows-clockwise"></i>Actualiser</button><button type="button" onclick="generateDashboardConsumptionPdf()" class="inline-flex min-h-10 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-extrabold text-white shadow transition hover:bg-indigo-700"><i class="ph-bold ph-file-pdf"></i>PDF · Aperçu</button></div>
+                        </div>
+                        <div class="p-4 sm:p-5">
+                            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                                <label class="text-[10px] font-bold uppercase tracking-wide text-slate-500">Date de début<input id="dashboardConsumptionDateFrom" type="date" class="dashboard-filter-input mt-1 w-full"></label>
+                                <label class="text-[10px] font-bold uppercase tracking-wide text-slate-500">Date de fin<input id="dashboardConsumptionDateTo" type="date" class="dashboard-filter-input mt-1 w-full"></label>
+                                <label class="text-[10px] font-bold uppercase tracking-wide text-slate-500">Service<select id="dashboardConsumptionService" class="dashboard-filter-input mt-1 w-full"><option value="">Tous les services</option></select></label>
+                                <label class="text-[10px] font-bold uppercase tracking-wide text-slate-500">Salle<select id="dashboardConsumptionRoom" class="dashboard-filter-input mt-1 w-full"><option value="">Toutes les salles</option></select></label>
+                                <label class="text-[10px] font-bold uppercase tracking-wide text-slate-500">Utilisateur<select id="dashboardConsumptionUser" class="dashboard-filter-input mt-1 w-full"><option value="">Tous les utilisateurs</option></select></label>
+                            </div>
+                            <div class="mt-3 flex justify-end"><button type="button" onclick="loadDashboardConsumptionReport()" class="inline-flex min-h-10 items-center gap-2 rounded-xl bg-slate-900 px-4 text-xs font-bold text-white transition hover:bg-slate-700 dark:bg-white dark:text-slate-900"><i class="ph-bold ph-funnel"></i>Afficher les résultats</button></div>
+                            <p id="dashboardConsumptionError" class="mt-2 hidden rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 dark:bg-rose-400/10 dark:text-rose-200"></p>
+                            <div class="mt-3 overflow-x-auto rounded-2xl border border-slate-100 dark:border-white/10"><table class="w-full min-w-[900px] text-left text-xs"><thead class="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-white/5"><tr><th class="p-3">Date</th><th class="p-3">Patient</th><th class="p-3">Produit consommé</th><th class="p-3">Quantité</th><th class="p-3">Service</th><th class="p-3">Salle</th><th class="p-3">Utilisateur</th></tr></thead><tbody id="dashboardConsumptionRows" class="divide-y divide-slate-100 dark:divide-white/5"><tr><td colspan="7" class="p-6 text-center text-slate-400">Chargement du rapport…</td></tr></tbody></table></div>
+                        </div>
+                    </section>
+                    <div id="dashboardConsumptionPdfModal" class="fixed inset-0 z-[2147483640] hidden items-center justify-center bg-slate-950/80 p-3 backdrop-blur-sm sm:p-6" role="dialog" aria-modal="true" aria-labelledby="dashboardConsumptionPdfTitle" onclick="if(event.target===this)closeDashboardConsumptionPdf()">
+                        <section class="flex h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-white/10 dark:bg-[#121c15]">
+                            <header class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 dark:border-white/10 sm:px-5"><div><h3 id="dashboardConsumptionPdfTitle" class="flex items-center gap-2 text-sm font-extrabold text-slate-900 dark:text-white"><i class="ph-bold ph-file-pdf text-rose-600"></i>Aperçu PDF · Rapport des consommations</h3><p id="dashboardConsumptionPdfStatus" class="mt-1 text-[10px] text-slate-500">Le PDF est prêt.</p></div><div class="flex gap-2"><button id="dashboardConsumptionPdfDownload" type="button" onclick="downloadDashboardConsumptionPdf()" class="inline-flex min-h-10 items-center gap-2 rounded-xl bg-indigo-600 px-3 text-xs font-bold text-white"><i class="ph-bold ph-download-simple"></i>Télécharger</button><button type="button" onclick="printDashboardConsumptionPdf()" class="inline-flex min-h-10 items-center gap-2 rounded-xl bg-slate-800 px-3 text-xs font-bold text-white"><i class="ph-bold ph-printer"></i>Imprimer</button><button type="button" onclick="closeDashboardConsumptionPdf()" class="grid h-10 w-10 place-items-center rounded-xl border border-slate-200 text-slate-500 dark:border-white/10" aria-label="Fermer le visualiseur"><i class="ph-bold ph-x"></i></button></div></header>
+                            <iframe id="dashboardConsumptionPdfFrame" title="Visualiseur du rapport PDF des consommations" class="min-h-0 w-full flex-1 bg-slate-100 dark:bg-black/30"></iframe>
+                        </section>
+                    </div>
+                    {% endif %}
+
+                    {% if not data.can_reception %}
+                    <div class="grid grid-cols-2 gap-3 xl:grid-cols-4">
+                        {% if data.can_dme %}<article class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><p class="text-xs font-semibold text-slate-500">Consultations DME</p><span class="grid h-9 w-9 place-items-center rounded-xl bg-rose-50 text-rose-600"><i class="ph-bold ph-stethoscope text-lg"></i></span></div><p class="mt-3 text-3xl font-black text-slate-900 dark:text-white">{{ data.consultations }}</p><p class="mt-1 text-[11px] text-slate-400">{{ data.period_label }}</p></article>{% endif %}
+                        {% if user.role == 'Administrateur' or user.permissions.pat_view %}<article class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><p class="text-xs font-semibold text-slate-500">Patients dans Cliniva</p><span class="grid h-9 w-9 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><i class="ph-bold ph-identification-card text-lg"></i></span></div><p class="mt-3 text-3xl font-black text-slate-900 dark:text-white">{{ data.patients_total }}</p><p class="mt-1 text-[11px] text-slate-400">Fiches patient</p></article>{% endif %}
+                        {% if data.can_rdv %}<article class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><p class="text-xs font-semibold text-slate-500">Rendez-vous</p><span class="grid h-9 w-9 place-items-center rounded-xl bg-blue-50 text-blue-600"><i class="ph-bold ph-calendar-check text-lg"></i></span></div><p class="mt-3 text-3xl font-black text-slate-900 dark:text-white">{{ data.appointments }}</p><p class="mt-1 text-[11px] text-slate-400">{{ data.appointments_pending }} en attente · {{ data.period_label }}</p></article>{% endif %}
+                    </div>
+                    {% endif %}
+
+                    {% if data.can_cash or data.can_pacs or data.can_print %}
+                    <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-export-key="system" data-export-title="Caisse, PACS et DICOM Print">
+                        {% if data.can_cash %}
+                        <article class="rounded-3xl border border-emerald-100 bg-gradient-to-br from-emerald-50 to-white p-5 dark:border-emerald-900/40 dark:from-emerald-950/30 dark:to-[#121c15]">
+                            <div class="flex items-center justify-between"><span class="text-xs font-bold uppercase tracking-wide text-emerald-800 dark:text-emerald-300">Caisse · encaissé</span><i class="ph-bold ph-currency-circle-dollar text-xl text-emerald-600"></i></div>
+                            <p class="mt-3 text-2xl font-black text-slate-900 dark:text-white">{{ data.cash_collected|round|int }} <span class="text-sm font-bold">DA</span></p><p class="mt-1 text-[11px] text-slate-500">{{ data.period_label }}</p>
+                        </article>
+                        <article class="rounded-3xl border border-rose-100 bg-gradient-to-br from-rose-50 to-white p-5 dark:border-rose-900/40 dark:from-rose-950/20 dark:to-[#121c15]">
+                            <div class="flex items-center justify-between"><span class="text-xs font-bold uppercase tracking-wide text-rose-800 dark:text-rose-300">Remboursements</span><i class="ph-bold ph-arrow-counter-clockwise text-xl text-rose-500"></i></div>
+                            <p class="mt-3 text-2xl font-black text-slate-900 dark:text-white">{{ data.cash_refunded|round|int }} <span class="text-sm font-bold">DA</span></p><p class="mt-1 text-[11px] text-slate-500">{{ data.period_label }}</p>
+                        </article>
+                        {% endif %}
+                        {% if data.can_pacs %}
+                        <article class="rounded-3xl border border-violet-100 bg-gradient-to-br from-violet-50 to-white p-5 dark:border-violet-900/40 dark:from-violet-950/20 dark:to-[#121c15]">
+                            <div class="flex items-center justify-between"><span class="text-xs font-bold uppercase tracking-wide text-violet-800 dark:text-violet-300">PACS · examens</span><i class="ph-bold ph-hard-drives text-xl text-violet-600"></i></div>
+                            <p class="mt-3 text-2xl font-black text-slate-900 dark:text-white">{{ data.pacs_studies }}</p><p class="mt-1 text-[11px] text-slate-500">{{ data.pacs_images }} images sur la période · {{ data.pacs_receiving }} en réception</p><p class="mt-1 text-[10px] text-slate-400">Stockage PACS : {{ (data.pacs_storage_total_bytes / 1073741824)|round(2) }} Go</p>
+                        </article>
+                        {% endif %}
+                        {% if data.can_print %}
+                        <article class="rounded-3xl border border-sky-100 bg-gradient-to-br from-sky-50 to-white p-5 dark:border-sky-900/40 dark:from-sky-950/20 dark:to-[#121c15]">
+                            <div class="flex items-center justify-between"><span class="text-xs font-bold uppercase tracking-wide text-sky-800 dark:text-sky-300">DICOM Print</span><i class="ph-bold ph-printer text-xl text-sky-600"></i></div>
+                            <p class="mt-3 text-2xl font-black text-slate-900 dark:text-white">{{ data.print_groups }} <span class="text-sm font-bold">dossiers</span></p><p class="mt-1 text-[11px] text-slate-500">{{ data.print_images }} images archivées</p>
+                        </article>
+                        {% endif %}
+                    </div>
+                    {% if data.can_pacs and data.pacs_modalities %}
+                    <section class="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><div><h2 class="font-extrabold text-slate-900 dark:text-white">Examens PACS par modalité</h2><p class="mt-1 text-xs text-slate-400">Répartition · {{ data.period_label }}</p></div><i class="ph-bold ph-chart-pie-slice text-2xl text-violet-600"></i></div><div class="mt-5 space-y-4">{% set modality_peak = data.pacs_modalities|map(attribute='value')|max %}{% set modality_colors = ['#7c3aed', '#2563eb', '#0891b2', '#db2777', '#ea580c'] %}{% for modality in data.pacs_modalities %}{% set modality_pct = (modality.value * 100 / modality_peak if modality_peak else 0)|round|int %}<div><div class="mb-1.5 flex items-center justify-between text-xs"><span class="font-bold text-slate-600 dark:text-slate-300">{{ modality.label }}</span><span class="font-black text-slate-800 dark:text-white">{{ modality.value }}</span></div><div class="h-2.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10"><div class="h-full rounded-full transition-all" style="width:{{ modality_pct }}%;background:{{ modality_colors[loop.index0 % 5] }}"></div></div></div>{% endfor %}</div></section>
+                    {% endif %}
+                    {% endif %}
+                </section>
+                {% else %}
+                <section class="mx-auto flex w-full max-w-5xl flex-1 flex-col justify-center py-8">
+                    <div class="rounded-[2rem] border border-slate-100 bg-white p-6 shadow-sm dark:border-white/5 dark:bg-[#121c15] sm:p-9">
+                        <div class="flex flex-col gap-5 sm:flex-row sm:items-center">
+                            <span class="grid h-16 w-16 shrink-0 place-items-center rounded-3xl bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-brand-neon"><i class="ph-bold ph-squares-four text-3xl"></i></span>
+                            <div><p class="text-xs font-bold uppercase tracking-[.18em] text-emerald-700 dark:text-brand-neon">Espace de travail</p><h1 class="mt-1 text-2xl font-black text-slate-900 dark:text-white">Bonjour {{ user.prenom }}</h1><p class="mt-2 max-w-2xl text-sm text-slate-500 dark:text-slate-400">Choisissez un espace autorisé pour commencer. Les statistiques de la dashboard ne sont pas activées pour votre compte.</p></div>
+                        </div>
+                        <div class="mt-7 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                            {% if user.role == 'Administrateur' or user.permissions.reception_view %}<button onclick="loadModule('gestion_passages')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-door-open text-2xl text-emerald-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">Accueil & Passages</b><small class="text-xs text-slate-500">Patients et salle d’attente</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' or user.permissions.dme_view %}<button onclick="loadModule('gestion_dme')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-stethoscope text-2xl text-sky-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">Dossier médical</b><small class="text-xs text-slate-500">Consultations et dossiers patients</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' or user.permissions.cash_collect or user.permissions.cash_collect_rest or user.permissions.cash_reports or user.permissions.cash_refund or user.permissions.cash_remise %}<button onclick="loadModule('gestion_caisse')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-hand-coins text-2xl text-amber-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">Caisse & Facturation</b><small class="text-xs text-slate-500">Opérations permises à votre compte</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' or user.permissions.rdv_view %}<button onclick="loadModule('gestion_rendezvous')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-calendar-check text-2xl text-violet-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">Rendez-vous</b><small class="text-xs text-slate-500">Planning autorisé</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' or user.permissions.pat_view %}<button onclick="loadModule('gestion_patients')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-identification-card text-2xl text-indigo-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">Patients</b><small class="text-xs text-slate-500">Fiches patient</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' or user.permissions.act_view %}<button onclick="loadModule('gestion_specialites')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-list-checks text-2xl text-teal-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">Actes & prestations</b><small class="text-xs text-slate-500">Catalogue autorisé</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' or user.permissions.med_view %}<button onclick="loadModule('gestion_medicaments')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-pill text-2xl text-pink-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">Médicaments</b><small class="text-xs text-slate-500">Répertoire des médicaments</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' or user.permissions.doc_manage %}<button onclick="loadModule('gestion_medecins_traitants')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-user-focus text-2xl text-cyan-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">Médecins traitants</b><small class="text-xs text-slate-500">Répertoire des correspondants</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' or user.permissions.cr_view %}<button onclick="loadModule('gestion_modeles_cr')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-file-text text-2xl text-orange-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">Modèles de comptes rendus</b><small class="text-xs text-slate-500">Modèles autorisés</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' %}<button onclick="loadModule('gestion_pacs_server')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-hard-drives text-2xl text-violet-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">PACS Server</b><small class="text-xs text-slate-500">Examens et communications DICOM</small></span></button>{% endif %}
+                            {% if user.role == 'Administrateur' %}<button onclick="loadModule('gestion_dicom_print')" class="flex items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-white/10 dark:hover:bg-emerald-500/5"><i class="ph-bold ph-printer text-2xl text-sky-600"></i><span><b class="block text-sm text-slate-800 dark:text-white">DICOM Print</b><small class="text-xs text-slate-500">Impressions reçues</small></span></button>{% endif %}
+                        </div>
+                        {% if not (user.role == 'Administrateur' or user.permissions.reception_view or user.permissions.dme_view or user.permissions.cash_collect or user.permissions.cash_collect_rest or user.permissions.cash_reports or user.permissions.cash_refund or user.permissions.cash_remise or user.permissions.rdv_view or user.permissions.pat_view or user.permissions.act_view or user.permissions.med_view or user.permissions.doc_manage or user.permissions.cr_view) %}
+                        <div class="mt-6 rounded-2xl bg-amber-50 p-4 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"><i class="ph-bold ph-lock-key mr-2"></i>Aucun espace n’est attribué à votre compte. Contactez un administrateur pour configurer vos accès.</div>
+                        {% endif %}
                     </div>
                 </section>
+                {% endif %}
+
+                {% if data.can_dashboard and not (data.can_reception or data.can_dme or data.can_cash or data.can_rdv or data.can_pacs or data.can_print) %}
+                <div class="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-200"><i class="ph-bold ph-info mr-2"></i>La consultation de la dashboard est activée, mais aucun domaine de statistiques n’est autorisé sur votre compte. Demandez à l’administrateur d’activer les permissions adaptées.</div>
+                {% endif %}
+
+                {% if user.role == 'Administrateur' and data.can_dashboard %}
+                <div id="dashboardTargetsModal" class="fixed inset-0 z-[90] hidden items-center justify-center bg-slate-950/60 p-4" onclick="if(event.target===this){this.classList.add('hidden');this.classList.remove('flex')}">
+                    <form id="dashboardTargetsForm" class="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl dark:bg-[#121c15]" onsubmit="saveDashboardTargets(event)">
+                        <div class="mb-5 flex items-start justify-between"><div><span class="text-xs font-bold uppercase tracking-widest text-emerald-700 dark:text-brand-neon">Pilotage</span><h2 class="mt-1 text-xl font-black text-slate-900 dark:text-white">Objectifs mensuels</h2><p class="mt-1 text-xs text-slate-500">Laissez 0 pour ne pas définir d’objectif.</p></div><button type="button" onclick="document.getElementById('dashboardTargetsModal').classList.add('hidden');document.getElementById('dashboardTargetsModal').classList.remove('flex')" class="grid h-9 w-9 place-items-center rounded-xl bg-slate-100 text-slate-500 dark:bg-white/10"><i class="ph-bold ph-x"></i></button></div>
+                        <div class="space-y-3">
+                            <label class="block text-xs font-bold text-slate-600 dark:text-slate-300">Nombre de passages<input name="passages" type="number" min="0" max="1000000" value="{{ data.target_passages }}" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-white/10 dark:bg-black/20 dark:text-white"></label>
+                            <label class="block text-xs font-bold text-slate-600 dark:text-slate-300">Nouveaux patients<input name="patients" type="number" min="0" max="1000000" value="{{ data.target_patients }}" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-white/10 dark:bg-black/20 dark:text-white"></label>
+                            <label class="block text-xs font-bold text-slate-600 dark:text-slate-300">Consultations DME<input name="consultations" type="number" min="0" max="1000000" value="{{ data.target_consultations }}" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-white/10 dark:bg-black/20 dark:text-white"></label>
+                        </div>
+                        <p id="dashboardTargetsError" class="mt-3 hidden text-xs font-semibold text-rose-600"></p>
+                        <div class="mt-6 flex justify-end gap-2"><button type="button" onclick="document.getElementById('dashboardTargetsModal').classList.add('hidden');document.getElementById('dashboardTargetsModal').classList.remove('flex')" class="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold text-slate-600 dark:border-white/10 dark:text-slate-300">Annuler</button><button type="submit" class="rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-800">Enregistrer</button></div>
+                    </form>
+                </div>
+                {% endif %}
 
             </div>
 
         </main>
     </div>
 
+    <script src="/static/vendor/js/html2pdf.bundle.min.js"></script>
     <!-- MOTEUR DE CHARGEMENT DYNAMIQUE -->
 <script>
         // =====================================================================
@@ -385,11 +813,47 @@
             if (overlay) overlay.classList.toggle('hidden');
         };
 
+        window.toggleSidebarCollapse = function(forceCollapsed) {
+            const sidebar = document.getElementById('sidebar');
+            const button = document.getElementById('sidebarCollapseButton');
+            const icon = document.getElementById('sidebarCollapseIcon');
+            if (!sidebar) return;
+            const collapsed = typeof forceCollapsed === 'boolean' ? forceCollapsed : !sidebar.classList.contains('sidebar-collapsed');
+            sidebar.classList.toggle('sidebar-collapsed', collapsed);
+            try { localStorage.setItem('cliniva_sidebar_collapsed', collapsed ? '1' : '0'); } catch (_) {}
+            if (button) {
+                button.setAttribute('aria-expanded', String(!collapsed));
+                button.setAttribute('aria-label', collapsed ? 'Développer la barre latérale' : 'Réduire la barre latérale');
+                button.title = collapsed ? 'Développer la barre latérale' : 'Réduire la barre latérale';
+            }
+            if (icon) icon.className = collapsed ? 'ph-bold ph-sidebar text-lg' : 'ph-bold ph-sidebar-simple text-lg';
+            document.querySelectorAll('#sidebar .sidebar-nav-btn, #sidebar .sidebar-sub-btn, #sidebar .sidebar-group-btn, #sidebar .sidebar-help-link').forEach(item => {
+                if (!item.dataset.sidebarLabel) item.dataset.sidebarLabel = item.textContent.trim().replace(/\s+/g, ' ');
+                item.title = collapsed ? item.dataset.sidebarLabel : '';
+            });
+            if (collapsed) {
+                document.getElementById('settings-submenu')?.classList.add('hidden');
+                document.getElementById('dicom-submenu')?.classList.add('hidden');
+            }
+        };
+        window.toggleSidebarCollapse(localStorage.getItem('cliniva_sidebar_collapsed') === '1');
+
         window.toggleSettingsMenu = function() {
+            if (document.getElementById('sidebar')?.classList.contains('sidebar-collapsed')) window.toggleSidebarCollapse(false);
             const submenu = document.getElementById('settings-submenu');
             const chevron = document.getElementById('settings-chevron');
             if (submenu) submenu.classList.toggle('hidden');
             if (chevron) chevron.classList.toggle('rotate-180');
+        };
+
+        window.toggleDicomMenu = function() {
+            if (document.getElementById('sidebar')?.classList.contains('sidebar-collapsed')) window.toggleSidebarCollapse(false);
+            const submenu = document.getElementById('dicom-submenu');
+            const chevron = document.getElementById('dicom-chevron');
+            const button = document.querySelector('[aria-controls="dicom-submenu"]');
+            if (submenu) submenu.classList.toggle('hidden');
+            if (chevron) chevron.classList.toggle('rotate-180');
+            if (button) button.setAttribute('aria-expanded', String(submenu && !submenu.classList.contains('hidden')));
         };
 
 
@@ -398,6 +862,22 @@
         // =====================================================================
         window.loadModule = async function(moduleName) {
             console.log("[Cliniva] Chargement du module :", moduleName);
+
+            // La dashboard est la page racine côté serveur, pas un fragment SPA.
+            // La recharger évite de remplacer son contenu par une réponse de module vide.
+            if (moduleName === 'operations') {
+                window.location.assign(`${window.location.pathname}${window.location.search}`);
+                return true;
+            }
+
+            if (moduleName === 'gestion_worklist' || moduleName === 'gestion_dicom_print' || moduleName === 'gestion_pacs_server') {
+                const submenu = document.getElementById('dicom-submenu');
+                const chevron = document.getElementById('dicom-chevron');
+                const button = document.querySelector('[aria-controls="dicom-submenu"]');
+                if (submenu) submenu.classList.remove('hidden');
+                if (chevron) chevron.classList.add('rotate-180');
+                if (button) button.setAttribute('aria-expanded', 'true');
+            }
 
             // 1. Mise à jour de l'état actif des boutons
             try {
@@ -582,6 +1062,24 @@
             window.showToast(msg, 'auto');
         };
 
+        // Interdit les requêtes d'avatars Internet: les images externes utilisent un visuel local.
+        const normalizeOfflineImages = (root) => {
+            const images = [];
+            if (root instanceof HTMLImageElement) images.push(root);
+            if (root && root.querySelectorAll) images.push(...root.querySelectorAll('img'));
+            images.forEach(image => {
+                if (/^https?:\/\//i.test(image.getAttribute('src') || '') && !image.dataset.offlineFallback) {
+                    image.dataset.offlineFallback = '1';
+                    image.src = '/static/images/avatar-placeholder.svg';
+                }
+            });
+        };
+        normalizeOfflineImages(document.body);
+        new MutationObserver(records => records.forEach(record => {
+            if (record.type === 'attributes') normalizeOfflineImages(record.target);
+            record.addedNodes.forEach(normalizeOfflineImages);
+        })).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+
 
         // =====================================================================
         // 5. MODALE ASYNCHRONE DE CONFIRMATION (REMPLACE CONFIRM)
@@ -623,8 +1121,341 @@
             });
         };
 
-        // Ouvrir directement la salle d'attente après l'authentification.
-        window.loadModule('gestion_passages');
+        window.restartClinivaApplication = async function() {
+            const confirmed = await window.showConfirm(
+                "Cliniva va redémarrer ses services puis recharger cette fenêtre. Les données enregistrées ne seront pas modifiées.",
+                { title: "Redémarrer Cliniva", okText: "Redémarrer", cancelText: "Annuler" }
+            );
+            if (!confirmed) return;
+
+            const overlay = document.createElement('div');
+            overlay.id = 'clinivaRestartOverlay';
+            overlay.className = 'fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-slate-950/90 text-white';
+            overlay.innerHTML = '<i class="ph-bold ph-arrows-clockwise animate-spin text-5xl text-brand-neon"></i><p class="mt-5 text-lg font-bold">Redémarrage de Cliniva…</p><p class="mt-2 text-sm text-slate-300">La fenêtre se rechargera automatiquement.</p>';
+            document.body.appendChild(overlay);
+
+            try {
+                const response = await fetch('/api/app/restart', { method: 'POST', cache: 'no-store' });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(result.detail || 'Le redémarrage a échoué.');
+
+                const deadline = Date.now() + 45000;
+                while (Date.now() < deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 600));
+                    try {
+                        const health = await fetch('/api/app/health', { cache: 'no-store' });
+                        if (health.ok) {
+                            await new Promise(resolve => setTimeout(resolve, 500));
+                            window.location.reload();
+                            return;
+                        }
+                    } catch (_) { /* Le serveur termine son redémarrage. */ }
+                }
+                throw new Error('Cliniva ne répond pas après 45 secondes. Vous pouvez actualiser la fenêtre.');
+            } catch (error) {
+                overlay.remove();
+                window.showToast(error.message || 'Impossible de redémarrer Cliniva.', 'error', 6000);
+            }
+        };
+
+        window.setDashboardPeriodControls = function() {
+            const period = document.getElementById('dashboardPeriod')?.value;
+            const custom = period === 'custom';
+            const month = period === 'month';
+            document.getElementById('dashboardDateFromWrap')?.classList.toggle('hidden', !custom);
+            document.getElementById('dashboardDateToWrap')?.classList.toggle('hidden', !custom);
+            document.getElementById('dashboardMonthWrap')?.classList.toggle('hidden', !month);
+            document.getElementById('dashboardDateFrom')?.toggleAttribute('required', custom);
+            document.getElementById('dashboardDateTo')?.toggleAttribute('required', custom);
+            document.getElementById('dashboardMonth')?.toggleAttribute('required', month);
+        };
+
+        window.setDashboardStyle = function(style) {
+            const root = document.getElementById('dashboardOverview');
+            if (!root) return;
+            const selected = style === 'maximum' ? 'maximum' : 'cliniva';
+            if (selected === 'maximum') root.dataset.dashboardStyle = 'maximum';
+            else delete root.dataset.dashboardStyle;
+            try { localStorage.setItem('cliniva.dashboard.style', selected); } catch (_) {}
+            document.getElementById('dashboardStyleCliniva')?.setAttribute('aria-pressed', String(selected === 'cliniva'));
+            document.getElementById('dashboardStyleMaximum')?.setAttribute('aria-pressed', String(selected === 'maximum'));
+        };
+        try { window.setDashboardStyle(localStorage.getItem('cliniva.dashboard.style') || 'cliniva'); }
+        catch (_) { window.setDashboardStyle('cliniva'); }
+
+        window.applyDashboardFilters = function(event) {
+            event.preventDefault();
+            const period = document.getElementById('dashboardPeriod')?.value || 'today';
+            const params = new URLSearchParams();
+            params.set('periode', period);
+            if (period === 'custom') {
+                const first = document.getElementById('dashboardDateFrom')?.value;
+                const last = document.getElementById('dashboardDateTo')?.value;
+                if (!first || !last) return window.showToast?.('Choisissez les deux dates de l’intervalle.', 'warning');
+                if (last < first) return window.showToast?.('La date de fin doit être égale ou postérieure à la date de début.', 'warning');
+                params.set('date_debut', first);
+                params.set('date_fin', last);
+            } else if (period === 'month') {
+                const month = document.getElementById('dashboardMonth')?.value;
+                if (!month) return window.showToast?.('Choisissez un mois à analyser.', 'warning');
+                params.set('mois', month);
+            }
+            window.location.assign(`${window.location.pathname}?${params.toString()}`);
+        };
+
+        window.openDashboardExportModal = function() {
+            const modal = document.getElementById('dashboardExportModal');
+            if (!modal) return;
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            modal.querySelector('input[type="checkbox"]')?.focus();
+        };
+
+        window.closeDashboardExportModal = function() {
+            const modal = document.getElementById('dashboardExportModal');
+            if (!modal) return;
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            document.querySelector('[onclick="openDashboardExportModal()"]')?.focus();
+        };
+
+        window.printDashboardSelection = function(mode) {
+            const selected = Array.from(document.querySelectorAll('[name="dashboard-export-section"]:checked')).map(input => input.value);
+            let exportedCount = 0;
+            const previousTitle = document.title;
+            const stage = document.createElement('main');
+            stage.id = 'dashboardPrintStage';
+            stage.innerHTML = `<h1>Rapport Cliniva</h1><p class="dashboard-print-meta">${document.querySelector('#dashboardOverview .dashboard-subtitle')?.textContent || ''} · Généré le ${new Date().toLocaleString('fr-FR')}</p>`;
+            selected.forEach(key => {
+                let source = document.querySelector(`#dashboardOverview [data-export-key="${CSS.escape(key)}"]`);
+                if (!source && key === 'modalities') {
+                    source = Array.from(document.querySelectorAll('#dashboardOverview section')).find(section => section.querySelector('h2')?.textContent.includes('Examens PACS par modalité'));
+                }
+                if (!source) return;
+                const clone = source.cloneNode(true);
+                clone.removeAttribute('data-export-key');
+                clone.removeAttribute('data-export-title');
+                clone.classList.remove('contents');
+                clone.style.display = key === 'kpis' || key === 'system' || key === 'services' ? 'grid' : 'block';
+                clone.style.gridTemplateColumns = 'repeat(auto-fit,minmax(220px,1fr))';
+                clone.style.gap = '10px';
+                stage.appendChild(clone);
+                exportedCount += 1;
+            });
+            if (!exportedCount) return window.showToast?.('Aucune rubrique sélectionnée n’est disponible pour ce compte.', 'warning');
+            document.body.appendChild(stage);
+            document.body.classList.add('dashboard-print-active');
+            window.closeDashboardExportModal();
+            const cleanup = () => {
+                document.body.classList.remove('dashboard-print-active');
+                stage.remove();
+                document.title = previousTitle;
+                window.removeEventListener('afterprint', cleanup);
+            };
+            window.addEventListener('afterprint', cleanup, {once:true});
+            if (mode === 'pdf') document.title = 'Rapport Cliniva — Enregistrer en PDF';
+            window.print();
+            window.setTimeout(cleanup, 120000);
+        };
+
+        window.addEventListener('keydown', event => {
+            if (event.key === 'Escape') window.closeDashboardExportModal();
+        });
+        window.setDashboardPeriodControls();
+
+        // Rend le panneau des modalités sélectionnable même s'il est rendu à la volée par Jinja.
+        document.querySelectorAll('#dashboardOverview section').forEach(section => {
+            if (section.querySelector('h2')?.textContent.includes('Examens PACS par modalité')) {
+                section.dataset.exportKey = 'modalities';
+                section.dataset.exportTitle = 'Examens PACS par modalité';
+            }
+        });
+
+        window.saveDashboardTargets = async function(event) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const error = document.getElementById('dashboardTargetsError');
+            const values = Object.fromEntries(new FormData(form).entries());
+            for (const key of Object.keys(values)) values[key] = Math.max(0, Number(values[key]) || 0);
+            try {
+                const response = await fetch('/api/dashboard/objectifs', {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(values), cache: 'no-store'
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(result.detail || 'Enregistrement impossible.');
+                window.location.reload();
+            } catch (exception) {
+                error.textContent = exception.message || 'Enregistrement impossible.';
+                error.classList.remove('hidden');
+            }
+        };
+
+        // Rapport des consommations DME directement dans le tableau de bord.
+        let dashboardConsumptionData = [];
+        let dashboardConsumptionPdfUrl = '';
+        let dashboardConsumptionPdfBlob = null;
+        let dashboardClinicPdfIdentity = {};
+        const escapeDashboardConsumption = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+        const dashboardConsumptionDate = value => {
+            if (!value) return '—';
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('fr-FR');
+        };
+        window.loadDashboardConsumptionReport = async function() {
+            const body = document.getElementById('dashboardConsumptionRows');
+            if (!body) return;
+            const errorBox = document.getElementById('dashboardConsumptionError');
+            const params = new URLSearchParams();
+            [['date_debut','dashboardConsumptionDateFrom'],['date_fin','dashboardConsumptionDateTo'],['service','dashboardConsumptionService'],['salle_id','dashboardConsumptionRoom'],['utilisateur','dashboardConsumptionUser']].forEach(([key,id]) => {
+                const value = document.getElementById(id)?.value;
+                if (value) params.set(key, value);
+            });
+            if (params.has('date_debut') && params.has('date_fin') && params.get('date_debut') > params.get('date_fin')) {
+                if (errorBox) { errorBox.textContent = 'La date de début doit précéder la date de fin.'; errorBox.classList.remove('hidden'); }
+                return;
+            }
+            body.innerHTML = '<tr><td colspan="7" class="p-6 text-center text-slate-400"><i class="ph-bold ph-spinner-gap animate-spin mr-2"></i>Chargement…</td></tr>';
+            if (errorBox) errorBox.classList.add('hidden');
+            try {
+                const response = await fetch('/api/dme/consumptions/report?' + params.toString(), {cache:'no-store'});
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Le rapport n’a pas pu être chargé.');
+                dashboardConsumptionData = data.consumptions || [];
+                body.innerHTML = dashboardConsumptionData.map(item => '<tr class="transition hover:bg-indigo-50/40 dark:hover:bg-white/[.03]"><td class="whitespace-nowrap p-3">'+escapeDashboardConsumption(dashboardConsumptionDate(item.consomme_le))+'</td><td class="p-3 font-semibold">'+escapeDashboardConsumption((item.patient_prenom+' '+item.patient_nom).trim())+'</td><td class="p-3"><strong>'+escapeDashboardConsumption(item.nom_produit)+'</strong><div class="mt-0.5 text-[10px] text-slate-400">'+escapeDashboardConsumption(item.type_produit)+'</div></td><td class="whitespace-nowrap p-3 font-bold">'+escapeDashboardConsumption(item.quantite)+' '+escapeDashboardConsumption(item.unite)+'</td><td class="p-3">'+escapeDashboardConsumption(item.service)+'</td><td class="p-3">'+escapeDashboardConsumption(item.salle || '—')+'</td><td class="p-3">'+escapeDashboardConsumption(item.utilisateur)+'</td></tr>').join('') || '<tr><td colspan="7" class="p-6 text-center text-slate-400">Aucune consommation ne correspond à ces filtres.</td></tr>';
+                const count = document.getElementById('dashboardConsumptionCount');
+                if (count) count.textContent = dashboardConsumptionData.length.toLocaleString('fr-FR') + (dashboardConsumptionData.length > 1 ? ' résultats' : ' résultat');
+            } catch (error) {
+                dashboardConsumptionData = [];
+                body.innerHTML = '<tr><td colspan="7" class="p-6 text-center text-rose-600">Impossible de charger le rapport.</td></tr>';
+                if (errorBox) { errorBox.textContent = error.message || 'Erreur de chargement.'; errorBox.classList.remove('hidden'); }
+                const count = document.getElementById('dashboardConsumptionCount');
+                if (count) count.textContent = 'Erreur';
+            }
+        };
+        window.generateDashboardConsumptionPdf = async function() {
+            if (!dashboardConsumptionData.length) {
+                await window.loadDashboardConsumptionReport();
+                if (!dashboardConsumptionData.length) return window.showToast?.('Aucune ligne à exporter pour les filtres sélectionnés.', 'warning');
+            }
+            if (typeof window.html2pdf !== 'function') return window.showToast?.('Le générateur PDF local n’est pas chargé.', 'error');
+            const rows = dashboardConsumptionData.map(item => '<tr><td>'+escapeDashboardConsumption(dashboardConsumptionDate(item.consomme_le))+'</td><td>'+escapeDashboardConsumption((item.patient_prenom+' '+item.patient_nom).trim())+'</td><td>'+escapeDashboardConsumption(item.type_produit+' · '+item.nom_produit)+'</td><td>'+escapeDashboardConsumption(item.quantite)+' '+escapeDashboardConsumption(item.unite)+'</td><td>'+escapeDashboardConsumption(item.service)+'</td><td>'+escapeDashboardConsumption(item.salle || '—')+'</td><td>'+escapeDashboardConsumption(item.utilisateur)+'</td></tr>').join('');
+            const pdfContent = document.createElement('div');
+            pdfContent.style.cssText = 'font-family:Arial,sans-serif;color:#172033;background:white;padding:0;width:277mm';
+            pdfContent.innerHTML = '<h1 style="font-size:20px;margin:0 0 5px">Rapport des consommations</h1><p style="font-size:10px;color:#64748b;margin:0 0 14px">Cliniva · Généré le '+escapeDashboardConsumption(new Date().toLocaleString('fr-FR'))+' · '+dashboardConsumptionData.length+' ligne(s)</p><table style="width:100%;border-collapse:collapse;font-size:9px"><thead><tr>'+['Date','Patient','Type · produit','Quantité','Service','Salle','Utilisateur'].map(label => '<th style="border:1px solid #cbd5e1;background:#e8eef0;padding:6px;text-align:left">'+label+'</th>').join('')+'</tr></thead><tbody>'+rows+'</tbody></table>';
+            const button = document.getElementById('dashboardConsumptionPdfDownload');
+            const status = document.getElementById('dashboardConsumptionPdfStatus');
+            if (button) { button.disabled = true; button.classList.add('opacity-60'); }
+            if (status) status.textContent = 'Génération du PDF…';
+            try {
+                const worker = window.html2pdf().set({margin:[25,10,24,10],filename:'Rapport_consommations_Cliniva.pdf',image:{type:'jpeg',quality:.96},html2canvas:{scale:2,useCORS:true,backgroundColor:'#ffffff'},jsPDF:{unit:'mm',format:'a4',orientation:'landscape'},pagebreak:{mode:['css','legacy']}}).from(pdfContent).toPdf();
+                const pdf = await worker.get('pdf');
+                const pageCount = pdf.internal.getNumberOfPages();
+                const pageWidth = pdf.internal.pageSize.getWidth();
+                const pageHeight = pdf.internal.pageSize.getHeight();
+                const generatedAt = new Date().toLocaleString('fr-FR');
+                const startDate = document.getElementById('dashboardConsumptionDateFrom')?.value || '';
+                const endDate = document.getElementById('dashboardConsumptionDateTo')?.value || '';
+                const datePeriod = startDate || endDate ? (startDate || '…')+' → '+(endDate || '…') : 'Toutes les périodes';
+                const addClinicBanner = (source, y, maxHeight) => {
+                    if (typeof source !== 'string' || !source.startsWith('data:image/')) return false;
+                    try {
+                        const image = pdf.getImageProperties(source);
+                        if (!image.width || !image.height) return false;
+                        const scale = Math.min((pageWidth - 20) / image.width, maxHeight / image.height);
+                        const width = image.width * scale;
+                        const height = image.height * scale;
+                        pdf.addImage(source, image.fileType || 'PNG', 10, y, width, height, undefined, 'FAST');
+                        return true;
+                    } catch (error) { console.warn('Bannière de clinique ignorée dans le rapport PDF :', error); return false; }
+                };
+                for (let page = 1; page <= pageCount; page++) {
+                    pdf.setPage(page);
+                    const hasClinicHeader = addClinicBanner(dashboardClinicPdfIdentity.entete_pdf, 3, 19);
+                    if (!hasClinicHeader) {
+                        pdf.setFont('helvetica','bold'); pdf.setFontSize(11); pdf.setTextColor(20,65,42);
+                        pdf.text(dashboardClinicPdfIdentity.nom_raison_sociale || 'CLINIVA',10,9);
+                        pdf.setFont('helvetica','normal'); pdf.setFontSize(9); pdf.setTextColor(35,48,40);
+                        pdf.text('Rapport des consommations',10,14);
+                        pdf.setFontSize(8); pdf.setTextColor(100,116,139);
+                        pdf.text('Période : '+datePeriod+'  ·  '+dashboardConsumptionData.length.toLocaleString('fr-FR')+' ligne(s)',10,20);
+                        pdf.text('Généré le '+generatedAt,pageWidth-10,9,{align:'right'});
+                    }
+                    pdf.setDrawColor(190,207,196); pdf.setLineWidth(.25); pdf.line(10,22,pageWidth-10,22);
+                    const hasClinicFooter = addClinicBanner(dashboardClinicPdfIdentity.pied_page_pdf, pageHeight-22, 16);
+                    if (!hasClinicFooter) {
+                        pdf.setDrawColor(190,207,196); pdf.line(10,pageHeight-13,pageWidth-10,pageHeight-13);
+                        pdf.setFont('helvetica','normal'); pdf.setFontSize(7); pdf.setTextColor(100,116,139);
+                        pdf.text('Cliniva · Document confidentiel · Usage réservé au personnel autorisé',10,pageHeight-7);
+                        pdf.text('Page '+page+' / '+pageCount,pageWidth-10,pageHeight-7,{align:'right'});
+                    } else {
+                        pdf.setFont('helvetica','normal'); pdf.setFontSize(7); pdf.setTextColor(100,116,139);
+                        pdf.text('Page '+page+' / '+pageCount,pageWidth-10,pageHeight-3,{align:'right'});
+                    }
+                }
+                dashboardConsumptionPdfBlob = pdf.output('blob');
+                if (dashboardConsumptionPdfUrl) URL.revokeObjectURL(dashboardConsumptionPdfUrl);
+                dashboardConsumptionPdfUrl = URL.createObjectURL(dashboardConsumptionPdfBlob);
+                const frame = document.getElementById('dashboardConsumptionPdfFrame');
+                if (frame) frame.src = dashboardConsumptionPdfUrl;
+                const modal = document.getElementById('dashboardConsumptionPdfModal');
+                modal?.classList.remove('hidden'); modal?.classList.add('flex');
+                document.body.classList.add('overflow-hidden');
+                if (status) status.textContent = 'PDF prêt · '+dashboardConsumptionData.length.toLocaleString('fr-FR')+' ligne(s)';
+            } catch (error) {
+                if (status) status.textContent = 'Échec de génération : '+(error.message || 'erreur inconnue');
+                window.showToast?.('La génération du PDF a échoué.', 'error');
+            } finally {
+                if (button) { button.disabled = false; button.classList.remove('opacity-60'); }
+            }
+        };
+        window.downloadDashboardConsumptionPdf = function() {
+            if (!dashboardConsumptionPdfBlob || !dashboardConsumptionPdfUrl) return;
+            const link = document.createElement('a'); link.href = dashboardConsumptionPdfUrl; link.download = 'Rapport_consommations_Cliniva.pdf'; document.body.appendChild(link); link.click(); link.remove();
+        };
+        window.printDashboardConsumptionPdf = function() {
+            const frame = document.getElementById('dashboardConsumptionPdfFrame');
+            if (frame?.contentWindow) { frame.contentWindow.focus(); frame.contentWindow.print(); }
+        };
+        window.closeDashboardConsumptionPdf = function() {
+            const modal = document.getElementById('dashboardConsumptionPdfModal');
+            if (!modal) return;
+            modal.classList.add('hidden'); modal.classList.remove('flex'); document.body.classList.remove('overflow-hidden');
+            const frame = document.getElementById('dashboardConsumptionPdfFrame'); if (frame) frame.src = 'about:blank';
+            if (dashboardConsumptionPdfUrl) { URL.revokeObjectURL(dashboardConsumptionPdfUrl); dashboardConsumptionPdfUrl = ''; }
+            dashboardConsumptionPdfBlob = null;
+        };
+        window.addEventListener('keydown', event => {
+            const modal = document.getElementById('dashboardConsumptionPdfModal');
+            if (event.key === 'Escape' && modal && !modal.classList.contains('hidden')) window.closeDashboardConsumptionPdf();
+        });
+        (async function initDashboardConsumptionReport() {
+            if (!document.getElementById('dashboardConsumptionRows')) return;
+            try {
+                const clinicResponse = await fetch('/api/clinic/info', {cache:'no-store'});
+                if (clinicResponse.ok) dashboardClinicPdfIdentity = await clinicResponse.json();
+            } catch (error) { console.warn('En-têtes PDF de la clinique indisponibles, utilisation du modèle par défaut.', error); }
+            try {
+                const response = await fetch('/api/dme/consumptions/options', {cache:'no-store'});
+                const options = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(options.detail || 'Options du rapport indisponibles.');
+                const fill = (id, items, valueOf, labelOf) => {
+                    const select = document.getElementById(id); if (!select) return;
+                    select.insertAdjacentHTML('beforeend', items.map(item => '<option value="'+escapeDashboardConsumption(valueOf(item))+'">'+escapeDashboardConsumption(labelOf(item))+'</option>').join(''));
+                };
+                fill('dashboardConsumptionService', options.services || [], value => value, value => value);
+                fill('dashboardConsumptionRoom', options.rooms || [], item => item.id, item => item.designation);
+                fill('dashboardConsumptionUser', options.users || [], value => value, value => value);
+            } catch (error) {
+                const errorBox = document.getElementById('dashboardConsumptionError');
+                if (errorBox) { errorBox.textContent = error.message || 'Filtres indisponibles.'; errorBox.classList.remove('hidden'); }
+            }
+            await window.loadDashboardConsumptionReport();
+        })();
+
+        // La page reste sur son accueil; les utilisateurs sans droit dashboard
+        // disposent des raccourcis permis dans le panneau central.
     </script>
+    <script src="/static/js/interface_zoom.js"></script>
 </body>
 </html>

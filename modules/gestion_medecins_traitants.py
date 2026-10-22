@@ -32,7 +32,8 @@ class TreatingDoctorManager:
                                   email,
                                   adresse,
                                   wilaya,
-                                  commune
+                                  commune,
+                                  specialite
                            FROM treating_doctors
                            ORDER BY nom ASC, prenom ASC, id DESC;
                            """)
@@ -51,7 +52,8 @@ class TreatingDoctorManager:
                                   email,
                                   adresse,
                                   wilaya,
-                                  commune
+                                  commune,
+                                  specialite
                            FROM treating_doctors
                            WHERE id = %s;
                            """, (doctor_id,))
@@ -70,6 +72,7 @@ class TreatingDoctorManager:
         adresse = str(data.get("adresse") or "").strip()
         wilaya = str(data.get("wilaya") or "").strip()
         commune = str(data.get("commune") or "").strip()
+        specialite = str(data.get("specialite") or "").strip()
 
         if not nom or not prenom:
             return {"success": False, "message": "Le Nom et le Prénom sont obligatoires."}
@@ -85,19 +88,20 @@ class TreatingDoctorManager:
                             email     = %s, \
                             adresse   = %s, \
                             wilaya    = %s, \
-                            commune   = %s
+                            commune   = %s,
+                            specialite = %s
                         WHERE id = %s; \
                         """
-                cursor.execute(query, (grade, nom, prenom, telephone, email, adresse, wilaya, commune, doc_id))
+                cursor.execute(query, (grade, nom, prenom, telephone, email, adresse, wilaya, commune, specialite, doc_id))
                 saved_id = doc_id
                 message = "Médecin traitant modifié avec succès."
             else:
                 query = """
                         INSERT INTO treating_doctors
-                            (grade, nom, prenom, telephone, email, adresse, wilaya, commune)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id; \
+                            (grade, nom, prenom, telephone, email, adresse, wilaya, commune, specialite)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id; \
                         """
-                cursor.execute(query, (grade, nom, prenom, telephone, email, adresse, wilaya, commune))
+                cursor.execute(query, (grade, nom, prenom, telephone, email, adresse, wilaya, commune, specialite))
                 res = cursor.fetchone()
                 saved_id = res["id"] if res else None
                 message = "Médecin traitant enregistré avec succès."
@@ -275,6 +279,11 @@ def render_html() -> str:
                 </div>
 
                 <div>
+                    <label class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">Spécialité du médecin</label>
+                    <input id="treatingDoctorSpecialite" placeholder="Ex. Médecine générale" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none focus:border-brand-neon bg-slate-50 dark:bg-black/30 text-slate-800 dark:text-white">
+                </div>
+
+                <div>
                     <label class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">Adresse du Cabinet / Établissement</label>
                     <textarea id="treatingDoctorAdresse" rows="2" placeholder="Ex: 14 Rue Didouche Mourad, Cabinet Médical..." class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none focus:border-brand-neon bg-slate-50 dark:bg-black/30 text-slate-800 dark:text-white"></textarea>
                 </div>
@@ -331,6 +340,7 @@ def render_html() -> str:
                     filteredTreatingList = allTreatingList.filter(d => 
                         (d.nom && d.nom.toLowerCase().includes(q)) ||
                         (d.prenom && d.prenom.toLowerCase().includes(q)) ||
+                        (d.specialite && d.specialite.toLowerCase().includes(q)) ||
                         (d.telephone && d.telephone.includes(q)) ||
                         (d.email && d.email.toLowerCase().includes(q)) ||
                         (d.wilaya && d.wilaya.toLowerCase().includes(q)) ||
@@ -365,6 +375,7 @@ def render_html() -> str:
                         tr.innerHTML = `
                             <td class="py-3.5 pl-2">
                                 <div class="font-bold text-slate-800 dark:text-slate-100 text-xs">${{d.grade || 'Dr'}} ${{d.nom}} ${{d.prenom}}</div>
+                                <div class="text-[10px] text-slate-500">${{d.specialite || 'Spécialité non renseignée'}}</div>
                                 <div class="text-[10px] text-slate-400 font-mono">ID: #${{d.id}}</div>
                             </td>
                             <td class="py-3.5 text-slate-600 dark:text-slate-300 font-medium">${{d.telephone || '-'}}</td>
@@ -446,6 +457,7 @@ def render_html() -> str:
                 document.getElementById('treatingDoctorGrade').value = d?.grade || 'Dr';
                 document.getElementById('treatingDoctorNom').value = d?.nom || '';
                 document.getElementById('treatingDoctorPrenom').value = d?.prenom || '';
+                document.getElementById('treatingDoctorSpecialite').value = d?.specialite || '';
                 document.getElementById('treatingDoctorTelephone').value = d?.telephone || '';
                 document.getElementById('treatingDoctorEmail').value = d?.email || '';
                 document.getElementById('treatingDoctorAdresse').value = d?.adresse || '';
@@ -482,6 +494,7 @@ def render_html() -> str:
                     grade: document.getElementById('treatingDoctorGrade').value,
                     nom: document.getElementById('treatingDoctorNom').value,
                     prenom: document.getElementById('treatingDoctorPrenom').value,
+                    specialite: document.getElementById('treatingDoctorSpecialite').value,
                     telephone: document.getElementById('treatingDoctorTelephone').value,
                     email: document.getElementById('treatingDoctorEmail').value,
                     adresse: document.getElementById('treatingDoctorAdresse').value,

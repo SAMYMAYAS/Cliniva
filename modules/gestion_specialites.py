@@ -112,7 +112,7 @@ class SpecialitesManager:
     ) -> List[Dict[str, Any]]:
         with get_db_cursor() as cursor:
             cursor.execute("""
-                SELECT id, designation, categorie, duree, modalite, tarif, tarif_nuit, specialite, salles_dediees 
+                SELECT id, designation, categorie, type_consultation, transmettre_hl7, duree, modalite, tarif, tarif_nuit, specialite, salles_dediees
                 FROM consultation_types 
                 ORDER BY id ASC;
             """)
@@ -131,6 +131,8 @@ class SpecialitesManager:
                 "id": r["id"],
                 "designation": r["designation"],
                 "categorie": r["categorie"],
+                "type_consultation": r.get("type_consultation") or "Consultation",
+                "transmettre_hl7": bool(r.get("transmettre_hl7")),
                 "duree": r["duree"] or "-",
                 "modalite": r["modalite"],
                 "tarif": float(r["tarif"] or 0),
@@ -147,7 +149,7 @@ class SpecialitesManager:
                 continue
             if search_query:
                 q = search_query.lower()
-                text_combined = f"{item['designation']} {item['categorie']} {item['specialite']} {item['modalite']} {' '.join(item['salles_dediees'])}".lower()
+                text_combined = f"{item['designation']} {item['categorie']} {item['type_consultation']} {item['specialite']} {item['modalite']} {' '.join(item['salles_dediees'])}".lower()
                 if q not in text_combined:
                     continue
 
@@ -159,6 +161,8 @@ class SpecialitesManager:
         item_id = data.get("id")
         designation = data.get("designation", "").strip()
         categorie = data.get("categorie", "").strip()
+        type_consultation = data.get("type_consultation", "Consultation").strip() or "Consultation"
+        transmettre_hl7 = bool(data.get("transmettre_hl7", False))
         duree = data.get("duree", "").strip()
         modalite = data.get("modalite", "").strip()
         specialite = data.get("specialite", "").strip()
@@ -170,7 +174,7 @@ class SpecialitesManager:
         except (ValueError, TypeError):
             tarif, tarif_nuit = 0.0, 0.0
 
-        if not designation or not categorie or not modalite or not specialite:
+        if not designation or not categorie or not type_consultation or not modalite or not specialite:
             return {
                 "success": False,
                 "message": "Désignation, Catégorie, Modalité et Spécialité sont obligatoires.",
@@ -182,18 +186,18 @@ class SpecialitesManager:
             if item_id:
                 query = """
                     UPDATE consultation_types SET 
-                        designation = %s, categorie = %s, duree = %s, modalite = %s, 
+                        designation = %s, categorie = %s, type_consultation = %s, transmettre_hl7 = %s, duree = %s, modalite = %s,
                         tarif = %s, tarif_nuit = %s, specialite = %s, salles_dediees = %s::jsonb
                     WHERE id = %s;
                 """
-                cursor.execute(query, (designation, categorie, duree, modalite, tarif, tarif_nuit, specialite, salles_json, item_id))
+                cursor.execute(query, (designation, categorie, type_consultation, transmettre_hl7, duree, modalite, tarif, tarif_nuit, specialite, salles_json, item_id))
             else:
                 query = """
                     INSERT INTO consultation_types 
-                    (designation, categorie, duree, modalite, tarif, tarif_nuit, specialite, salles_dediees)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb);
+                    (designation, categorie, type_consultation, transmettre_hl7, duree, modalite, tarif, tarif_nuit, specialite, salles_dediees)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb);
                 """
-                cursor.execute(query, (designation, categorie, duree, modalite, tarif, tarif_nuit, specialite, salles_json))
+                cursor.execute(query, (designation, categorie, type_consultation, transmettre_hl7, duree, modalite, tarif, tarif_nuit, specialite, salles_json))
 
         return {"success": True, "message": "Acte médical enregistré avec succès !"}
 
@@ -210,6 +214,9 @@ class SpecialitesManager:
             cursor.execute("SELECT id, nom FROM ref_modalites ORDER BY nom ASC;")
             modalites = [dict(r) for r in cursor.fetchall()]
 
+            cursor.execute("SELECT id, nom FROM ref_types_consultation ORDER BY CASE WHEN nom = 'Consultation' THEN 0 ELSE 1 END, nom ASC;")
+            types_consultation = [dict(r) for r in cursor.fetchall()]
+
             cursor.execute("SELECT id, nom FROM ref_specialites ORDER BY nom ASC;")
             specialites = [dict(r) for r in cursor.fetchall()]
 
@@ -219,12 +226,13 @@ class SpecialitesManager:
         return {
             "categories": categories,
             "modalites": modalites,
+            "types_consultation": types_consultation,
             "specialites": specialites,
             "salles_disponibles": salles,
         }
 
     def save_ref_item(self, table_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        if table_name not in ["ref_categories", "ref_modalites"]:
+        if table_name not in ["ref_categories", "ref_modalites", "ref_types_consultation"]:
             return {"success": False, "message": "Table invalide."}
 
         item_id = data.get("id")
@@ -242,7 +250,7 @@ class SpecialitesManager:
         return {"success": True, "message": "Référence enregistrée !"}
 
     def delete_ref_item(self, table_name: str, item_id: int) -> Dict[str, Any]:
-        if table_name not in ["ref_categories", "ref_modalites"]:
+        if table_name not in ["ref_categories", "ref_modalites", "ref_types_consultation"]:
             return {"success": False, "message": "Table invalide."}
 
         with get_db_cursor() as cursor:
@@ -641,6 +649,10 @@ def render_html() -> str:
                             <i class="ph ph-activity text-amber-500"></i>
                             <span>+ Modalités</span>
                         </button>
+                        <button onclick="openManageRefModal('ref_types_consultation', 'Types de consultation')" class="px-3 py-2 bg-slate-50 dark:bg-black/20 hover:bg-slate-100 dark:hover:bg-white/5 text-slate-700 dark:text-slate-300 border border-slate-200/80 dark:border-white/10 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition">
+                            <i class="ph ph-list-plus text-emerald-500"></i>
+                            <span>+ Types</span>
+                        </button>
                     </div>
                 </div>
 
@@ -679,6 +691,8 @@ def render_html() -> str:
                             <th class="pb-3 pl-2">ID</th>
                             <th class="pb-3">Désignation de l'Acte</th>
                             <th class="pb-3">Catégorie</th>
+                            <th class="pb-3">Type</th>
+                            <th class="pb-3">Worklist HL7</th>
                             <th class="pb-3">Spécialité</th>
                             <th class="pb-3">Modalité</th>
                             <th class="pb-3">Tarif Jour</th>
@@ -724,7 +738,7 @@ def render_html() -> str:
         </div>
 
         <!-- ONGLET 3 : RÉFÉRENTIELS -->
-        <div id="spe-tab-content-refs" class="spe-tab-content hidden grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div id="spe-tab-content-refs" class="spe-tab-content hidden grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="bg-white dark:bg-[#121c15] rounded-3xl p-6 shadow-sm border border-slate-100 dark:border-white/5 space-y-4">
                 <div class="flex items-center justify-between border-b border-slate-100 dark:border-white/5 pb-3">
                     <h3 class="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2">
@@ -745,6 +759,14 @@ def render_html() -> str:
                     <button onclick="openManageRefModal('ref_modalites', 'Modalités')" class="text-xs font-bold text-brand-neon hover:underline">+ Ajouter</button>
                 </div>
                 <ul id="list-modalites-preview" class="divide-y divide-slate-100 dark:divide-white/5 text-xs"></ul>
+            </div>
+
+            <div class="bg-white dark:bg-[#121c15] rounded-3xl p-6 shadow-sm border border-slate-100 dark:border-white/5 space-y-4">
+                <div class="flex items-center justify-between border-b border-slate-100 dark:border-white/5 pb-3">
+                    <h3 class="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2"><i class="ph-bold ph-list-plus text-emerald-500"></i>Types de consultation</h3>
+                    <button onclick="openManageRefModal('ref_types_consultation', 'Types de consultation')" class="text-xs font-bold text-brand-neon hover:underline">+ Ajouter</button>
+                </div>
+                <ul id="list-consultation-types-preview" class="divide-y divide-slate-100 dark:divide-white/5 text-xs"></ul>
             </div>
         </div>
 
@@ -772,6 +794,19 @@ def render_html() -> str:
                     <label class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">Désignation de l'Acte *</label>
                     <input type="text" id="actDesignation" required placeholder="Ex: Consultation Spécialisée..." class="w-full text-xs p-3 rounded-xl border border-slate-200 dark:border-white/10 outline-none focus:border-brand-neon bg-slate-50 dark:bg-black/30 font-bold text-slate-800 dark:text-white">
                 </div>
+
+                <div>
+                    <div class="flex items-center justify-between mb-1">
+                        <label for="actTypeConsultation" class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">Type de consultation *</label>
+                        <button type="button" onclick="openManageRefModal('ref_types_consultation', 'Types de consultation')" class="text-[10px] font-bold text-emerald-600 hover:underline">+ Ajouter un type</button>
+                    </div>
+                    <select id="actTypeConsultation" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none focus:border-brand-neon bg-slate-50 dark:bg-black/30 text-slate-800 dark:text-white font-medium"></select>
+                </div>
+
+                <label class="flex items-start gap-3 p-3 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/20 cursor-pointer">
+                    <input type="checkbox" id="actTransmettreHl7" class="mt-0.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500">
+                    <span><span class="block text-xs font-semibold text-slate-700 dark:text-slate-200">Transmettre cet acte à la worklist HL7</span><span class="block mt-0.5 text-[10px] text-slate-500">Marque cet acte comme transmissible lors de la préparation des passages.</span></span>
+                </label>
 
                 <div class="grid grid-cols-2 gap-3">
                     <div>
@@ -898,7 +933,7 @@ def render_html() -> str:
     <!-- SCRIPT JS COMPLET AVEC EXPORT NATIVE WINDOWS -->
     <script>
         (function() {
-            let globalData = { specialites: [], consultations: [], references: { categories: [], modalites: [], specialites: [], salles_disponibles: [] } };
+            let globalData = { specialites: [], consultations: [], references: { categories: [], modalites: [], types_consultation: [], specialites: [], salles_disponibles: [] } };
 
             window.switchSpeTab = function(tabName) {
                 document.querySelectorAll('.spe-tab-content').forEach(el => el.classList.add('hidden'));
@@ -921,6 +956,7 @@ def render_html() -> str:
                     renderRefsPreviews();
                     populateDropdowns();
                     populateFilterDropdowns();
+                    filterActesTable();
                 } catch (e) {
                     console.error("Erreur de chargement:", e);
                 }
@@ -996,6 +1032,7 @@ def render_html() -> str:
                     const matchesQuery = !q || (
                         (c.designation && c.designation.toLowerCase().includes(q)) ||
                         (c.categorie && c.categorie.toLowerCase().includes(q)) ||
+                        (c.type_consultation && c.type_consultation.toLowerCase().includes(q)) ||
                         (c.specialite && c.specialite.toLowerCase().includes(q)) ||
                         (c.modalite && c.modalite.toLowerCase().includes(q)) ||
                         String(c.tarif).includes(q) ||
@@ -1026,7 +1063,7 @@ def render_html() -> str:
                 tbody.innerHTML = '';
 
                 if (!items || items.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="9" class="text-center py-6 text-slate-400">Aucun acte médical ne correspond aux critères sélectionnés.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="11" class="text-center py-6 text-slate-400">Aucun acte médical ne correspond aux critères sélectionnés.</td></tr>';
                     return;
                 }
 
@@ -1046,6 +1083,8 @@ def render_html() -> str:
                         <td class="py-3.5 pl-2 text-slate-400 font-mono text-[11px]">#${c.id}</td>
                         <td class="py-3.5 font-bold text-slate-800 dark:text-slate-100">${c.designation}</td>
                         <td class="py-3.5"><span class="px-2.5 py-1 rounded-xl text-[10px] font-bold bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-300 border border-sky-200 dark:border-sky-800/40">${c.categorie}</span></td>
+                        <td class="py-3.5"><span class="px-2.5 py-1 rounded-xl text-[10px] font-bold bg-violet-50 dark:bg-violet-950/40 text-violet-600 dark:text-violet-300 border border-violet-200 dark:border-violet-800/40">${c.type_consultation || 'Consultation'}</span></td>
+                        <td class="py-3.5"><span class="px-2.5 py-1 rounded-xl text-[10px] font-bold ${c.transmettre_hl7 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-slate-100 text-slate-500 border border-slate-200'}">${c.transmettre_hl7 ? 'Oui' : 'Non'}</span></td>
                         <td class="py-3.5"><span class="px-2.5 py-1 rounded-xl text-[10px] font-bold bg-brand-neon/20 text-emerald-800 dark:text-brand-neon border border-brand-neon/30">${c.specialite}</span></td>
                         <td class="py-3.5"><span class="px-2.5 py-1 rounded-xl text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-300 border border-amber-200 dark:border-amber-800/40">${c.modalite}</span></td>
                         <td class="py-3.5 font-bold text-emerald-600 dark:text-brand-neon font-mono">${Number(c.tarif).toLocaleString()} DA</td>
@@ -1090,6 +1129,7 @@ def render_html() -> str:
             window.renderRefsPreviews = function() {
                 const listCat = document.getElementById('list-categories-preview');
                 const listMod = document.getElementById('list-modalites-preview');
+                const listConsultTypes = document.getElementById('list-consultation-types-preview');
 
                 listCat.innerHTML = (globalData.references.categories || []).map(c => `
                     <li class="py-2.5 flex items-center justify-between text-slate-700 dark:text-slate-300 font-medium">
@@ -1104,16 +1144,24 @@ def render_html() -> str:
                         <button onclick="deleteRefItem('ref_modalites', ${m.id})" class="text-rose-500 hover:opacity-80"><i class="ph-bold ph-trash text-xs"></i></button>
                     </li>
                 `).join('');
+                if (listConsultTypes) listConsultTypes.innerHTML = (globalData.references.types_consultation || []).map(t => `
+                    <li class="py-2.5 flex items-center justify-between text-slate-700 dark:text-slate-300 font-medium">
+                        <span>${t.nom}</span>
+                        <button onclick="deleteRefItem('ref_types_consultation', ${t.id})" class="text-rose-500 hover:opacity-80"><i class="ph-bold ph-trash text-xs"></i></button>
+                    </li>
+                `).join('');
             };
 
             window.populateDropdowns = function() {
                 const sCat = document.getElementById('actCategorie');
                 const sSpe = document.getElementById('actSpecialite');
                 const sMod = document.getElementById('actModalite');
+                const sConsultType = document.getElementById('actTypeConsultation');
 
                 sCat.innerHTML = (globalData.references.categories || []).map(c => `<option value="${c.nom}">${c.nom}</option>`).join('');
                 sSpe.innerHTML = (globalData.specialites || []).map(s => `<option value="${s.nom}">${s.nom}</option>`).join('');
                 sMod.innerHTML = (globalData.references.modalites || []).map(m => `<option value="${m.nom}">${m.nom}</option>`).join('');
+                if (sConsultType) sConsultType.innerHTML = (globalData.references.types_consultation || []).map(t => `<option value="${t.nom}">${t.nom}</option>`).join('');
 
                 const roomsContainer = document.getElementById('dedicatedRoomsContainer');
                 if (globalData.references.salles_disponibles && globalData.references.salles_disponibles.length > 0) {
@@ -1149,6 +1197,8 @@ def render_html() -> str:
                 document.getElementById('actId').value = c.id;
                 document.getElementById('actDesignation').value = c.designation;
                 document.getElementById('actCategorie').value = c.categorie;
+                document.getElementById('actTypeConsultation').value = c.type_consultation || 'Consultation';
+                document.getElementById('actTransmettreHl7').checked = c.transmettre_hl7 === true;
                 document.getElementById('actSpecialite').value = c.specialite;
                 document.getElementById('actModalite').value = c.modalite;
                 document.getElementById('actDuree').value = c.duree !== '-' ? c.duree : '';
@@ -1172,6 +1222,8 @@ def render_html() -> str:
                     id: document.getElementById('actId').value ? parseInt(document.getElementById('actId').value) : null,
                     designation: document.getElementById('actDesignation').value,
                     categorie: document.getElementById('actCategorie').value,
+                    type_consultation: document.getElementById('actTypeConsultation').value,
+                    transmettre_hl7: document.getElementById('actTransmettreHl7').checked,
                     specialite: document.getElementById('actSpecialite').value,
                     modalite: document.getElementById('actModalite').value,
                     duree: document.getElementById('actDuree').value,
@@ -1283,7 +1335,7 @@ def render_html() -> str:
             window.renderRefItemsList = function(tableName) {
                 const listEl = document.getElementById('refItemsList');
                 listEl.innerHTML = '';
-                const items = tableName === 'ref_categories' ? globalData.references.categories : globalData.references.modalites;
+                const items = tableName === 'ref_categories' ? globalData.references.categories : (tableName === 'ref_modalites' ? globalData.references.modalites : (globalData.references.types_consultation || []));
 
                 items.forEach(item => {
                     const li = document.createElement('li');

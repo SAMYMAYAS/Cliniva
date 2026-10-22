@@ -50,7 +50,8 @@ def get_current_user_optional(request: Request) -> Optional[Dict[str, Any]]:
     with get_db_cursor() as cursor:
         cursor.execute("""
             SELECT u.id, u.prenom, u.nom, u.telephone, u.role, u.login, u.status, 
-                   u.avatar, u.permissions, u.specialites_autorisees
+                   u.avatar, u.permissions, u.specialites_autorisees,
+                   u.plannings_rdv_autorises
             FROM user_sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.session_token = %s AND s.expires_at > CURRENT_TIMESTAMP;

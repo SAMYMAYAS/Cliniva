@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Font used by the offline build; no web font request is needed. */
+html,
+body {
+  font-family: "Segoe UI", Arial, sans-serif;
+}
+
+/* Keep Phosphor glyphs optically centered in buttons across all modules. */
+button i[class*="ph-"] {
+  display: inline-flex;
+  flex: 0 0 1em;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+button > i[class*="ph-"]:only-child {
+  margin-inline: auto;
+}
