@@ -1,6 +1,7 @@
 '''Gestion des entreprises et conventions de la filiale Kacel Job.'''
 
 from datetime import date, datetime
+from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from html import escape as html_escape
 import io
@@ -15,7 +16,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import (Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle)
+from reportlab.platypus import (Image as RLImage, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle)
 from app.auth import get_current_user, track_action
 from database import get_db_cursor
 try:
@@ -29,7 +30,7 @@ TARIFF_CATEGORY_ORDER = ['Visite périodique', 'Visites médicales', 'Examens co
 def _default_tariffs() -> List[Dict[str, Any]]:
     '''Tariff template extracted from Offre KACEL JOB; copied per convention.'''
 
-    rows = [{'code': 'periodic_package', 'categorie': 'Visite périodique', 'designation': 'Forfait visite périodique + bilan standard', 'mode_tarif': 'per_worker', 'configuration': {'amount': 4000, 'unit': 'DA HT / travailleur'}, 'description': 'Forfait global comprenant biométrie, bilan biologique standard, examen du médecin du travail, fiche d’aptitude, registres réglementaires et certificats de reprise prévus.', 'ordre': 10}, {'code': 'medical_visit', 'categorie': 'Visites médicales', 'designation': 'Visite périodique, d’embauche ou spontanée avec fiche d’aptitude', 'mode_tarif': 'fixed', 'configuration': {'amount': 500, 'unit': 'DA HT / visite'}, 'description': '', 'ordre': 20}, {'code': 'at_mp_declaration', 'categorie': 'Visites médicales', 'designation': 'Déclaration d’accident du travail ou de maladie professionnelle', 'mode_tarif': 'fixed', 'configuration': {'amount': 4000, 'unit': 'DA HT'}, 'description': '', 'ordre': 30}, {'code': 'vaccination_tetanus', 'categorie': 'Vaccination', 'designation': 'Vaccination antitétanique et antidiphtérique', 'mode_tarif': 'per_injection', 'configuration': {'amount': 1200, 'unit': 'DA HT / injection'}, 'description': 'Injection et rappel selon le calendrier vaccinal.', 'ordre': 50}, {'code': 'site_visit_first', 'categorie': 'Visites des lieux de travail', 'designation': 'Première visite sans rapport', 'mode_tarif': 'fixed', 'configuration': {'amount': 0, 'unit': 'Gratuite'}, 'description': '', 'ordre': 60}, {'code': 'site_visit_no_report', 'categorie': 'Visites des lieux de travail', 'designation': 'Visite des lieux sans rapport', 'mode_tarif': 'fixed', 'configuration': {'amount': 10000, 'unit': 'DA HT'}, 'description': '', 'ordre': 61}, {'code': 'site_visit_report', 'categorie': 'Visites des lieux de travail', 'designation': 'Visite des lieux avec rapport', 'mode_tarif': 'fixed', 'configuration': {'amount': 20000, 'unit': 'DA HT'}, 'description': '', 'ordre': 62}, {'code': 'site_visit_outside_wilaya', 'categorie': 'Visites des lieux de travail', 'designation': 'Visite des lieux hors wilaya d’Alger', 'mode_tarif': 'fixed', 'configuration': {'amount': 50000, 'unit': 'DA HT'}, 'description': '', 'ordre': 63}, {'code': 'travel_equipment', 'categorie': 'Frais de déplacement', 'designation': 'Déplacement du matériel médical par jour', 'mode_tarif': 'per_day', 'configuration': {'amount': None, 'unit': 'DA HT / jour'}, 'description': 'À définir pour cette entreprise.', 'ordre': 70}, {'code': 'travel_staff', 'categorie': 'Frais de déplacement', 'designation': 'Déplacement du personnel médical et paramédical par jour', 'mode_tarif': 'per_day', 'configuration': {'amount': None, 'unit': 'DA HT / jour'}, 'description': 'À définir pour cette entreprise.', 'ordre': 71}, {'code': 'expertise_post', 'categorie': 'Expertise et CPHS', 'designation': 'Consultation d’expertise pour aménagement du poste', 'mode_tarif': 'fixed', 'configuration': {'amount': 5000, 'unit': 'DA HT'}, 'description': '', 'ordre': 80}, {'code': 'cphs_meeting', 'categorie': 'Expertise et CPHS', 'designation': 'Participation à une réunion CPHS', 'mode_tarif': 'fixed', 'configuration': {'amount': 10000, 'unit': 'DA HT / réunion'}, 'description': '', 'ordre': 81}]
+    rows = [{'code': 'periodic_package', 'categorie': 'Visite périodique', 'designation': 'Forfait Consultation + Bilan standard - visite périodique', 'mode_tarif': 'per_worker', 'configuration': {'amount': 4000, 'unit': 'DA HT / travailleur'}, 'description': 'Forfait global comprenant biométrie, bilan biologique standard, examen du médecin du travail, fiche d’aptitude, registres réglementaires et certificats de reprise prévus.', 'ordre': 10}, {'code': 'medical_visit', 'categorie': 'Visites médicales', 'designation': 'Visite périodique, d’embauche ou spontanée avec fiche d’aptitude', 'mode_tarif': 'fixed', 'configuration': {'amount': 500, 'unit': 'DA HT / visite'}, 'description': '', 'ordre': 20}, {'code': 'at_mp_declaration', 'categorie': 'Visites médicales', 'designation': 'Déclaration d’accident du travail ou de maladie professionnelle', 'mode_tarif': 'fixed', 'configuration': {'amount': 4000, 'unit': 'DA HT'}, 'description': '', 'ordre': 30}, {'code': 'vaccination_tetanus', 'categorie': 'Vaccination', 'designation': 'Vaccination antitétanique et antidiphtérique', 'mode_tarif': 'per_injection', 'configuration': {'amount': 1200, 'unit': 'DA HT / injection'}, 'description': 'Injection et rappel selon le calendrier vaccinal.', 'ordre': 50}, {'code': 'site_visit_first', 'categorie': 'Visites des lieux de travail', 'designation': 'Première visite sans rapport', 'mode_tarif': 'fixed', 'configuration': {'amount': 0, 'unit': 'Gratuite'}, 'description': '', 'ordre': 60}, {'code': 'site_visit_no_report', 'categorie': 'Visites des lieux de travail', 'designation': 'Visite des lieux sans rapport', 'mode_tarif': 'fixed', 'configuration': {'amount': 10000, 'unit': 'DA HT'}, 'description': '', 'ordre': 61}, {'code': 'site_visit_report', 'categorie': 'Visites des lieux de travail', 'designation': 'Visite des lieux avec rapport', 'mode_tarif': 'fixed', 'configuration': {'amount': 20000, 'unit': 'DA HT'}, 'description': '', 'ordre': 62}, {'code': 'site_visit_outside_wilaya', 'categorie': 'Visites des lieux de travail', 'designation': 'Visite des lieux hors wilaya d’Alger', 'mode_tarif': 'fixed', 'configuration': {'amount': 50000, 'unit': 'DA HT'}, 'description': '', 'ordre': 63}, {'code': 'travel_equipment', 'categorie': 'Frais de déplacement', 'designation': 'Déplacement du matériel médical par jour', 'mode_tarif': 'per_day', 'configuration': {'amount': None, 'unit': 'DA HT / jour'}, 'description': 'À définir pour cette entreprise.', 'ordre': 70}, {'code': 'travel_staff', 'categorie': 'Frais de déplacement', 'designation': 'Déplacement du personnel médical et paramédical par jour', 'mode_tarif': 'per_day', 'configuration': {'amount': None, 'unit': 'DA HT / jour'}, 'description': 'À définir pour cette entreprise.', 'ordre': 71}, {'code': 'expertise_post', 'categorie': 'Expertise et CPHS', 'designation': 'Consultation d’expertise pour aménagement du poste', 'mode_tarif': 'fixed', 'configuration': {'amount': 5000, 'unit': 'DA HT'}, 'description': '', 'ordre': 80}, {'code': 'cphs_meeting', 'categorie': 'Expertise et CPHS', 'designation': 'Participation à une réunion CPHS', 'mode_tarif': 'fixed', 'configuration': {'amount': 10000, 'unit': 'DA HT / réunion'}, 'description': '', 'ordre': 81}]
     exams = [('chest_xray', 'Téléthorax', 1500), ('efr', 'Exploration fonctionnelle respiratoire (EFR)', 3000), ('audiogram', 'Audiogramme sans interprétation', 2000), ('ecg', 'ECG sans interprétation', 1500), ('standard_lab', 'Bilan biologique standard', 2000), ('stool_test', 'Coproparasitologie des selles', 600), ('vision_test', 'Visiotest', 3000)]
     for index, (code, label, amount) in enumerate(exams, start=30):
         rows.append({'code': code, 'categorie': 'Examens complémentaires', 'designation': label, 'mode_tarif': 'fixed', 'configuration': {'amount': amount, 'unit': 'DA HT / examen'}, 'description': '', 'ordre': index})
@@ -103,22 +104,32 @@ def _format_tariff(config: Dict[str, Any], mode: str) -> str:
         return f'Petite : {money(config.get('small'))} DA HT ; Moyenne : {money(config.get('medium'))} DA HT ; Grande : {money(config.get('large'))} DA HT'
     if mode == 'custom_unit':
         return f'Par bureau : {money(config.get('office'))} DA HT ; par poste : {money(config.get('workstation'))} DA HT'
+    if config.get('amount') == 0 and unit.casefold() == 'gratuite':
+        return 'Gratuite'
     return f'{money(config.get('amount'))} {unit}'
 
 def _build_convention_pdf(convention: Dict[str, Any], company: Dict[str, Any], tariffs: List[Dict[str, Any]], employees: List[Dict[str, Any]]) -> bytes:
     output = io.BytesIO()
-    document = SimpleDocTemplate(output, pagesize=A4, rightMargin=17 * mm, leftMargin=17 * mm, topMargin=19 * mm, bottomMargin=19 * mm, title=f'Convention {convention.get('reference') or ''}', author='EURL KACEL MEDICAL')
+    reference = str(convention.get('reference') or '')
+    title = str(convention.get('designation') or 'Convention de médecine du travail')
+    document = SimpleDocTemplate(
+        output, pagesize=A4, rightMargin=17 * mm, leftMargin=17 * mm,
+        topMargin=18 * mm, bottomMargin=19 * mm,
+        title=f'Convention {reference} - {company.get("designation") or "Kacel Job"}',
+        author='EURL KACEL MEDICAL',
+    )
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='KJTitle', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=19, leading=23, textColor=colors.HexColor('#173323'), alignment=TA_CENTER, spaceAfter=4 * mm))
-    styles.add(ParagraphStyle(name='KJSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10, leading=14, textColor=colors.HexColor('#52705b'), alignment=TA_CENTER, spaceAfter=5 * mm))
-    styles.add(ParagraphStyle(name='KJSection', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=11, leading=14, textColor=colors.HexColor('#173323'), spaceBefore=4 * mm, spaceAfter=2 * mm, keepWithNext=True))
-    styles.add(ParagraphStyle(name='KJBody', parent=styles['BodyText'], fontName='Helvetica', fontSize=8.5, leading=12, spaceAfter=2.2 * mm, alignment=TA_LEFT))
-    styles.add(ParagraphStyle(name='KJSmall', parent=styles['BodyText'], fontName='Helvetica', fontSize=7.5, leading=10, textColor=colors.HexColor('#475569')))
-    styles.add(ParagraphStyle(name='KJCell', parent=styles['BodyText'], fontName='Helvetica', fontSize=7.3, leading=9, spaceAfter=0))
+    styles.add(ParagraphStyle(name='KJTitle', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=17, leading=21, textColor=colors.HexColor('#173323'), alignment=TA_CENTER, spaceAfter=3 * mm))
+    styles.add(ParagraphStyle(name='KJSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, textColor=colors.HexColor('#52705b'), alignment=TA_CENTER, spaceAfter=2 * mm))
+    styles.add(ParagraphStyle(name='KJSection', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=10, leading=13, textColor=colors.HexColor('#173323'), spaceBefore=3.2 * mm, spaceAfter=1.3 * mm, keepWithNext=True))
+    styles.add(ParagraphStyle(name='KJBody', parent=styles['BodyText'], fontName='Helvetica', fontSize=8.1, leading=10.7, spaceAfter=1.5 * mm, alignment=TA_LEFT))
+    styles.add(ParagraphStyle(name='KJSmall', parent=styles['BodyText'], fontName='Helvetica', fontSize=7, leading=9, textColor=colors.HexColor('#475569'), spaceAfter=1 * mm))
+    styles.add(ParagraphStyle(name='KJCell', parent=styles['BodyText'], fontName='Helvetica', fontSize=7, leading=8.7, spaceAfter=0))
     styles.add(ParagraphStyle(name='KJCellBold', parent=styles['KJCell'], fontName='Helvetica-Bold', textColor=colors.HexColor('#173323')))
     styles.add(ParagraphStyle(name='KJHead', parent=styles['KJCell'], fontName='Helvetica-Bold', textColor=colors.white))
-    styles.add(ParagraphStyle(name='KJGroup', parent=styles['KJCell'], fontName='Helvetica-Bold', fontSize=7.5, textColor=colors.HexColor('#173323')))
-    def p(value: Any, style: str='KJBody') -> Paragraph:
+    styles.add(ParagraphStyle(name='KJGroup', parent=styles['KJCell'], fontName='Helvetica-Bold', fontSize=7.3, textColor=colors.HexColor('#173323')))
+
+    def p(value: Any, style: str = 'KJBody') -> Paragraph:
         text = html_escape(str(value or '—')).replace('\n', '<br/>')
         return Paragraph(text, styles[style])
 
@@ -130,25 +141,149 @@ def _build_convention_pdf(convention: Dict[str, Any], company: Dict[str, Any], t
         except AttributeError:
             return str(value)
 
-    story = [p('EURL KACEL MEDICAL · KACEL JOB', 'KJSub'), p('CONVENTION DE MÉDECINE DU TRAVAIL', 'KJTitle')]
-    header_data = [[p(f'Référence : {convention.get('reference')}', 'KJCellBold'), p(f'Période : {fmt_date(convention.get('date_debut'))} au {fmt_date(convention.get('date_fin'))}', 'KJCellBold')], [p(f'Établie à : Réghaïa, Alger · Le : {date.today().strftime('%d/%m/%Y')}', 'KJCell'), p(f'Effectif contractuel : {convention.get('effectif_contractuel') or len(employees)} · Taille : {convention.get('taille_entreprise') or 'À préciser'}', 'KJCell')]]
-    header = Table(header_data, colWidths=[87 * mm, 87 * mm])
-    header.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f1f7ef')), ('BOX', (0, 0), (-1, -1), 0.6, colors.HexColor('#b9cdbb')), ('INNERGRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#d7e4d7')), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'), ('LEFTPADDING', (0, 0), (-1, -1), 8), ('RIGHTPADDING', (0, 0), (-1, -1), 8), ('TOPPADDING', (0, 0), (-1, -1), 7), ('BOTTOMPADDING', (0, 0), (-1, -1), 7)]))
-    story.extend([header, Spacer(1, 5 * mm), p('ENTRE LES SOUSSIGNÉS', 'KJSection')])
-    provider = 'EURL KACEL MEDICAL, représentée par son directeur général, Monsieur BENAMAR Djamel (Gérant), adresse : Coopérative El Wifak, Aissat Mustapha, Réghaïa, Alger ; RC : 16/01-0998272 B15 ; NIF : 001516099817259 ; ART : 16430738001. Service conventionnement : 0560685605 · imene@kacelhealthcaregroup.com · kacel.servicemarketing@gmail.com. Service de médecine du travail : 0561875052 · kacel.job2022@gmail.com. Ci-après « le prestataire ». '
-    employer = f'{company.get('designation') or ''}, adresse : {company.get('adresse') or '—'}, représentée par : {company.get('representant') or company.get('contact') or '—'}, RC : {company.get('rc') or '—'}, NIF : {company.get('nif') or '—'}, ART : {company.get('art') or '—'}, contact : {company.get('telephone') or '—'}, e-mail : {company.get('email') or '—'}. Ci-après « le contractant ». '
-    party = Table([[p(provider), p(employer)]], colWidths=[87 * mm, 87 * mm])
-    party.setStyle(TableStyle([('BOX', (0, 0), (-1, -1), 0.6, colors.HexColor('#cbd5e1')), ('INNERGRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#e2e8f0')), ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#f8fafc')), ('LEFTPADDING', (0, 0), (-1, -1), 8), ('RIGHTPADDING', (0, 0), (-1, -1), 8), ('TOPPADDING', (0, 0), (-1, -1), 8), ('BOTTOMPADDING', (0, 0), (-1, -1), 8)]))
-    story.extend([party, Spacer(1, 4 * mm), p('Il a été convenu et arrêté ce qui suit :')])
-    clauses = [('Article 01 — Objet de la convention', 'Le prestataire s’engage à assurer la prise en charge sur le plan de la médecine du travail, de l’ensemble des salariés du contractant conformément à la loi N° 88.07 du 26 janvier, relative à l’hygiène ; à la sécurité et à la médecine du travail et aux dispositions du décret exécutif N° 93.120 du 15 mai 1993 relatif à l’organisation de la médecine du travail. En contrepartie, le contractant s’engage à respecter les dispositions de ladite loi susvisée et à assurer la prise en charge financière de la médecine du travail selon les modalités fixées aux articles 4 et 5.'), ('Article 02 — Obligations du contractant', 'Le contractant s’engage à assurer la prise en charge financière de la médecine du travail ; respecter la programmation des visites médicales et examens établie conjointement ; libérer les travailleurs et les acheminer au lieu des examens ; respecter le règlement intérieur du prestataire ; informer systématiquement le prestataire des départs, recrutements et problèmes touchant la médecine du travail, l’hygiène et la sécurité ; associer le médecin du travail aux initiatives et réunions de la commission paritaire d’hygiène et de sécurité ; faciliter son accès aux lieux de travail ; et prendre en charge les examens complémentaires prescrits.'), ('Article 03 — Obligations du prestataire', 'Dans le cadre de la loi N° 88.07 susvisée et des règlements en vigueur, le prestataire s’engage à assurer les examens médicaux réglementaires au moins une fois par an pour chaque travailleur ; les examens complémentaires nécessaires à la détermination de l’aptitude et au dépistage des pathologies professionnelles ; l’éducation sanitaire ; la participation du médecin aux travaux de la commission paritaire d’hygiène et de sécurité ; les visites des lieux de travail et enquêtes nécessaires. Les visites et examens peuvent être assurés sur le site de travail à la demande du contractant. Le prestataire assurera au moins une visite semestrielle d’une journée des lieux de travail.'), ('Article 4 — Données de l’entreprise', f'Domaine d’activité : {company.get('secteur_activite') or 'À préciser'}. Effectif contractuel : {convention.get('effectif_contractuel') or len(employees)} travailleurs. Taille déclarée : {convention.get('taille_entreprise') or 'À préciser'}.'), ('Article 05 — Rémunération des prestations', 'La rémunération des prestations se fait sur la base de la tarification HT annexée à la présente convention. Les prix sont établis spécifiquement pour l’entreprise selon son effectif et son domaine d’activité ; tout changement dans ces données peut entraîner une modification des prix. Les examens complémentaires sont demandés en fonction des risques aux postes de travail. Les frais de déplacement de l’équipe médicale, du personnel paramédical et du matériel médical convenus sont inclus dans les factures. Le paiement s’effectue sous trente jours après réception de la facture.'), ('Article 06 — Engagement de l’entreprise et conditions de paiement', 'Le paiement s’effectue sous 30 jours après réception de la facture. Lorsque les visites médicales sont effectuées au sein de l’entreprise, celle-ci respecte la liste nominative des travailleurs transmise avant la mission. La facturation est établie sur la base du nombre initialement communiqué, même en cas d’absence de certains travailleurs. Les travailleurs absents peuvent se présenter ultérieurement auprès du prestataire pour leur visite, sans frais supplémentaires.'), ('Article 07 — Respect du taux d’effectif annuel et ajustement contractuel', 'L’entreprise s’engage à permettre la réalisation effective d’au moins 90 % de l’effectif contractuel sur la période annuelle. Ce seuil constitue la base de calcul du tarif négocié. En cas de non-atteinte, le prestataire se réserve le droit de facturer sur la base de l’effectif initialement indiqué ou communiqué lors de la négociation, tel que mentionné à l’article 04.'), ('Article 08 — Domiciliation bancaire', 'Le contractant se libérera des sommes dues par chèque ou virement au compte N° 001006440300000438/95, ouvert au nom de EURL KACEL MEDICAL, adresse : Agence 644, 04 Rue Bouzidi Mohamed, Réghaïa, Alger.'), ('Article 09 — Durée de validité et modification de la convention', f'La présente convention est établie pour la période du {fmt_date(convention.get('date_debut'))} au {fmt_date(convention.get('date_fin'))}, pour une durée d’une année renouvelable par tacite reconduction. Elle ne peut être modifiée ou résiliée qu’avec l’accord des deux parties, sous réserve d’un préavis de deux mois.'), ('Article 10 — Documents contractuels', 'Font partie intégrante du présent contrat les annexes tarifaires de sensibilisation, de formation des travailleurs, d’ambiance de travail et d’évaluation des risques de travail.'), ('Article 11 — Modification', 'Le contractant pourra apporter toute modification au volume des prestations prévues dans la convention. Dans ce cas, les parties conviendront des mesures à prendre dans le cadre d’un avenant dûment approuvé et signé par les deux parties.'), ('Article 12 — Protection des données à caractère personnel', 'Conformément à la loi n° 18-07 du 10 juin 2018, les parties s’engagent à respecter la confidentialité, la sécurité et la licéité des traitements. Les données collectées sont utilisées exclusivement pour l’exécution de la convention ; chaque partie garantit avoir obtenu, si nécessaire, le consentement préalable des personnes concernées ; les parties mettent en œuvre des mesures techniques et organisationnelles appropriées ; elles assurent l’exercice des droits d’accès, de rectification, d’opposition et d’effacement. Tout traitement est soumis à la réglementation en vigueur sous le contrôle de l’ANPDP. Toute violation engage la responsabilité de son auteur conformément à la législation en vigueur.'), ('Article 13 — Exemplaires et signature', 'Le représentant du prestataire et le contractant parapheront chaque page de chacun des six exemplaires de la convention et apposeront leur signature après la mention « Lu et approuvé ». Trois copies seront transmises au service de médecine du travail, qui en fera ampliation aux services de la santé et du travail de la wilaya.')]
-    for title, body in clauses:
-        story.extend([p(title, 'KJSection'), p(body)])
-    if convention.get('conditions'):
-        story.extend([p('Conditions particulières', 'KJSection'), p(convention['conditions'])])
-    if convention.get('observation'):
-        story.extend([p('Observations', 'KJSection'), p(convention['observation'])])
-    story.extend([p('ANNEXE TARIFAIRE — PRESTATIONS ET PRIX HT', 'KJSection')])
-    tariff_data = [[p('Catégorie / rubrique', 'KJHead'), p('Prestation', 'KJHead'), p('Tarif convenu', 'KJHead')]]
+    workforce = convention.get('effectif_contractuel') or len(employees) or 'À préciser'
+    company_name = company.get('designation') or 'À préciser'
+    company_size = convention.get('taille_entreprise') or 'À préciser'
+    story: List[Any] = []
+    logo_path = Path(__file__).resolve().parent.parent / 'resources' / 'kacel_job' / 'logo.png'
+    if logo_path.exists():
+        logo: Any = RLImage(str(logo_path), width=70 * mm, height=14 * mm)
+    else:
+        logo = p('EURL KACEL MEDICAL', 'KJTitle')
+    brand = p('CENTRE DE MÉDECINE DU TRAVAIL\nKACEL JOB', 'KJSub')
+    brand_header = Table([[logo, brand]], colWidths=[86 * mm, 90 * mm], rowHeights=[19 * mm])
+    brand_header.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'), ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+        ('ALIGN', (1, 0), (1, 0), 'RIGHT'), ('LINEBELOW', (0, 0), (-1, -1), 1, colors.HexColor('#173323')),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5), ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+    ]))
+    story.extend([brand_header, Spacer(1, 3 * mm), p('OFFRE DE CONVENTION DE LA MÉDECINE DU TRAVAIL', 'KJTitle')])
+    story.append(p(title, 'KJSub'))
+    metadata = [
+        [p(f'Référence : {reference or "Attribuée à l’enregistrement"}', 'KJCellBold'), p(f'Période : {fmt_date(convention.get("date_debut"))} au {fmt_date(convention.get("date_fin"))}', 'KJCellBold')],
+        [p(f'Établie à : Réghaïa, Alger - Le : {date.today().strftime("%d/%m/%Y")}', 'KJCell'), p(f'Effectif contractuel : {workforce} travailleurs - Taille : {company_size}', 'KJCell')],
+    ]
+    metadata_table = Table(metadata, colWidths=[88 * mm, 88 * mm])
+    metadata_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f1f7ef')),
+        ('BOX', (0, 0), (-1, -1), 0.6, colors.HexColor('#b9cdbb')),
+        ('INNERGRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#d7e4d7')),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'), ('LEFTPADDING', (0, 0), (-1, -1), 7),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 7), ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    story.extend([metadata_table, Spacer(1, 3 * mm), p('Présentation', 'KJSection')])
+    story.append(p('Le groupe KACEL a l’honneur et le plaisir de vous annoncer le lancement de son nouveau service dédié exclusivement à la médecine du travail.'))
+    story.append(p('En plus de l’activité quotidienne assurée au niveau du centre de médecine du travail, cette convention propose une prestation qui englobe la visite médicale périodique et l’exploration paraclinique (radiographie du thorax, ECG, audiogramme, EFR et prélèvement sanguin) en un seul temps et sur site, au niveau de l’entreprise, épargnant ainsi le déplacement des travailleurs et les perturbations de l’activité.'))
+    story.append(p('Forts de notre base arrière qui est le centre diagnostic KACEL MEDICAL, nous proposons une convention globale qui regroupe les différentes visites médicales (visite d’embauche, visite périodique, visite de reprise après arrêt de travail de 21 jours, visite spontanée, accident de travail et maladie professionnelle), les visites des lieux et études de poste, ainsi que les examens complémentaires demandés au travailleur avec un tarif étudié. Nous vous accompagnerons aussi pour le volet hygiène, sécurité et environnement de travail et la formation des travailleurs.'))
+
+    story.append(p('Entre les soussignés', 'KJSection'))
+    provider = 'EURL KACEL MEDICAL, représentée par son directeur général, Monsieur BENAMAR Djamel, gérant. Adresse : Coopérative El Wifak, Aissat Mustapha, Réghaïa, Alger. RC : 16/01-0998272 B15. NIF : 001516099817259. ART : 16430738001. Service conventionnement : 0560685605, imene@kacelhealthcaregroup.com / kacel.servicemarketing@gmail.com. Service de médecine du travail : 0561875052 / kacel.job2022@gmail.com. Ci-après désigné « le prestataire ». '
+    employer = f'{company_name}. Adresse : {company.get("adresse") or "À préciser"}. Domaine d’activité : {company.get("secteur_activite") or "À préciser"}. Représentée par : {company.get("representant") or "À préciser"}. RC : {company.get("rc") or "À préciser"}. NIF : {company.get("nif") or "À préciser"}. ART : {company.get("art") or "À préciser"}. Contacts : {company.get("contact") or "À préciser"}. Téléphone : {company.get("telephone") or "À préciser"}. E-mail : {company.get("email") or "À préciser"}. Ci-après désignée « le contractant ». '
+    parties = Table([[p(provider, 'KJSmall'), p(employer, 'KJSmall')]], colWidths=[88 * mm, 88 * mm])
+    parties.setStyle(TableStyle([
+        ('BOX', (0, 0), (-1, -1), 0.6, colors.HexColor('#cbd5e1')),
+        ('INNERGRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#e2e8f0')),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#f8fafc')),
+        ('LEFTPADDING', (0, 0), (-1, -1), 7), ('RIGHTPADDING', (0, 0), (-1, -1), 7),
+        ('TOPPADDING', (0, 0), (-1, -1), 7), ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([parties, Spacer(1, 2 * mm), p('Il a été convenu et arrêté ce qui suit :')])
+
+    clauses = [
+        ('Article 01 - Objet de la convention', [
+            'Le prestataire s’engage à assurer la prise en charge sur le plan de la médecine du travail, de l’ensemble des salariés du contractant conformément à la loi N° 88.07 du 26 janvier, relative à l’hygiène ; à la sécurité et à la médecine du travail et aux dispositions du décret exécutif N° 93.120 du 15 mai 1993 relatif à l’organisation de la médecine du travail.',
+            'En contrepartie, le contractant s’engage à respecter les dispositions de ladite loi susvisée et des textes pris pour son application et à assurer la prise en charge financière de la médecine du travail selon les modalités fixées aux articles 4 et 5.'
+        ]),
+        ('Article 02 - Obligations du contractant', [
+            'Le contractant s’engage à :',
+            'Assurer la prise en charge financière de la médecine du travail.',
+            'Respecter la programmation des visites médicales et des examens médicaux établie conjointement avec le prestataire. Le non-respect du programme engendrera le paiement de frais de déplacement supplémentaires pour l’équipe médicale ainsi que le matériel médical, sauf en cas de force majeure.',
+            'Libérer les travailleurs et les acheminer au lieu où doivent se dérouler les examens médicaux.',
+            'Respecter le règlement intérieur de l’organisme prestataire.',
+            'Informer de manière systématique le prestataire des départs et recrutements ainsi que tout problème touchant la médecine du travail, l’hygiène et la sécurité.',
+            'Associer le médecin du travail relevant du prestataire à toute initiative intéressant le domaine de la médecine du travail, l’hygiène et de la sécurité et notamment aux réunions de la commission paritaire d’hygiène et de la sécurité.',
+            'Faciliter la tâche du médecin du travail relevant du prestataire en lui permettant le libre accès à tous les lieux de travail et locaux conçus pour le bien-être des travailleurs.',
+            'Prendre en charge financièrement la réalisation des examens complémentaires prescrits pour déterminer l’aptitude au poste de travail ou la prévention et le dépistage des lésions d’origine professionnelle.'
+        ]),
+        ('Article 03 - Obligations du prestataire', [
+            'Dans le cadre de la loi N° 88.07 susvisée et des règlements en vigueur, le prestataire s’engage à assurer ou à faire assurer au profit du contractant :',
+            'Les examens médicaux prévus par la législation et la réglementation en vigueur une fois par an, au moins, pour chaque travailleur du contractant.',
+            'Les examens complémentaires demandés par le médecin du travail nécessaires à la détermination de l’aptitude et le dépistage des pathologies professionnelles, afin de prévenir tout type de risque engendré par le milieu de travail.',
+            'L’éducation sanitaire des travailleurs selon des modalités à arrêter avec le médecin du travail.',
+            'La participation du médecin du travail aux travaux de la commission paritaire d’hygiène et de sécurité du contractant.',
+            'Les visites des lieux de travail en vue de la surveillance des conditions de travail ainsi que toute enquête ou étude nécessitée par l’état de santé des travailleurs.',
+            'À noter que les visites médicales ainsi que les examens complémentaires peuvent être assurés au niveau même du site de travail si le contractant le souhaite. Le prestataire assurera, au moins, une visite semestrielle durant une journée des lieux de travail du contractant.'
+        ]),
+        ('Article 04 - Données de l’entreprise contractante', [
+            f'Domaine d’activité : {company.get("secteur_activite") or "À préciser"}. Effectif : {workforce} travailleurs. Taille de l’entreprise : {company_size}.'
+        ]),
+        ('Article 05 - Rémunération des prestations', [
+            'La rémunération des prestations se fait sur la base de la tarification annexée à la présente convention.',
+            f'Les prix arrêtés à la présente convention ont été établis spécifiquement pour l’entreprise {company_name}, selon son effectif et son domaine d’activité (voir article 04). Tout changement dans ces données engendrera automatiquement un changement dans les prix.',
+            'Les examens complémentaires seront demandés en fonction des risques aux postes de travail. Les frais de déplacement de l’équipe médicale et du personnel paramédical ainsi que le matériel médical seront inclus dans les factures.',
+            'Le paiement s’effectue sous trente jours après réception de la facture.'
+        ]),
+        ('Article 06 - Engagement de l’entreprise et conditions de paiement', [
+            'Le paiement s’effectue sous 30 (trente) jours après réception de la facture.',
+            'Lorsque les visites médicales sont effectuées au sein de l’entreprise, elle s’engage à respecter la liste nominative des travailleurs transmise au prestataire avant la mission.',
+            'Étant donné que le déplacement du personnel médical et paramédical ainsi que le matériel génèrent des frais logistiques et opérationnels importants, il est convenu que la facturation sera établie sur la base du nombre initialement communiqué par l’entreprise, même en cas d’absence de certains travailleurs le jour de la mission.',
+            'Toutefois, les travailleurs absents pourront se présenter ultérieurement auprès du prestataire pour la réalisation de leur visite médicale, sans frais supplémentaires.'
+        ]),
+        ('Article 07 - Respect du taux d’effectif annuel et ajustement contractuel', [
+            'L’entreprise s’engage à permettre la réalisation effective d’au moins 90 % de l’effectif contractuel sur la période annuelle de la convention. Ce seuil constitue la base de calcul du tarif négocié entre le prestataire et l’entreprise.',
+            'En cas de non-atteinte de ce taux minimal, le prestataire se réserve le droit d’effectuer la facturation sur la base de l’effectif initialement indiqué ou communiqué lors de la négociation, tel que mentionné à l’article N° 04.',
+            'Cette clause vise à préserver la transparence, l’équité et la bonne continuité du partenariat entre les deux parties.'
+        ]),
+        ('Article 08 - Domiciliation bancaire', [
+            'Le contractant se libérera des sommes dues au titre de la présente convention par chèque ou virement au compte N° 001006440300000438/95, ouvert au nom de EURL KACEL MEDICAL, adresse : Agence 644, 04 Rue Bouzidi Mohamed, Réghaïa, Alger.'
+        ]),
+        ('Article 09 - Durée de validité et modification de la convention', [
+            'La présente convention est établie pour une durée d’une année renouvelable par tacite reconduction. Elle ne peut être modifiée ou résiliée qu’avec l’accord des deux parties sous réserve d’un préavis de deux mois.',
+            'Est considérée comme résiliation unilatérale de la convention par le bénéficiaire : tout arrêt de la rémunération des prestations et le non-respect d’une ou de plusieurs clauses des articles 2 et 3 ci-dessus.',
+            'La résiliation unilatérale de la convention par le contractant expose ce dernier aux sanctions prévues par la loi N° 88.07 du 26 janvier 1988 susvisée.'
+        ]),
+        ('Article 10 - Documents contractuels', [
+            'Font partie intégrante du présent contrat les documents suivants : Annexe 1 : Tarif compagnies de sensibilisation ; Annexe 2 : Tarif de formations des travailleurs ; Annexe 3 : Ambiance de travail et évaluation des risques de travail.'
+        ]),
+        ('Article 11 - Modification', [
+            'Le client pourra apporter toute modification au volume des prestations prévues dans la présente convention. Dans ce cas, les deux parties conviendront des mesures à prendre dans le cadre d’un avenant dûment approuvé et signé par les deux parties.'
+        ]),
+        ('Article 12 - Protection des données à caractère personnel', [
+            'Conformément aux dispositions de la loi N° 18-07 du 10 juin 2018 relative à la protection des personnes physiques dans le traitement des données à caractère personnel, les parties s’engagent à respecter les principes de confidentialité, de sécurité et de licéité lors du traitement des données personnelles échangées dans le cadre du présent contrat.',
+            'Collecte et finalité : les données collectées sont exclusivement utilisées aux fins nécessaires à l’exécution du contrat et conformément aux finalités convenues.',
+            'Consentement : chaque partie garantit avoir obtenu, si nécessaire, le consentement préalable des personnes concernées.',
+            'Sécurité et confidentialité : les parties mettent en œuvre les mesures techniques et organisationnelles appropriées pour assurer la protection et la confidentialité des données personnelles.',
+            'Droits des personnes : les parties assurent l’exercice des droits d’accès, de rectification, d’opposition et d’effacement conformément à la loi N° 18-07.',
+            'Autorité de contrôle : les traitements sont soumis à la réglementation en vigueur sous le contrôle de l’Autorité Nationale de Protection des Données à Caractère Personnel (ANPDP). Toute violation engage la responsabilité de son auteur conformément à la législation en vigueur.'
+        ]),
+        ('Article 13 - Exemplaires et signatures', [
+            'Le représentant de l’organisme prestataire et le contractant devront parapher chaque page de chacun des exemplaires de la présente convention, établie en six (06) exemplaires, et apposer leur signature à l’endroit indiqué à cet effet en le faisant précéder de la mention « Lu et approuvé ».',
+            'Trois (03) copies de la convention seront transmises au service de médecine du travail, lequel en fera ampliation aux services de la santé et du travail de la wilaya.'
+        ]),
+    ]
+    for heading, paragraphs in clauses:
+        story.append(p(heading, 'KJSection'))
+        for index, text in enumerate(paragraphs):
+            prefix = '- ' if heading in ('Article 02 - Obligations du contractant', 'Article 03 - Obligations du prestataire') and index > 0 else ''
+            story.append(p(prefix + text, 'KJBody'))
+
+    story.append(p('Avantages accordés aux salariés et à leurs ayants droit', 'KJSection'))
+    story.append(p('Les employés de l’entreprise ainsi que leurs ayants droit (conjoint, enfants et parents) bénéficient de tarifs conventionnels préférentiels pour les examens paracliniques prescrits dans le cadre d’un suivi médical ou d’une exploration complémentaire au sein des établissements KACEL.'))
+    facilities = [
+        'KACEL MEDICAL Réghaïa : Centre de Diagnostic (8h à 17h et 6j/7) : IRM, scanner, radiologie conventionnelle et interventionnelle (biopsies, cytoponctions, drainage), laboratoire d’analyses médicales (7h à 22h), laboratoire d’anatomopathologie, service d’endoscopie digestive, service de médecine nucléaire (scintigraphies, IRA thérapie ainsi que PET Scan).',
+        'KACEL MEDICAL Baraki : Centre de Diagnostic (24h/24 et 7j/7) : IRM, scanner, radiologie conventionnelle et interventionnelle (biopsies, cytoponctions, drainages), laboratoires d’analyses médicales et d’anatomopathologie, endoscopie, rééducation pour adultes, salles de massage, oxygénothérapie en caisson hyperbare et cryothérapie.',
+        'KACEL MEDICAL Aïn Benian : Centre de Diagnostic, IRM, scanner, radiologie conventionnelle et interventionnelle (biopsies, cytoponctions, drainages), laboratoires d’analyses médicales et d’anatomopathologie, endoscopie, rééducation et médecine nucléaire (scintigraphies, IRA thérapie ainsi que PET Scan).',
+        'KACEL SANTÉ Oued Moussa, Boumerdès : Centre de Rééducation et de Réadaptation Fonctionnelle (8h à 17h et 6j/7) : rééducation pour adultes et enfants, balnéothérapie, Hidjama, suivi spécialisé des enfants IMC, psychologie, psychomotricité et orthophonie.',
+        'Clinique Médico-Chirurgicale de Bougara, Blida (24h/24 et 7j/7) : diagnostic médical, scanner, radiologie conventionnelle et interventionnelle, analyses médicales, anatomopathologie, endoscopie, bloc opératoire couvrant les spécialités chirurgicales hors ophtalmologie et chirurgie cardiaque, ainsi que consultations spécialisées.'
+    ]
+    for facility in facilities:
+        story.append(p('- ' + facility, 'KJSmall'))
+    story.append(p('Les taux de remise conventionnels sont détaillés dans l’annexe tarifaire : consultations 15 %, scanner 15 %, IRM 10 %, radiologie et échographie 15 %, analyses médicales 15 %, anatomopathologie 10 %, scintigraphie 15 %, rééducation 10 % et chirurgie 20 %.'))
+
+    story.append(p('Tarification des prestations - Annexe tarifaire HT', 'KJSection'))
+    tariff_data = [[p('Catégorie', 'KJHead'), p('Prestation', 'KJHead'), p('Tarif convenu HT', 'KJHead')]]
     tariff_group_rows = []
     visible_tariffs = []
     for item in tariffs:
@@ -162,7 +297,7 @@ def _build_convention_pdf(convention: Dict[str, Any], company: Dict[str, Any], t
             continue
         visible_tariffs.append((item, config))
     category_rank = {category: index for index, category in enumerate(TARIFF_CATEGORY_ORDER)}
-    visible_tariffs.sort(key=((lambda pair: category_rank.get(pair[0].get('categorie') or '', len(category_rank))), int(pair[0].get('ordre') or 0), str(pair[0].get('designation') or '').casefold()))
+    visible_tariffs.sort(key=lambda pair: (category_rank.get(pair[0].get('categorie') or '', len(category_rank)), int(pair[0].get('ordre') or 0), str(pair[0].get('designation') or '').casefold()))
     current_category = None
     for item, config in visible_tariffs:
         category = str(item.get('categorie') or 'Autres prestations')
@@ -171,22 +306,44 @@ def _build_convention_pdf(convention: Dict[str, Any], company: Dict[str, Any], t
             tariff_data.append([p(category, 'KJGroup'), '', ''])
             current_category = category
         tariff_data.append(['', p(item.get('designation'), 'KJCell'), p(_format_tariff(config, item.get('mode_tarif', 'fixed')), 'KJCell')])
-    tariff_table = Table(tariff_data, colWidths=[38 * mm, 77 * mm, 59 * mm], repeatRows=1, hAlign='LEFT')
-    tariff_styles = [('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#173323')), ('TEXTCOLOR', (0, 0), (-1, 0), colors.white), ('GRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#cbd5e1')), ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8fafc')]), ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('LEFTPADDING', (0, 0), (-1, -1), 5), ('RIGHTPADDING', (0, 0), (-1, -1), 5), ('TOPPADDING', (0, 0), (-1, -1), 5), ('BOTTOMPADDING', (0, 0), (-1, -1), 5)]
+    tariff_table = Table(tariff_data, colWidths=[39 * mm, 83 * mm, 52 * mm], repeatRows=1, hAlign='LEFT')
+    tariff_styles = [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#173323')),
+        ('GRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#cbd5e1')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8fafc')]),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('LEFTPADDING', (0, 0), (-1, -1), 5),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 5), ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]
     for group_row in tariff_group_rows:
-        tariff_styles.extend([('SPAN', (0, group_row), (-1, group_row)), ('BACKGROUND', (0, group_row), (-1, group_row), colors.HexColor('#e8f1e6')), ('LINEBELOW', (0, group_row), (-1, group_row), 0.7, colors.HexColor('#91ad91'))])
+        tariff_styles.extend([
+            ('SPAN', (0, group_row), (-1, group_row)),
+            ('BACKGROUND', (0, group_row), (-1, group_row), colors.HexColor('#e8f1e6')),
+            ('LINEBELOW', (0, group_row), (-1, group_row), 0.7, colors.HexColor('#91ad91')),
+        ])
     tariff_table.setStyle(TableStyle(tariff_styles))
     story.append(tariff_table)
-    signatures = Table([[p('LE CONTRACTANT<br/><br/><br/>« Lu et approuvé »<br/><br/>Signature et cachet', 'KJCellBold'), p('LE PRESTATAIRE<br/><br/><br/>« Lu et approuvé »<br/><br/>Signature et cachet', 'KJCellBold')]], colWidths=[87 * mm, 87 * mm], rowHeights=[40 * mm])
-    signatures.setStyle(TableStyle([('BOX', (0, 0), (-1, -1), 0.6, colors.HexColor('#cbd5e1')), ('INNERGRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#cbd5e1')), ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('ALIGN', (0, 0), (-1, -1), 'CENTER'), ('LEFTPADDING', (0, 0), (-1, -1), 8), ('TOPPADDING', (0, 0), (-1, -1), 8)]))
-    story.extend([Spacer(1, 7 * mm), signatures])
+    story.append(p('Les prestations périodiques sont facturées au forfait global de 4 000 DA HT par travailleur. Les lignes détaillant les éléments inclus dans ce forfait ne constituent pas des prestations facturables supplémentaires.', 'KJSmall'))
+    story.append(p(f'Fait à Réghaïa, Alger, le {date.today().strftime("%d/%m/%Y")}.', 'KJBody'))
+    signatures = Table([[
+        p('LE CONTRACTANT\n\n\n« Lu et approuvé »\n\nSignature et cachet', 'KJCellBold'),
+        p('L’ORGANISME PRESTATAIRE\n\n\n« Lu et approuvé »\n\nSignature et cachet', 'KJCellBold'),
+    ]], colWidths=[88 * mm, 88 * mm], rowHeights=[35 * mm])
+    signatures.setStyle(TableStyle([
+        ('BOX', (0, 0), (-1, -1), 0.6, colors.HexColor('#cbd5e1')),
+        ('INNERGRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#cbd5e1')),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8), ('TOPPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    story.append(KeepTogether([Spacer(1, 4 * mm), signatures]))
+
     def footer(canvas, doc):
         canvas.saveState()
         canvas.setStrokeColor(colors.HexColor('#d7e4d7'))
         canvas.line(17 * mm, 14 * mm, A4[0] - 17 * mm, 14 * mm)
         canvas.setFont('Helvetica', 7)
         canvas.setFillColor(colors.HexColor('#64748b'))
-        canvas.drawString(17 * mm, 9 * mm, f'KACEL JOB · {convention.get('reference') or ''}')
+        canvas.drawString(17 * mm, 9 * mm, f'KACEL JOB - {reference}')
         canvas.drawRightString(A4[0] - 17 * mm, 9 * mm, f'Page {doc.page}')
         canvas.restoreState()
 
