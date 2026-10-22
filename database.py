@@ -144,6 +144,11 @@ def init_database() -> None:
         nom TEXT UNIQUE NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS ref_types_consultation (
+        id SERIAL PRIMARY KEY,
+        nom TEXT UNIQUE NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS rooms (
         id SERIAL PRIMARY KEY,
         designation TEXT NOT NULL,
@@ -154,10 +159,23 @@ def init_database() -> None:
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS room_types (
+        id SERIAL PRIMARY KEY,
+        nom TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_room_types_nom_ci ON room_types (LOWER(nom));
+    INSERT INTO room_types (nom) VALUES
+        ('Consultation'), ('Salle De Soin'), ('Bloc Opératoire'), ('Salle De Réveil'),
+        ('Salle De Déchocage'), ('Salle De Prélévemnt'), ('Salle radiologique')
+    ON CONFLICT DO NOTHING;
+
     CREATE TABLE IF NOT EXISTS consultation_types (
         id SERIAL PRIMARY KEY,
         designation TEXT NOT NULL,
         categorie TEXT DEFAULT '',
+        type_consultation TEXT DEFAULT 'Consultation',
+        transmettre_hl7 BOOLEAN DEFAULT FALSE,
         duree TEXT DEFAULT '',
         modalite TEXT DEFAULT '',
         tarif NUMERIC DEFAULT 0.0,
@@ -166,6 +184,10 @@ def init_database() -> None:
         salles_dediees JSONB DEFAULT '[]'::jsonb,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
+
+    ALTER TABLE consultation_types ADD COLUMN IF NOT EXISTS type_consultation TEXT DEFAULT 'Consultation';
+    ALTER TABLE consultation_types ADD COLUMN IF NOT EXISTS transmettre_hl7 BOOLEAN DEFAULT FALSE;
+
 
     -- Insertion par défaut de la clinique
     INSERT INTO clinic_info (id, nom_raison_sociale)
@@ -177,6 +199,9 @@ def init_database() -> None:
     ON CONFLICT (nom) DO NOTHING;
 
     INSERT INTO ref_modalites (nom) VALUES ('Présentiel'), ('Urgence'), ('Contrôle'), ('Téléconsultation')
+    ON CONFLICT (nom) DO NOTHING;
+
+    INSERT INTO ref_types_consultation (nom) VALUES ('Consultation'), ('Control')
     ON CONFLICT (nom) DO NOTHING;
     
     -- Table pour le personnel et corps médical
@@ -247,6 +272,7 @@ def init_database() -> None:
     );
 
     ALTER TABLE treating_doctors ADD COLUMN IF NOT EXISTS commune TEXT DEFAULT '';
+    ALTER TABLE treating_doctors ADD COLUMN IF NOT EXISTS specialite TEXT DEFAULT '';
         
         -- Table des utilisateurs et matrice des permissions
     CREATE TABLE IF NOT EXISTS users (
@@ -278,6 +304,8 @@ def init_database() -> None:
     ON CONFLICT (login) DO NOTHING;
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS specialites_autorisees JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS plannings_rdv_autorises JSONB;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         
         -- 1. Table des sessions actives
     CREATE TABLE IF NOT EXISTS user_sessions (
@@ -337,12 +365,46 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS specialites_autorisees JSONB DEFAULT 
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS mwl_worklist_items (
+        id SERIAL PRIMARY KEY,
+        patient_id INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+        passage_id INT NOT NULL REFERENCES patient_passages(id) ON DELETE CASCADE,
+        act_index INT NOT NULL,
+        accession_number TEXT NOT NULL DEFAULT '',
+        requested_procedure_id TEXT NOT NULL DEFAULT '',
+        procedure_description TEXT NOT NULL DEFAULT '',
+        modality TEXT NOT NULL DEFAULT '',
+        scheduled_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        scheduled_time TEXT NOT NULL DEFAULT '',
+        station_ae_title TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'SCHEDULED',
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (passage_id, act_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mwl_worklist_date_modality
+        ON mwl_worklist_items (scheduled_date, modality, enabled);
+
+    CREATE TABLE IF NOT EXISTS mwl_station_titles (
+        id SERIAL PRIMARY KEY,
+        ae_title TEXT NOT NULL UNIQUE,
+        designation TEXT NOT NULL DEFAULT '',
+        modality TEXT NOT NULL DEFAULT '',
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
     -- Planning des rendez-vous, lié aux référentiels et au passage créé à l'accueil.
     CREATE TABLE IF NOT EXISTS appointments (
         id SERIAL PRIMARY KEY,
-        id_patient INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+        id_patient INT REFERENCES patients(id) ON DELETE SET NULL,
+        patient_nom_saisi TEXT NOT NULL DEFAULT '',
         id_praticien INT REFERENCES clinic_staff(id) ON DELETE SET NULL,
         specialite TEXT NOT NULL,
+        type_examen_id INT REFERENCES consultation_types(id) ON DELETE SET NULL,
+        type_examen TEXT NOT NULL DEFAULT '',
         salle_id INT REFERENCES rooms(id) ON DELETE SET NULL,
         date_rdv DATE NOT NULL,
         heure_debut TIME NOT NULL,
@@ -356,12 +418,46 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS specialites_autorisees JSONB DEFAULT 
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         CHECK (heure_fin > heure_debut)
     );
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS type_examen_id INT REFERENCES consultation_types(id) ON DELETE SET NULL;
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS type_examen TEXT NOT NULL DEFAULT '';
+    ALTER TABLE appointments ALTER COLUMN id_patient DROP NOT NULL;
+    ALTER TABLE appointments ADD COLUMN IF NOT EXISTS patient_nom_saisi TEXT NOT NULL DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_appointments_date_time
         ON appointments (date_rdv, heure_debut);
     CREATE INDEX IF NOT EXISTS idx_appointments_practitioner_date
         ON appointments (id_praticien, date_rdv, heure_debut);
     CREATE INDEX IF NOT EXISTS idx_appointments_room_date
         ON appointments (salle_id, date_rdv, heure_debut);
+
+    -- Plannings hebdomadaires par spécialité : plusieurs segments par journée sont possibles.
+    CREATE TABLE IF NOT EXISTS appointment_specialty_schedules (
+        id SERIAL PRIMARY KEY,
+        specialite TEXT NOT NULL,
+        jour_semaine SMALLINT NOT NULL CHECK (jour_semaine BETWEEN 0 AND 6),
+        jours_semaine SMALLINT[] NOT NULL DEFAULT ARRAY[0]::SMALLINT[],
+        heure_debut TIME NOT NULL,
+        heure_fin TIME NOT NULL,
+        intervalle_minutes SMALLINT NOT NULL CHECK (intervalle_minutes BETWEEN 5 AND 240),
+        capacite_patients SMALLINT NOT NULL DEFAULT 1 CHECK (capacite_patients BETWEEN 1 AND 500),
+        actif BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        CHECK (heure_fin > heure_debut),
+        UNIQUE (specialite, jour_semaine, heure_debut, heure_fin)
+    );
+    ALTER TABLE appointment_specialty_schedules
+        ADD COLUMN IF NOT EXISTS jours_semaine SMALLINT[];
+    UPDATE appointment_specialty_schedules
+        SET jours_semaine=ARRAY[jour_semaine]::SMALLINT[]
+        WHERE jours_semaine IS NULL;
+    ALTER TABLE appointment_specialty_schedules
+        ALTER COLUMN jours_semaine SET DEFAULT ARRAY[0]::SMALLINT[];
+    ALTER TABLE appointment_specialty_schedules
+        ALTER COLUMN jours_semaine SET NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_appointment_specialty_schedules_lookup
+        ON appointment_specialty_schedules (specialite, jour_semaine, actif);
+    CREATE INDEX IF NOT EXISTS idx_appointment_specialty_schedules_days_gin
+        ON appointment_specialty_schedules USING GIN (jours_semaine);
         
 
 -- Table d'archivage des consultations cliniques et du DME
@@ -405,7 +501,108 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS specialites_autorisees JSONB DEFAULT 
     ALTER TABLE patient_prescriptions ADD COLUMN IF NOT EXISTS id_consultation INT REFERENCES patient_dme_records(id) ON DELETE CASCADE;
     CREATE INDEX IF NOT EXISTS idx_patient_prescriptions_scope ON patient_prescriptions (id_patient, id_passage, id_consultation);
 
+    -- Consommations réelles de médicaments et dispositifs médicaux, liées à la consultation.
+    CREATE TABLE IF NOT EXISTS patient_consumptions (
+        id SERIAL PRIMARY KEY,
+        id_patient INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+        id_passage INT NOT NULL REFERENCES patient_passages(id) ON DELETE CASCADE,
+        id_consultation INT REFERENCES patient_dme_records(id) ON DELETE SET NULL,
+        type_produit TEXT NOT NULL CHECK (type_produit IN ('Médicament', 'Dispositif médical')),
+        nom_produit TEXT NOT NULL,
+        quantite NUMERIC(12,3) NOT NULL CHECK (quantite > 0),
+        unite TEXT NOT NULL,
+        salle_id INT REFERENCES rooms(id) ON DELETE SET NULL,
+        service TEXT NOT NULL,
+        utilisateur_id INT REFERENCES users(id) ON DELETE SET NULL,
+        utilisateur TEXT NOT NULL DEFAULT '',
+        lot TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        consomme_le TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_patient_consumptions_scope ON patient_consumptions (id_patient, id_passage, id_consultation);
+    CREATE INDEX IF NOT EXISTS idx_patient_consumptions_reporting ON patient_consumptions (consomme_le, utilisateur, service, salle_id);
+
+    -- Répertoire des entreprises et conventions de la filiale Kacel Job.
+    CREATE TABLE IF NOT EXISTS kacel_job_companies (
+        id SERIAL PRIMARY KEY,
+        designation TEXT NOT NULL UNIQUE,
+        adresse TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL DEFAULT '',
+        telephone TEXT NOT NULL DEFAULT '',
+        contact TEXT NOT NULL DEFAULT '',
+        secteur_activite TEXT NOT NULL DEFAULT '',
+        observation TEXT NOT NULL DEFAULT '',
+        actif BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS kacel_job_conventions (
+        id SERIAL PRIMARY KEY,
+        entreprise_id INT NOT NULL REFERENCES kacel_job_companies(id) ON DELETE CASCADE,
+        reference TEXT NOT NULL DEFAULT '',
+        designation TEXT NOT NULL,
+        date_debut DATE,
+        date_fin DATE,
+        statut TEXT NOT NULL DEFAULT 'Brouillon',
+        conditions TEXT NOT NULL DEFAULT '',
+        observation TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_kacel_job_conventions_company ON kacel_job_conventions (entreprise_id, date_fin);
+    CREATE INDEX IF NOT EXISTS idx_kacel_job_conventions_status ON kacel_job_conventions (statut, date_fin);
+    CREATE TABLE IF NOT EXISTS kacel_job_employees (
+        id SERIAL PRIMARY KEY,
+        entreprise_id INT NOT NULL REFERENCES kacel_job_companies(id) ON DELETE CASCADE,
+        nom TEXT NOT NULL,
+        prenom TEXT NOT NULL,
+        date_naissance DATE,
+        date_embauche DATE,
+        poste TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_kacel_job_employees_company
+        ON kacel_job_employees (entreprise_id, nom, prenom);
+    ALTER TABLE kacel_job_companies ADD COLUMN IF NOT EXISTS representant TEXT NOT NULL DEFAULT '';
+    ALTER TABLE kacel_job_companies ADD COLUMN IF NOT EXISTS rc TEXT NOT NULL DEFAULT '';
+    ALTER TABLE kacel_job_companies ADD COLUMN IF NOT EXISTS nif TEXT NOT NULL DEFAULT '';
+    ALTER TABLE kacel_job_companies ADD COLUMN IF NOT EXISTS art TEXT NOT NULL DEFAULT '';
+    ALTER TABLE kacel_job_conventions ADD COLUMN IF NOT EXISTS effectif_contractuel INT NOT NULL DEFAULT 0;
+    ALTER TABLE kacel_job_conventions ADD COLUMN IF NOT EXISTS taille_entreprise TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS kacel_job_convention_tariffs (
+        id SERIAL PRIMARY KEY,
+        convention_id INT NOT NULL REFERENCES kacel_job_conventions(id) ON DELETE CASCADE,
+        code TEXT NOT NULL,
+        categorie TEXT NOT NULL DEFAULT '',
+        designation TEXT NOT NULL,
+        mode_tarif TEXT NOT NULL DEFAULT 'fixed',
+        configuration JSONB NOT NULL DEFAULT '{}'::jsonb,
+        description TEXT NOT NULL DEFAULT '',
+        ordre INT NOT NULL DEFAULT 0,
+        personnalisee BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (convention_id, code)
+    );
+    CREATE INDEX IF NOT EXISTS idx_kacel_job_tariffs_convention
+        ON kacel_job_convention_tariffs (convention_id, ordre, id);
+    CREATE TABLE IF NOT EXISTS kacel_job_convention_categories (
+        id SERIAL PRIMARY KEY,
+        convention_id INT NOT NULL REFERENCES kacel_job_conventions(id) ON DELETE CASCADE,
+        nom TEXT NOT NULL,
+        ordre INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (convention_id, nom)
+    );
+    CREATE INDEX IF NOT EXISTS idx_kacel_job_categories_convention
+        ON kacel_job_convention_categories (convention_id, ordre, id);
+
     """
+    from modules.exam_requests_core import SCHEMA as EXAM_REQUESTS_SCHEMA
+    query_schema += EXAM_REQUESTS_SCHEMA
     try:
         with get_db_cursor() as cur:
             cur.execute(query_schema)
