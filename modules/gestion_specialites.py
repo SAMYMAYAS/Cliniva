@@ -814,7 +814,10 @@ def render_html() -> str:
                         <select id="actCategorie" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none focus:border-brand-neon bg-slate-50 dark:bg-black/30 text-slate-800 dark:text-white font-medium"></select>
                     </div>
                     <div>
-                        <label class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">Spécialité *</label>
+                        <div class="flex items-center justify-between mb-1">
+                            <label for="actSpecialite" class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">Discipline / spécialité *</label>
+                            <button type="button" onclick="openSpecialiteModal()" class="text-[10px] font-bold text-emerald-600 hover:underline">+ Ajouter une discipline</button>
+                        </div>
                         <select id="actSpecialite" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none focus:border-brand-neon bg-slate-50 dark:bg-black/30 text-slate-800 dark:text-white font-medium"></select>
                     </div>
                 </div>
@@ -1157,9 +1160,13 @@ def render_html() -> str:
                 const sSpe = document.getElementById('actSpecialite');
                 const sMod = document.getElementById('actModalite');
                 const sConsultType = document.getElementById('actTypeConsultation');
+                const previousSpecialite = sSpe?.value || '';
 
                 sCat.innerHTML = (globalData.references.categories || []).map(c => `<option value="${c.nom}">${c.nom}</option>`).join('');
                 sSpe.innerHTML = (globalData.specialites || []).map(s => `<option value="${s.nom}">${s.nom}</option>`).join('');
+                if (previousSpecialite && [...sSpe.options].some(option => option.value === previousSpecialite)) {
+                    sSpe.value = previousSpecialite;
+                }
                 sMod.innerHTML = (globalData.references.modalites || []).map(m => `<option value="${m.nom}">${m.nom}</option>`).join('');
                 if (sConsultType) sConsultType.innerHTML = (globalData.references.types_consultation || []).map(t => `<option value="${t.nom}">${t.nom}</option>`).join('');
 
@@ -1232,17 +1239,20 @@ def render_html() -> str:
                     salles_dediees: rooms
                 };
 
-                const res = await fetch('/api/specialites-module/consultation/save', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                }).then(r => r.json());
-
-                if (res.success) {
+                try {
+                    const response = await fetch('/api/specialites-module/consultation/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const res = await response.json().catch(() => ({}));
+                    if (!response.ok || !res.success) {
+                        throw new Error(res.message || res.detail || 'Impossible d’enregistrer cet acte.');
+                    }
                     closeConsultationModal();
-                    loadSpecialitesModule();
-                } else {
-                    alert(res.message);
+                    await loadSpecialitesModule();
+                } catch (error) {
+                    alert(error.message || 'Une erreur est survenue pendant l’enregistrement.');
                 }
             };
 
