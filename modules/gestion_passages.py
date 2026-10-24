@@ -3622,35 +3622,7 @@ def render_html(mode: str = "general") -> str:
                 const select = document.getElementById('passageTypeSelect');
                 const input = document.getElementById('prestationSearchInput');
                 const selectedType = select?.value || '';
-                const normalizedSelected = normalizePassageSpecialite(selectedType);
-
-                const incompatibleIndexes = currentPassageActs.reduce((indexes, act, index) => {{
-                    let actSpecialite = act.specialite || '';
-                    if (!actSpecialite) {{
-                        const matchingConsultation = (receptionInitData.consultations || []).find(c =>
-                            normalizePassageSpecialite(c.designation) === normalizePassageSpecialite(act.nom)
-                        );
-                        actSpecialite = matchingConsultation?.specialite || '';
-                    }}
-                    const normalizedAct = normalizePassageSpecialite(actSpecialite);
-                    if (normalizedAct && normalizedAct !== normalizedSelected) indexes.push(index);
-                    return indexes;
-                }}, []);
-
-                if (incompatibleIndexes.length) {{
-                    const removedNames = incompatibleIndexes.map(index => currentPassageActs[index].nom).filter(Boolean);
-                    const confirmed = window.confirm(
-                        `Le tableau contient ${{incompatibleIndexes.length}} prestation(s) d'une autre discipline : ${{removedNames.join(', ')}}.\\n\\nLes retirer pour continuer avec « ${{selectedType}} » ?`
-                    );
-                    if (!confirmed) {{
-                        if (select && currentPassageTypeValue) select.value = currentPassageTypeValue;
-                        return;
-                    }}
-                    const incompatibleSet = new Set(incompatibleIndexes);
-                    currentPassageActs = currentPassageActs.filter((_, index) => !incompatibleSet.has(index));
-                    renderPassageActsTable();
-                }}
-
+                // Le type filtre les prochains actes; les actes déjà ajoutés restent dans le passage.
                 currentPassageTypeValue = selectedType;
                 selectedPrestationTemp = null;
                 if (input) input.value = '';
