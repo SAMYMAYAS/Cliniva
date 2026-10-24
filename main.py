@@ -804,6 +804,12 @@ async def app_lifespan(_app: FastAPI):
         voip_server.ensure_schema()
         voip_schema_ready = True
         if load_app_configuration().get("server_mode") == "local":
+            try:
+                from app.client_update_service import publish_client_release
+
+                publish_client_release(BASE_DIR, STATIC_DIR)
+            except Exception:
+                logger.exception("Impossible de publier la mise à jour des postes clients")
             voip_server.autostart()
         if load_app_configuration().get("server_mode") == "local":
             start_backup_scheduler()
