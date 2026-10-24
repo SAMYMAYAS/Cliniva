@@ -1685,7 +1685,6 @@ def render_html(mode: str = "general") -> str:
                     #passageModal .passage-questionnaire-section:hover,
                     #passageModal .passage-questionnaire-section :hover {{ transform:none !important; translate:none !important; scale:1 !important; }}
                     #passageModal .passage-questionnaire-section {{ box-sizing:border-box; }}
-                    #view-reception[data-view-mode="radiologie"] .passage-style-switch {{ display:none; }}
                     #view-reception[data-view-mode="radiologie"] #passagesDataTable {{ min-width:1100px; border-collapse:collapse; }}
                     #view-reception[data-view-mode="radiologie"] #passagesDataTable thead {{ background:#fff; }}
                     #view-reception[data-view-mode="radiologie"] #passagesDataTable thead th {{ color:#94a3b8; font-size:9px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; border-bottom:1px solid #e2e8f0; }}
@@ -1706,6 +1705,15 @@ def render_html(mode: str = "general") -> str:
                     #view-reception[data-view-mode="radiologie"] #passagesDataTable details > summary {{ color:#fff; background:#7562e5; border:0; border-radius:9px; padding:9px 13px; box-shadow:0 3px 8px #7562e544; }}
                     #view-reception[data-view-mode="radiologie"] #passagesDataTable .radio-menu-item {{ display:flex; width:100%; align-items:center; gap:8px; padding:8px 10px; border-radius:8px; text-align:left; font-size:11px; color:#334155; }}
                     #view-reception[data-view-mode="radiologie"] #passagesDataTable .radio-menu-item:hover {{ background:#f1f5f9; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable[data-style="essential"] {{ min-width:1100px; border-spacing:0; border-collapse:collapse; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable[data-style="essential"] thead {{ background:#fff; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable[data-style="essential"] thead th {{ padding:11px 14px; border:0; border-bottom:1px solid #e3e7ea; color:#8793a0; font-size:9px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable[data-style="essential"] tbody tr.radiology-passage-row {{ background:#fff; border-bottom:1px solid #e5e9ed; transition:background .15s ease; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable[data-style="essential"] tbody tr.radiology-passage-row:nth-of-type(4n+1) {{ background:#e9ecef; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable[data-style="essential"] tbody tr.radiology-passage-row:nth-of-type(4n+3) {{ background:#fff; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable[data-style="essential"] tbody tr.radiology-passage-row:hover {{ background:#e3eee8; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable[data-style="essential"] tbody tr.radiology-passage-row td {{ padding:9px 14px; border:0; background:transparent; color:#263849; vertical-align:middle; }}
+                    #view-reception[data-view-mode="radiologie"] #passagesDataTable[data-style="essential"] tbody tr.passage-expand-details td {{ padding:8px 14px; border-bottom:1px solid #e5e9ed; background:#f8fafc; }}
                     #passagesDataTable[data-style="cards"] {{ border-spacing: 0 9px; }}
                     #passagesDataTable[data-style="cards"] thead {{ background: #334155; }}
                     #passagesDataTable[data-style="cards"] thead tr {{ color: #fff; }}
