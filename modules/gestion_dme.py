@@ -2017,12 +2017,6 @@ class DmeManager:
             # Remplacement garanti des 8 variables dans le Word
             replace_docx_variables_robust(chemin_final_docx, replacements)
 
-            try:
-                if platform.system() == "Windows":
-                    os.startfile(chemin_final_docx)
-            except Exception:
-                pass
-
         else:
             file_name = f"{base_name}.html"
             for k, v in replacements.items():
@@ -2586,21 +2580,23 @@ async def api_generate_cr(payload: Dict[str, Any], request: Request):
 async def api_open_word_cr(payload: Dict[str, Any]):
     record_id = payload.get("id")
     cr = dme_manager.get_cr_record_by_id(record_id)
-    if cr:
-        require_consultation_unlocked(cr.get("id_passage"))
     if not cr or not cr.get("chemin_docx") or not os.path.exists(cr["chemin_docx"]):
         raise HTTPException(status_code=404, detail="Fichier Word introuvable sur le disque.")
 
-    try:
-        if platform.system() == "Windows":
-            os.startfile(cr["chemin_docx"])
-        elif platform.system() == "Darwin":
-            subprocess.call(["open", cr["chemin_docx"]])
-        else:
-            subprocess.call(["xdg-open", cr["chemin_docx"]])
-        return {"success": True, "message": "Ouvert dans Microsoft Word."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur d'ouverture : {str(e)}")
+    return {"success": True, "download_url": f"/api/dme/cr/download-word/{int(record_id)}",
+            "message": "Le compte rendu est prêt à être ouvert sur le poste client."}
+
+
+@dme_router.get("/cr/download-word/{record_id}")
+async def api_download_word_cr(record_id: int):
+    """Envoie le DOCX au poste connecté pour ouverture locale dans Office Word."""
+    cr = dme_manager.get_cr_record_by_id(record_id)
+    path = str((cr or {}).get("chemin_docx") or "")
+    if not cr or not path or not path.lower().endswith(".docx") or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Fichier Word introuvable sur le serveur.")
+    filename = os.path.basename(path)
+    return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        filename=filename, headers={"Cache-Control": "private, no-store"})
 
 
 @dme_router.get("/cr/view-pdf/{record_id}")
@@ -6893,7 +6889,8 @@ def _render_html() -> str:
                         if (res.type_modele === 'HTML' && res.record_id) {
                             openCrPreviewModal(res.record_id);
                         } else if (res.type_modele === 'Word') {
-                            alert(`✅ Compte rendu Word généré : ${res.nom_fichier}\\nOuvert automatiquement dans Microsoft Word.`);
+                            const opened = await openWordCrDocument(res.record_id);
+                            if (opened) alert(`✅ Compte rendu Word généré : ${res.nom_fichier}\\nOuvert sur ce poste dans Microsoft Word.`);
                         }
                     } else {
                         alert(res.message);
@@ -6910,17 +6907,33 @@ def _render_html() -> str:
 
             window.openWordCrDocument = async function(recordId) {
                 try {
-                    const res = await fetch('/api/dme/cr/open-word', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: recordId })
-                    }).then(r => r.json());
-
-                    if (!res.success) {
-                        alert("❌ " + res.message);
+                    const response = await fetch(`/api/dme/cr/download-word/${Number(recordId)}`, {cache: 'no-store'});
+                    if (!response.ok) {
+                        const detail = await response.json().catch(() => ({}));
+                        throw new Error(detail.detail || 'Le fichier Word est introuvable sur le serveur.');
                     }
+                    const bridge = window.pywebview?.api;
+                    if (!bridge?.client_open_word_document) {
+                        const link = document.createElement('a');
+                        link.href = URL.createObjectURL(await response.blob());
+                        link.download = `Compte_rendu_${Number(recordId)}.docx`;
+                        link.click();
+                        setTimeout(() => URL.revokeObjectURL(link.href), 30000);
+                        return true;
+                    }
+                    const buffer = await response.arrayBuffer();
+                    if (!buffer.byteLength || buffer.byteLength > 100 * 1024 * 1024) throw new Error('Le document est vide ou dépasse 100 Mo.');
+                    let binary = '';
+                    const bytes = new Uint8Array(buffer);
+                    const chunkSize = 0x8000;
+                    for (let offset = 0; offset < bytes.length; offset += chunkSize) binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+                    const dataUrl = 'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,' + btoa(binary);
+                    const result = await bridge.client_open_word_document(dataUrl, `Compte_rendu_${Number(recordId)}.docx`);
+                    if (!result?.ok) throw new Error(result?.error || 'Microsoft Word n’a pas pu ouvrir le compte rendu.');
+                    return true;
                 } catch(e) {
-                    alert("Erreur lors de l'ouverture du document Word.");
+                    alert("Erreur lors de l'ouverture du document Word : " + (e.message || 'erreur inconnue'));
+                    return false;
                 }
             };
 

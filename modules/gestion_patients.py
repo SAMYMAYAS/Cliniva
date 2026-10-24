@@ -2877,7 +2877,9 @@ def render_html() -> str:
                 select.innerHTML = '<option value="">Détection en cours...</option>';
 
                 try {{
-                    const res = await fetch('/api/patients-module/scanner/detect').then(r => r.json());
+                    const bridge = window.pywebview?.api;
+                    if (!bridge?.client_scanner_detect) throw new Error('Ouvrez Cliniva avec le client Cliniva de ce poste pour utiliser son scanner.');
+                    const res = await bridge.client_scanner_detect();
                     const scanners = res.scanners || [];
                     if (scanners.length > 0) {{
                         select.innerHTML = scanners.map(s => `<option value="${{s.id}}">🖨️ ${{s.name}}</option>`).join('');
@@ -2886,6 +2888,8 @@ def render_html() -> str:
                     }}
                 }} catch (e) {{
                     document.getElementById('noScannerAlert').classList.remove('hidden');
+                    const hint = document.querySelector('#noScannerAlert p');
+                    if (hint) hint.textContent = e.message || 'Scanner local indisponible. Vérifiez son branchement et son pilote WIA.';
                 }}
             }};
 
@@ -2898,11 +2902,9 @@ def render_html() -> str:
                 statusMsg.classList.remove('hidden');
 
                 try {{
-                    const res = await fetch('/api/patients-module/scanner/acquire', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ device_id: document.getElementById('scannerDeviceSelect').value }})
-                    }}).then(r => r.json());
+                    const bridge = window.pywebview?.api;
+                    if (!bridge?.client_scanner_acquire) throw new Error('Le scanner client nécessite le lanceur Cliniva sur ce poste.');
+                    const res = await bridge.client_scanner_acquire(document.getElementById('scannerDeviceSelect').value);
 
                     if (res.success && res.image_data) {{
                         const typeDoc = document.getElementById('patientTypePiece').value;
@@ -2917,7 +2919,7 @@ def render_html() -> str:
                         alert(res.message || "Erreur de numérisation.");
                     }}
                 }} catch (err) {{
-                    alert("Erreur lors du scan.");
+                    alert(err.message || "Erreur lors du scan.");
                 }} finally {{
                     statusMsg.classList.add('hidden');
                 }}

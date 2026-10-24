@@ -182,6 +182,112 @@ class ClientDicomServicesBridge:
         self._pacs_send_jobs_lock = threading.Lock()
         self._pacs_send_processes: Dict[str, Any] = {}
 
+    def client_scanner_detect(self) -> Dict[str, Any]:
+        """Liste les scanners WIA connectés au poste qui affiche Cliniva."""
+        if sys.platform != "win32":
+            return {"success": False, "scanners": [], "message": "Le scan matériel est disponible sur Windows."}
+        pythoncom = None
+        try:
+            import pythoncom as _pythoncom
+            import win32com.client
+            pythoncom = _pythoncom
+            pythoncom.CoInitialize()
+            manager = win32com.client.Dispatch("WIA.DeviceManager")
+            scanners = []
+            for info in manager.DeviceInfos:
+                try:
+                    name = str(info.Properties("Name").Value or "Scanner WIA")
+                    scanners.append({"id": str(info.DeviceID), "name": name})
+                except Exception:
+                    continue
+            return {"success": True, "scanners": scanners,
+                    "message": "Scanner(s) détecté(s) sur ce poste." if scanners else "Aucun scanner WIA détecté sur ce poste."}
+        except Exception as exc:
+            logger.info("Détection du scanner client indisponible : %s", exc)
+            return {"success": False, "scanners": [], "message": "WIA est indisponible sur ce poste. Vérifiez le pilote du scanner et pywin32."}
+        finally:
+            if pythoncom:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+    def client_scanner_acquire(self, device_id: str = "") -> Dict[str, Any]:
+        """Acquiert une page sur le scanner du poste et la renvoie au formulaire web."""
+        if sys.platform != "win32":
+            return {"success": False, "message": "Le scan matériel est disponible sur Windows."}
+        pythoncom = None
+        temporary_path = None
+        try:
+            import base64
+            import tempfile
+            import pythoncom as _pythoncom
+            import win32com.client
+            pythoncom = _pythoncom
+            pythoncom.CoInitialize()
+            manager = win32com.client.Dispatch("WIA.DeviceManager")
+            device_info = next((item for item in manager.DeviceInfos
+                                if str(item.DeviceID) == str(device_id)), None) if device_id else None
+            if device_info is None:
+                return {"success": False, "message": "Le scanner sélectionné n'est plus disponible."}
+            device = device_info.Connect()
+            if device.Items.Count < 1:
+                return {"success": False, "message": "Le scanner ne contient aucun élément de numérisation."}
+            image = device.Items.Item(1).Transfer("{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}")
+            fd, temporary_path = tempfile.mkstemp(prefix="cliniva_scan_", suffix=".jpg")
+            os.close(fd)
+            image.SaveFile(temporary_path)
+            with open(temporary_path, "rb") as source:
+                content = source.read(25 * 1024 * 1024 + 1)
+            if not content or len(content) > 12 * 1024 * 1024:
+                return {"success": False, "message": "Le scan est vide ou dépasse la limite de 12 Mo. Réduisez la résolution du scanner."}
+            encoded = base64.b64encode(content).decode("ascii")
+            return {"success": True, "image_data": "data:image/jpeg;base64," + encoded,
+                    "name": Path(temporary_path).name}
+        except Exception as exc:
+            logger.warning("Échec de numérisation sur le poste client : %s", exc)
+            return {"success": False, "message": f"Le scanner n'a pas pu numériser le document : {exc}"}
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
+            if pythoncom:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+    def client_open_word_document(self, docx_data_url: str, suggested_name: str = "Compte_rendu.docx") -> Dict[str, Any]:
+        """Télécharge une copie locale du document reçu et l'ouvre avec Office/Word."""
+        try:
+            import base64
+            if sys.platform != "win32":
+                return {"ok": False, "error": "L'ouverture dans Microsoft Word nécessite un poste Windows."}
+            header, separator, encoded = str(docx_data_url or "").partition(",")
+            expected = "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64"
+            if not separator or header.strip().lower() != expected:
+                return {"ok": False, "error": "Le document Word reçu est invalide."}
+            content = base64.b64decode(encoded, validate=True)
+            if not content or len(content) > 100 * 1024 * 1024:
+                return {"ok": False, "error": "Le document Word est vide ou dépasse 100 Mo."}
+            name = os.path.basename(str(suggested_name or "Compte_rendu.docx"))
+            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .") or "Compte_rendu.docx"
+            if not name.lower().endswith(".docx"):
+                name += ".docx"
+            target_dir = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Cliniva" / "Documents"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            output_path = target_dir / name
+            if output_path.exists():
+                output_path = target_dir / f"{output_path.stem}_{int(time.time())}.docx"
+            output_path.write_bytes(content)
+            os.startfile(str(output_path))
+            return {"ok": True, "path": str(output_path)}
+        except Exception as exc:
+            logger.exception("Impossible d'ouvrir le document Word sur le poste client")
+            return {"ok": False, "error": str(exc)}
+
     def _service(self):
         if self._print_server is None:
             from app.dicom_print_service import DicomPrintServer

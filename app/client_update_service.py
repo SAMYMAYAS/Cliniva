@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger("ClinivaClientUpdates")
 
 PACKAGE_ROOTS = ("app", "modules", "templates", "static", "resources", "worklist", "Sip_app")
-PACKAGE_FILES = ("main.py", "database.py", "pip.txt", "RCP.py")
+PACKAGE_FILES = ("main.py", "client.py", "database.py", "pip.txt", "RCP.py")
 CLIENT_DISTRIBUTIONS = (
     "fastapi", "uvicorn", "jinja2", "pydantic", "psycopg2-binary", "pynetdicom",
     "pydicom", "pylibjpeg", "pylibjpeg-libjpeg", "pylibjpeg-openjpeg", "pylibjpeg-rle",

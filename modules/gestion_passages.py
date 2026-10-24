@@ -4057,7 +4057,9 @@ def render_html(mode: str = "general") -> str:
                 if (modal) modal.classList.remove('hidden');
 
                 try {{
-                    const res = await fetch('/api/patients-module/scanner/detect').then(r => r.json());
+                    const bridge = window.pywebview?.api;
+                    if (!bridge?.client_scanner_detect) throw new Error('Ouvrez Cliniva avec le client Cliniva de ce poste pour utiliser son scanner.');
+                    const res = await bridge.client_scanner_detect();
                     const scanners = res.scanners || [];
                     if (scanners.length > 0) {{
                         select.innerHTML = scanners.map(s => `<option value="${{s.id}}">🖨️ ${{s.name}}</option>`).join('');
@@ -4066,6 +4068,7 @@ def render_html(mode: str = "general") -> str:
                         select.innerHTML = '<option value="">Aucun périphérique disponible</option>';
                     }}
                 }} catch (e) {{
+                    if (noScanner) {{ noScanner.classList.remove('hidden'); noScanner.querySelector('p').textContent = e.message || 'Scanner local indisponible. Vérifiez son branchement et son pilote WIA.'; }}
                     if (noScanner) noScanner.classList.remove('hidden');
                 }}
             }};
@@ -4085,11 +4088,9 @@ def render_html(mode: str = "general") -> str:
                 if (btnLaunch) btnLaunch.disabled = true;
 
                 try {{
-                    const res = await fetch('/api/patients-module/scanner/acquire', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ device_id: deviceSelect?.value || '' }})
-                    }}).then(r => r.json());
+                    const bridge = window.pywebview?.api;
+                    if (!bridge?.client_scanner_acquire) throw new Error('Le scanner client nécessite le lanceur Cliniva sur ce poste.');
+                    const res = await bridge.client_scanner_acquire(deviceSelect?.value || '');
 
                     if (res.success && res.image_data) {{
                         closeScannerDeviceModal();
@@ -4098,7 +4099,7 @@ def render_html(mode: str = "general") -> str:
                         alert(res.message || "Erreur lors de l'acquisition du scan.");
                     }}
                 }} catch (err) {{
-                    alert("Erreur de communication avec le scanneur.");
+                    alert(err.message || "Erreur de communication avec le scanneur.");
                 }} finally {{
                     if (statusMsg) statusMsg.classList.add('hidden');
                     if (btnLaunch) btnLaunch.disabled = false;

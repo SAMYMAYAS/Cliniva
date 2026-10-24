@@ -144,7 +144,7 @@ def update_client_sources(server_url: str, app_dir: Path) -> tuple[str, str | No
         staging = temp_root / "staging"
         staging.mkdir()
         allowed_roots = {"app", "modules", "templates", "static", "resources", "worklist", "Sip_app"}
-        allowed_files = {"main.py", "database.py", "pip.txt", "RCP.py", "requirements-lock.txt"}
+        allowed_files = {"main.py", "client.py", "database.py", "pip.txt", "RCP.py", "requirements-lock.txt"}
         with zipfile.ZipFile(archive_path) as package:
             for member in package.infolist():
                 member_path = Path(member.filename)
