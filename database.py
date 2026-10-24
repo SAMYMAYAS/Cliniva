@@ -362,8 +362,13 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         documents_scannes JSONB DEFAULT '[]'::jsonb,
         statut TEXT DEFAULT 'En attente',
         medecin_traitant_id INT REFERENCES treating_doctors(id) ON DELETE SET NULL,
+        consultation_utilisateur TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Indique à tous les postes quel utilisateur a démarré la consultation active.
+    ALTER TABLE patient_passages
+        ADD COLUMN IF NOT EXISTS consultation_utilisateur TEXT NOT NULL DEFAULT '';
 
     CREATE TABLE IF NOT EXISTS mwl_worklist_items (
         id SERIAL PRIMARY KEY,

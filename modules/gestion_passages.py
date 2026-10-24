@@ -149,6 +149,7 @@ class ReceptionManager:
                                   p.questionnaire_json,
                                   p.documents_scannes,
                                   p.statut,
+                                  p.consultation_utilisateur,
                                   p.medecin_traitant_id,
                                   COALESCE(pat.nom, 'Patient')          as nom,
                                   COALESCE(pat.prenom, '')              as prenom,
@@ -218,6 +219,7 @@ class ReceptionManager:
                                   p.questionnaire_json,
                                   p.documents_scannes,
                                   p.statut,
+                                  p.consultation_utilisateur,
                                   p.medecin_traitant_id,
                                   COALESCE(pat.nom, 'Patient')                             as nom,
                                   COALESCE(pat.prenom, '')                                 as prenom,
@@ -3063,6 +3065,10 @@ def render_html(mode: str = "general") -> str:
                 const passageText = status === 'En attente' ? 'En attente' : (status === 'En cours' ? 'En cours' : 'Passage fait');
                 const paymentText = refund ? 'Remboursé' : (due > 0.009 ? (paid > 0 ? 'Régler' : 'Non payé') : 'Réglé');
                 const paymentClass = refund || paymentText === 'Non payé' ? 'radio-state-muted' : (paymentText === 'Régler' ? 'radio-state-passage' : 'radio-state-result');
+                const consultationOwner = status === 'En cours' ? String(p.consultation_utilisateur || '').trim() : '';
+                const consultationOwnerHtml = consultationOwner
+                    ? '<div class="mt-1 text-[10px] font-semibold text-sky-700"><i class="ph-bold ph-user-circle"></i> Consultation par ' + escapePassageDisplay(consultationOwner) + '</div>'
+                    : '';
                 const birth = String(p.date_naissance || '').slice(0, 10);
                 const birthText = birth && birth !== '-' ? new Date(birth + 'T00:00:00').toLocaleDateString('fr-FR') : 'Date de naissance inconnue';
                 const date = p.date_passage ? new Date(String(p.date_passage).slice(0, 10) + 'T00:00:00').toLocaleDateString('fr-FR') : '';
@@ -3084,7 +3090,7 @@ def render_html(mode: str = "general") -> str:
                     '<td class="radio-exam-cell"><div class="font-extrabold text-[15px] uppercase leading-tight text-slate-900">' + escapePassageDisplay(exam) +
                     '</div><div class="mt-1 text-xs font-bold text-red-600"><i class="ph-bold ph-user-circle"></i> ' + escapePassageDisplay(doctor) + (doctorSpecialty ? ' | Sp: ' + escapePassageDisplay(doctorSpecialty) : '') + '</div></td>' +
                     '<td class="text-center"><span class="radio-state ' + resultClass + '">' + resultText + '</span></td>' +
-                    '<td class="text-center"><span class="radio-state radio-state-passage">' + escapePassageDisplay(passageText) + '</span></td>' +
+                    '<td class="text-center"><span class="radio-state radio-state-passage">' + escapePassageDisplay(passageText) + '</span>' + consultationOwnerHtml + '</td>' +
                     '<td class="text-center"><span class="radio-state ' + paymentClass + '">' + escapePassageDisplay(paymentText) + '</span></td>' +
                     '<td class="text-right pr-3"><details class="passage-action-menu relative z-10 inline-block text-left" onclick="event.stopPropagation()" ontoggle="onPassageActionMenuToggle(this)" onmouseenter="keepPassageActionMenuOpen()" onmouseleave="schedulePassageActionMenuClose(this)"><summary class="list-none cursor-pointer select-none inline-flex items-center gap-2 text-[11px] font-bold"><span>Détails</span><i class="ph-bold ph-identification-card"></i><i class="ph-bold ph-caret-down text-[9px]"></i></summary><div class="passage-action-menu-panel absolute right-0 top-full z-[9999] min-w-48 p-1 rounded-xl border border-slate-200 bg-white shadow-xl" onmouseenter="keepPassageActionMenuOpen()" onmouseleave="schedulePassageActionMenuClose(this)">' + actions.join('') + '</div></details></td>';
             }}
@@ -3181,6 +3187,10 @@ def render_html(mode: str = "general") -> str:
                         const patientIdParam = Number(p.id_patient || 0);
                         const passageIdParam = Number(p.id_passage || 0);
                         const essentialState = String(p.statut || 'Non renseigné');
+                        const consultationOwner = essentialState === 'En cours' ? String(p.consultation_utilisateur || '').trim() : '';
+                        const consultationOwnerHtml = consultationOwner
+                            ? `<div class="mt-1 text-[10px] font-semibold text-sky-700 dark:text-sky-300"><i class="ph-bold ph-user-circle"></i> Consultation par ${{escapePassageDisplay(consultationOwner)}}</div>`
+                            : '';
                         const essentialStateTone = essentialState === 'En attente' ? 'bg-amber-100 text-amber-800' : (essentialState === 'En cours' ? 'bg-blue-100 text-blue-800' : (essentialState === 'Terminé' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700'));
                         const essentialStateIcon = essentialState === 'En attente' ? 'ph-clock' : (essentialState === 'En cours' ? 'ph-spinner-gap' : (essentialState === 'Terminé' ? 'ph-check-circle' : 'ph-info'));
 
@@ -3196,7 +3206,7 @@ def render_html(mode: str = "general") -> str:
                                 <div class="min-w-0">
                                     <div class="${{passageDisplayStyle === 'worklist' ? 'passage-worklist-patient-primary' : ''}}"><div class="${{passageDisplayStyle === 'worklist' ? 'passage-worklist-name' : (passageDisplayStyle === 'essential' ? 'passage-essential-name' : 'font-bold text-slate-800 dark:text-slate-100 text-xs')}} group-hover:text-brand-neon transition flex items-center gap-1">
                                         <span class="break-words">${{escapePassageDisplay([p.nom, p.prenom].filter(Boolean).join(' ') || 'Patient sans nom')}}</span>
-                                    </div><div class="${{passageDisplayStyle === 'worklist' ? '' : 'mt-1.5'}} passage-essential-patient-status"><span class="inline-flex px-2 py-0.5 rounded-full text-[9px] font-bold border ${{statutBadges[p.statut] || 'bg-slate-100 text-slate-600 border-slate-200'}}">${{p.statut || 'Statut inconnu'}}</span></div></div>
+                                    </div><div class="${{passageDisplayStyle === 'worklist' ? '' : 'mt-1.5'}} passage-essential-patient-status"><span class="inline-flex px-2 py-0.5 rounded-full text-[9px] font-bold border ${{statutBadges[p.statut] || 'bg-slate-100 text-slate-600 border-slate-200'}}">${{p.statut || 'Statut inconnu'}}</span></div>${{consultationOwnerHtml}}</div>
                                     <div class="${{passageDisplayStyle === 'worklist' ? 'mt-0.5' : 'mt-1'}} text-[10px] text-slate-500 font-mono break-all">${{p.telephone_1 || '-'}}</div>
                                 </div>
                                 </div>
@@ -4529,6 +4539,17 @@ def render_html(mode: str = "general") -> str:
                     iframe.contentWindow.print();
                 }}
             }};
+
+            // Les changements de statut et l'utilisateur exécutant doivent apparaître
+            // sur les autres postes sans demander un rechargement manuel de la page.
+            if (!window.receptionPassageRefreshTimer) {{
+                window.receptionPassageRefreshTimer = window.setInterval(() => {{
+                    const passageTable = document.getElementById('passages-table-body');
+                    if (!document.hidden && passageTable?.isConnected && typeof window.loadReceptionPassagesModule === 'function') {{
+                        window.loadReceptionPassagesModule();
+                    }}
+                }}, 15000);
+            }}
 
             loadReceptionPassagesModule();
         }})();

@@ -2128,11 +2128,17 @@ async def api_get_archived_consultation(patient_id: int, passage_id: int):
 
 @dme_router.post("/consultation/start")
 async def api_start_dme_consultation(payload: Dict[str, Any], request: Request):
+    user = get_current_user_optional(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expirée. Veuillez vous reconnecter.")
     dme_manager.ensure_dme_schema()
     patient_id = payload.get("id_patient")
     passage_id = payload.get("id_passage")
     if not patient_id or not passage_id:
         raise HTTPException(status_code=400, detail="Identifiants patient et passage obligatoires.")
+    user_fullname = " ".join(
+        part for part in (str(user.get("prenom") or "").strip(), str(user.get("nom") or "").strip()) if part
+    ) or str(user.get("login") or "Utilisateur connecté").strip()
     with get_db_cursor() as cursor:
         cursor.execute("SELECT id_patient FROM patient_passages WHERE id = %s FOR UPDATE;", (passage_id,))
         passage = cursor.fetchone()
@@ -2150,19 +2156,26 @@ async def api_start_dme_consultation(payload: Dict[str, Any], request: Request):
             raise HTTPException(status_code=409, detail="Cette consultation est déjà enregistrée en lecture seule.")
         if consultation:
             consultation_id = consultation["id"]
+            cursor.execute(
+                "UPDATE patient_dme_records SET praticien = %s WHERE id = %s;",
+                (user_fullname, consultation_id),
+            )
         else:
             cursor.execute("""
                 INSERT INTO patient_dme_records (id_patient, id_passage, praticien, verrouille)
-                VALUES (%s, %s, 'Dr', FALSE)
+                VALUES (%s, %s, %s, FALSE)
                 RETURNING id;
-            """, (patient_id, passage_id))
+            """, (patient_id, passage_id, user_fullname))
             consultation_id = cursor.fetchone()["id"]
         cursor.execute("""
             UPDATE patient_prescriptions
             SET id_consultation = %s
             WHERE id_patient = %s AND id_passage = %s AND id_consultation IS NULL;
         """, (consultation_id, patient_id, passage_id))
-        cursor.execute("UPDATE patient_passages SET statut = 'En cours' WHERE id = %s;", (passage_id,))
+        cursor.execute(
+            "UPDATE patient_passages SET statut = 'En cours', consultation_utilisateur = %s WHERE id = %s;",
+            (user_fullname, passage_id),
+        )
     track_action(request, "CONSULTATION_DEMARREE", f"Consultation démarrée pour le passage #{passage_id}")
     return {"success": True, "statut": "En cours", "id_consultation": consultation_id}
 
