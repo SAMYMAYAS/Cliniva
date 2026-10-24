@@ -691,7 +691,7 @@ def render_html() -> str:
                             : '<span class="px-2.5 py-1 rounded-xl text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-300 border border-amber-200 dark:border-amber-800/40">HTML A4</span>';
 
                         const actionBtn = t.type_modele === 'Word'
-                            ? `<button onclick="openWordTemplateById(${t.id}, '${t.designation.replace(/'/g, "\\'")}')" class="p-1.5 text-emerald-700 dark:text-brand-neon bg-brand-neon/10 hover:bg-brand-neon/20 rounded-xl font-bold text-[11px] inline-flex items-center gap-1"><i class="ph-bold ph-pencil-simple"></i> Word</button>`
+                            ? `<button onclick="openWordTemplateById(${t.id}, '${t.designation.replace(/'/g, "\\'")}')" class="p-1.5 text-emerald-700 dark:text-brand-neon bg-brand-neon/10 hover:bg-brand-neon/20 rounded-xl font-bold text-[11px] inline-flex items-center gap-1"><i class="ph-bold ph-pencil-simple"></i> Ouvrir Word</button><button onclick="uploadWordTemplateById(${t.id})" class="p-1.5 text-sky-700 dark:text-sky-300 bg-sky-500/10 hover:bg-sky-500/20 rounded-xl font-bold text-[11px] inline-flex items-center gap-1"><i class="ph-bold ph-upload-simple"></i> Synchroniser</button>`
                             : `<button onclick="openHtmlPrintPreview(${t.id})" class="p-1.5 text-sky-700 dark:text-sky-300 bg-sky-500/10 hover:bg-sky-500/20 rounded-xl font-bold text-[11px] inline-flex items-center gap-1"><i class="ph-bold ph-printer"></i> Imprimer / PDF</button>`;
 
                         tr.innerHTML = `
@@ -989,15 +989,57 @@ def render_html() -> str:
             };
 
             window.openWordTemplateById = async function(templateId, designation) {
-                const res = await fetch('/api/cr-templates/open-word', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: templateId })
-                }).then(r => r.json());
-
-                if (!res.success) {
-                    window.location.href = '/api/cr-templates/download-word/' + templateId;
+                try {
+                    const response = await fetch('/api/cr-templates/download-word/' + Number(templateId), {credentials: 'same-origin'});
+                    if (!response.ok) throw new Error('Le modèle Word ne peut pas être téléchargé depuis le serveur.');
+                    const blob = await response.blob();
+                    const bridge = window.pywebview?.api;
+                    if (bridge?.client_open_word_document) {
+                        const dataUrl = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.onerror = () => reject(new Error('Impossible de lire le modèle Word.'));
+                            reader.readAsDataURL(blob);
+                        });
+                        const safeName = String(designation || 'Modele_compte_rendu').replace(/[\\/:*?"<>|]+/g, '_');
+                        const result = await bridge.client_open_word_document(dataUrl, `Modele_CR_${safeName}.docx`);
+                        if (!result?.ok) throw new Error(result?.error || 'Word n’a pas pu ouvrir le modèle sur ce poste.');
+                        alert(`Le modèle est ouvert dans Word sur ce poste. Après vos modifications et Ctrl+S, cliquez sur « Synchroniser » et choisissez ce fichier :\n${result.path || ''}`);
+                        return;
+                    }
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = `Modele_CR_${String(designation || 'Compte_rendu').replace(/[\\/:*?"<>|]+/g, '_')}.docx`;
+                    link.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                } catch (error) {
+                    alert(error.message || 'Impossible d’ouvrir le modèle de compte rendu.');
                 }
+            };
+
+            window.uploadWordTemplateById = function(templateId) {
+                const picker = document.createElement('input');
+                picker.type = 'file';
+                picker.accept = '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+                picker.onchange = async () => {
+                    const file = picker.files?.[0];
+                    if (!file) return;
+                    const form = new FormData();
+                    form.append('file', file, file.name);
+                    try {
+                        const response = await fetch(`/api/cr-templates/upload-word/${Number(templateId)}`, {
+                            method: 'POST', body: form, credentials: 'same-origin'
+                        });
+                        const result = await response.json().catch(() => ({}));
+                        if (!response.ok || !result.success) throw new Error(result.message || result.detail || 'La synchronisation du modèle Word a échoué.');
+                        alert('Le modèle Word a été synchronisé avec Cliniva.');
+                        loadReportTemplatesModule();
+                    } catch (error) {
+                        alert(error.message || 'Impossible de synchroniser le modèle Word.');
+                    }
+                };
+                picker.click();
             };
 
             window.deleteCrTemplate = async function(id) {
