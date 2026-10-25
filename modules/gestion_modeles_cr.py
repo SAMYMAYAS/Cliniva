@@ -391,6 +391,9 @@ def render_html() -> str:
                     <option value="">Choisir un service…</option>
                 </select>
             </div>
+            <button type="button" onclick="showAllCrTemplates()" class="inline-flex shrink-0 items-center justify-center gap-1.5 self-end rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-[11px] font-bold text-emerald-800 transition hover:bg-emerald-100 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300 dark:hover:bg-emerald-950/50">
+                <i class="ph-bold ph-list-bullets text-sm"></i><span>Afficher tout</span>
+            </button>
         </div>
 
         <!-- TABLEAU DES MODÈLES CR -->
@@ -611,6 +614,7 @@ def render_html() -> str:
             let crServicesList = [];
             let isTinyMceInitialized = false;
             let currentActiveTemplate = null;
+            let showAllCrTemplatesRequested = false;
 
             let currentCrPage = 1;
             const CR_PER_PAGE = 15;
@@ -635,7 +639,8 @@ def render_html() -> str:
                 const q = (document.getElementById('searchCrTemplateInput')?.value || '').toLowerCase().trim();
                 const modalite = document.getElementById('crTemplateFilterModalite')?.value || '';
                 const service = document.getElementById('crTemplateFilterService')?.value || '';
-                filteredCrTemplatesList = (!modalite && !service) ? [] : crTemplatesData.filter(t => {
+                if (modalite || service) showAllCrTemplatesRequested = false;
+                filteredCrTemplatesList = (!modalite && !service && !showAllCrTemplatesRequested) ? [] : crTemplatesData.filter(t => {
                     const matchesText = !q ||
                         (t.designation && t.designation.toLowerCase().includes(q)) ||
                         (t.modalite && t.modalite.toLowerCase().includes(q)) ||
@@ -652,6 +657,15 @@ def render_html() -> str:
                 renderCrTemplatesTable();
             };
 
+            window.showAllCrTemplates = function() {
+                showAllCrTemplatesRequested = true;
+                const modaliteFilter = document.getElementById('crTemplateFilterModalite');
+                const serviceFilter = document.getElementById('crTemplateFilterService');
+                if (modaliteFilter) modaliteFilter.value = '';
+                if (serviceFilter) serviceFilter.value = '';
+                filterCrTemplates();
+            };
+
             window.renderCrTemplatesTable = function() {
                 const tbody = document.getElementById('cr-templates-table-body');
                 tbody.innerHTML = '';
@@ -660,7 +674,7 @@ def render_html() -> str:
                 const totalPages = Math.ceil(totalItems / CR_PER_PAGE) || 1;
                 const category = document.getElementById('crTemplateFilterModalite')?.value || '';
                 const service = document.getElementById('crTemplateFilterService')?.value || '';
-                const hasSelection = Boolean(category || service);
+                const hasSelection = Boolean(category || service || showAllCrTemplatesRequested);
 
                 if (currentCrPage > totalPages) currentCrPage = totalPages;
                 if (currentCrPage < 1) currentCrPage = 1;
