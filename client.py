@@ -198,7 +198,13 @@ class ClientHardwareBridge:
             if device.Items.Count < 1:
                 return {"success": False, "message": "Le scanner ne contient aucun élément de numérisation."}
             item = device.Items.Item(1)
-            jpeg_format = "{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}"
+            # 3CAB = BMP (non compressé) ; le vrai identifiant WIA JPEG est 3CAE.
+            jpeg_format = "{B96B3CAE-0728-11D3-9D7B-0000F81EF32E}"
+            try:
+                # Préférence facultative : couleur avec une taille de fichier réduite.
+                item.Properties("Current Intent").Value = 0x00010001
+            except Exception:
+                pass
             image = None
             transfer_error = None
             try:
@@ -220,8 +226,8 @@ class ClientHardwareBridge:
                 return {"success": False, "message":
                         "Le pilote WIA n'a fourni aucune image. Vérifie le pilote du scanner et réessaie." + detail}
 
-            # Lire directement le vecteur d'octets WIA évite les pilotes qui
-            # échouent à créer le fichier demandé par ImageFile.SaveFile.
+            # Lire le vecteur d'octets WIA évite les pilotes qui échouent à
+            # créer le fichier demandé par ImageFile.SaveFile.
             try:
                 content = bytes(image.FileData.BinaryData)
             except Exception:
@@ -237,8 +243,43 @@ class ClientHardwareBridge:
                 if not os.path.isfile(temporary_path):
                     return {"success": False, "message": "Le pilote n'a pas fourni de données image exploitables."}
                 content = Path(temporary_path).read_bytes()
-            if not content or len(content) > 12 * 1024 * 1024:
-                return {"success": False, "message": "Le scan est vide ou dépasse 12 Mo. Réduis la résolution."}
+
+            max_bytes = 12 * 1024 * 1024
+            image_is_jpeg = str(getattr(image, "FormatID", "")).strip().upper() == jpeg_format.upper()
+            if content and (not image_is_jpeg or len(content) > max_bytes):
+                # Certains pilotes ignorent le format demandé ou livrent un BMP.
+                # Conversion + réduction WIA gardent le document lisible et
+                # respectent la limite acceptée par le formulaire serveur.
+                last_candidate = b""
+                for max_width, max_height, quality in ((2600, 3400, 82), (2200, 3000, 72), (1800, 2500, 60)):
+                    try:
+                        processor = win32com.client.Dispatch("WIA.ImageProcess")
+                        processor.Filters.Add(processor.FilterInfos("Scale").FilterID)
+                        scale_filter = processor.Filters.Item(1)
+                        scale_filter.Properties("MaximumWidth").Value = max_width
+                        scale_filter.Properties("MaximumHeight").Value = max_height
+                        processor.Filters.Add(processor.FilterInfos("Convert").FilterID)
+                        convert_filter = processor.Filters.Item(2)
+                        convert_filter.Properties("FormatID").Value = jpeg_format
+                        convert_filter.Properties("Quality").Value = quality
+                        converted = processor.Apply(image)
+                        last_candidate = bytes(converted.FileData.BinaryData)
+                        if last_candidate and len(last_candidate) <= max_bytes:
+                            content = last_candidate
+                            break
+                    except Exception:
+                        continue
+                else:
+                    if last_candidate:
+                        content = last_candidate
+
+            if not content:
+                return {"success": False, "message": "Le scanner a retourné une image vide. Vérifie le pilote WIA."}
+            if len(content) > max_bytes:
+                size_mb = len(content) / (1024 * 1024)
+                return {"success": False, "message":
+                        f"Le scan fait encore {size_mb:.1f} Mo après compression. "
+                        "Choisis une résolution de 200 dpi ou moins dans les paramètres du scanner."}
             return {"success": True, "image_data": "data:image/jpeg;base64," + base64.b64encode(content).decode("ascii"),
                     "name": Path(temporary_path).name if temporary_path else f"cliniva_scan_{uuid.uuid4().hex}.jpg"}
         except Exception as exc:
