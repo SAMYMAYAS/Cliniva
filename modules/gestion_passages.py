@@ -4150,6 +4150,7 @@ def render_html(mode: str = "general") -> str:
 
             window.validatePassageDocPreview = function() {{
                 if (!pendingPassageDocPreview) return;
+                const addedDocIndex = currentPassageScannedDocs.length;
                 currentPassageScannedDocs.push({{
                     type: pendingPassageDocPreview.type,
                     heure: new Date().toLocaleTimeString('fr-FR', {{ hour: '2-digit', minute: '2-digit' }}),
@@ -4158,6 +4159,12 @@ def render_html(mode: str = "general") -> str:
                 pendingPassageDocPreview = null;
                 closePassageDocPreview();
                 renderPassageScannedDocsGallery();
+                requestAnimationFrame(() => {{
+                    const addedDoc = document.getElementById(`passageScannedDoc-${{addedDocIndex}}`);
+                    addedDoc?.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                    addedDoc?.classList.add('ring-2', 'ring-brand-neon');
+                    window.setTimeout(() => addedDoc?.classList.remove('ring-2', 'ring-brand-neon'), 1800);
+                }});
             }};
 
             window.cancelPassageDocPreview = function() {{
@@ -4188,14 +4195,15 @@ def render_html(mode: str = "general") -> str:
 
                 currentPassageScannedDocs.forEach((doc, idx) => {{
                     const div = document.createElement('div');
-                    div.className = "bg-white dark:bg-[#121c15] p-2 rounded-2xl border border-slate-200 dark:border-white/10 shadow-xs flex items-center justify-between";
+                    div.id = `passageScannedDoc-${{idx}}`;
+                    div.className = "bg-white dark:bg-[#121c15] p-2.5 rounded-2xl border border-slate-200 dark:border-white/10 shadow-xs flex items-center justify-between gap-2 transition-shadow";
                     const isPdf = String(doc.data || '').toLowerCase().includes('application/pdf');
 
                     div.innerHTML = `
                         <button type="button" class="flex items-center space-x-2 truncate cursor-pointer flex-1 text-left" onclick="openPassageDocFromEditor(${{idx}})">
                             ${{isPdf 
-                                ? '<div class="w-8 h-8 rounded-lg bg-rose-500/20 text-rose-500 flex items-center justify-center font-bold text-xs"><i class="ph-bold ph-file-pdf"></i></div>' 
-                                : `<img src="${{doc.data}}" class="w-8 h-8 rounded-lg object-cover border border-slate-200">`}}
+                                ? '<div class="w-14 h-14 shrink-0 rounded-xl bg-rose-500/10 text-rose-500 flex items-center justify-center font-bold text-2xl"><i class="ph-bold ph-file-pdf"></i></div>'
+                                : `<img src="${{doc.data}}" alt="Aperçu du document scanné" class="w-14 h-14 shrink-0 rounded-xl object-cover border border-slate-200 dark:border-white/10">`}}
                             <div class="truncate">
                                 <span class="text-[11px] font-bold text-slate-800 dark:text-slate-100 block truncate">${{escapePassageDisplay(doc.type || 'Document scanné')}}</span>
                                 <span class="text-[9px] text-brand-neon font-medium">${{escapePassageDisplay(doc.heure || '')}} (🔍 Voir)</span>
