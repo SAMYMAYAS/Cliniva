@@ -223,7 +223,10 @@ class DicomPrintServer:
                     BasicGrayscalePrintManagementMeta, Printer, Verification,
                 )
             except ImportError as exc:
-                raise RuntimeError("pynetdicom et pydicom doivent être installés sur ce poste client.") from exc
+                raise RuntimeError(
+                    "Dépendances DICOM Print manquantes sur ce poste client. "
+                    "Installez-les avec : py -m pip install pynetdicom pydicom numpy Pillow"
+                ) from exc
 
             from pydicom.dataset import Dataset
             from pydicom.sequence import Sequence

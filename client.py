@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sys
 import subprocess
 import tempfile
@@ -61,10 +62,20 @@ def load_server_url() -> str:
 
 def save_server_url(server_url: str, client_version: str | None = None) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = {"server_url": server_url}
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        data = {}
+    data["server_url"] = server_url
     if client_version:
         data["client_version"] = client_version
     CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def client_release_version() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
 
 
 def update_client_launcher(server_url: str, report_status=None) -> str | None:
@@ -79,43 +90,73 @@ def update_client_launcher(server_url: str, report_status=None) -> str | None:
     filename = str(manifest.get("filename") or "").strip()
     expected_hash = str(manifest.get("sha256") or "").strip().lower()
     package_url = str(manifest.get("package_url") or "")
+    print_module = manifest.get("dicom_print_module") or {}
+    module_hash = str(print_module.get("sha256") or "").strip().lower()
+    module_url = str(print_module.get("package_url") or "")
+    module_filename = str(print_module.get("filename") or "")
     if (not version or not filename or "/" in filename or "\\" in filename
             or len(expected_hash) != 64 or not package_url.startswith("/static/client_updates/")
-            or ".." in package_url or manifest.get("contents") != ["client.py"]):
-        raise ValueError("Le serveur n'a pas publié une mise à jour client.py valide.")
+            or ".." in package_url
+            or manifest.get("contents") != ["client.py"]
+            or not module_filename.startswith("client-dicom-print-")
+            or not module_filename.endswith(".py") or "/" in module_filename or "\\" in module_filename
+            or len(module_hash) != 64 or module_url != f"/static/client_updates/{module_filename}"):
+        raise ValueError("Le serveur n'a pas publié une mise à jour client/DICOM Print valide.")
     # Compare le contenu réellement exécuté, pas seulement la version mémorisée
     # dans la configuration, afin qu'un ancien client ne saute pas la mise à jour.
     global CLIENT_UPDATED_ON_START
-    current_version = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
-    if current_version == version:
+    current_version = client_release_version()
+    module_path = Path(__file__).resolve().with_name("client_dicom_print.py")
+    try:
+        module_current_hash = hashlib.sha256(module_path.read_bytes()).hexdigest()
+    except OSError:
+        module_current_hash = ""
+    if current_version == version and module_current_hash == module_hash:
         if report_status:
-            report_status(f"Client déjà à jour ({version}).")
+            report_status(f"Client et DICOM Print déjà à jour ({version}).")
         return version
 
-    if report_status:
-        report_status(f"Mise à jour disponible ({version}) : téléchargement…")
-    download_url = server_url.rstrip("/") + package_url
-    request = urllib.request.Request(download_url, headers={"User-Agent": "ClinivaClient/2.0"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        payload = response.read(32 * 1024 * 1024 + 1)
-    if len(payload) > 32 * 1024 * 1024 or hashlib.sha256(payload).hexdigest() != expected_hash:
-        raise ValueError("La vérification de la mise à jour client a échoué.")
+    client_payload = None
+    if current_version != version:
+        if report_status:
+            report_status(f"Mise à jour disponible ({version}) : téléchargement…")
+        download_url = server_url.rstrip("/") + package_url
+        request = urllib.request.Request(download_url, headers={"User-Agent": "ClinivaClient/2.0"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            client_payload = response.read(32 * 1024 * 1024 + 1)
+        if len(client_payload) > 32 * 1024 * 1024 or hashlib.sha256(client_payload).hexdigest() != expected_hash:
+            raise ValueError("La vérification de la mise à jour client a échoué.")
 
-    if report_status:
-        report_status("Archive vérifiée : installation de la mise à jour…")
+    module_payload = None
+    if module_current_hash != module_hash:
+        if report_status:
+            report_status("Téléchargement du moteur DICOM Print du poste…")
+        module_request = urllib.request.Request(
+            server_url.rstrip("/") + module_url, headers={"User-Agent": "ClinivaClient/2.0"}
+        )
+        with urllib.request.urlopen(module_request, timeout=60) as response:
+            module_payload = response.read(8 * 1024 * 1024 + 1)
+        if len(module_payload) > 8 * 1024 * 1024 or hashlib.sha256(module_payload).hexdigest() != module_hash:
+            raise ValueError("La vérification du moteur DICOM Print a échoué.")
+
     app_dir = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="cliniva-client-update-", dir=app_dir) as staging_dir:
-        archive_path = Path(staging_dir) / filename
-        archive_path.write_bytes(payload)
-        with zipfile.ZipFile(archive_path) as archive:
-            members = [item for item in archive.infolist() if not item.is_dir()]
-            if len(members) != 1 or members[0].filename != "client.py":
-                raise ValueError("L'archive client contient autre chose que client.py.")
-            source = archive.read(members[0])
-        replacement = app_dir / ".client.py.update"
-        replacement.write_bytes(source)
-        shutil.copystat(Path(__file__), replacement)
-        os.replace(replacement, Path(__file__))
+        if client_payload is not None:
+            archive_path = Path(staging_dir) / filename
+            archive_path.write_bytes(client_payload)
+            with zipfile.ZipFile(archive_path) as archive:
+                members = [item for item in archive.infolist() if not item.is_dir()]
+                if len(members) != 1 or members[0].filename != "client.py":
+                    raise ValueError("L'archive client contient autre chose que client.py.")
+                client_source = archive.read(members[0])
+            replacement = Path(staging_dir) / ".client.py.update"
+            replacement.write_bytes(client_source)
+            shutil.copystat(Path(__file__), replacement)
+            os.replace(replacement, Path(__file__))
+        if module_payload is not None:
+            replacement_module = Path(staging_dir) / ".client_dicom_print.py.update"
+            replacement_module.write_bytes(module_payload)
+            os.replace(replacement_module, module_path)
         CLIENT_UPDATED_ON_START = True
     if report_status:
         report_status("Mise à jour installée avec succès. Redémarrage du client…")
@@ -153,9 +194,173 @@ class ClientHardwareBridge:
 
     def __init__(self) -> None:
         self._zoom_percent = 100
+        self._dicom_print_server = None
+        self._dicom_print_lock = threading.RLock()
         self._word_sync_jobs: set[tuple[str, str, int]] = set()
         self._word_sync_states: dict[tuple[str, str, int], dict] = {}
         self._word_sync_lock = threading.Lock()
+
+    def _client_config(self) -> dict:
+        try:
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+
+    def _save_dicom_print_config(self, values: dict) -> None:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = self._client_config()
+        data.update(values)
+        temporary = CONFIG_PATH.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, CONFIG_PATH)
+
+    def _dicom_print_service(self):
+        if self._dicom_print_server is None:
+            try:
+                from client_dicom_print import DicomPrintServer
+            except ImportError as exc:
+                raise RuntimeError("Le moteur DICOM Print du poste manque. Relance le client connecté au serveur pour recevoir sa mise à jour.") from exc
+            self._dicom_print_server = DicomPrintServer()
+            saved = self._client_config().get("dicom_print_config")
+            if isinstance(saved, dict):
+                self._dicom_print_server._config.update(saved)
+        return self._dicom_print_server
+
+    def dicom_print_status(self) -> dict:
+        with self._dicom_print_lock:
+            try:
+                state = self._dicom_print_service().status()
+                return {**state, "machine": socket.gethostname()}
+            except Exception as exc:
+                return {
+                    "running": False,
+                    "config": {
+                        "ae_title": "MY_PRINT_SCP", "host": "0.0.0.0", "port": 104,
+                        "storage_dir": str(Path.home() / "DicomPrints"),
+                    },
+                    "last_error": str(exc),
+                    "machine": socket.gethostname(),
+                }
+
+    def dicom_print_start(self, settings: dict | None = None) -> dict:
+        try:
+            with self._dicom_print_lock:
+                state = self._dicom_print_service().start(settings or {})
+                self._save_dicom_print_config({"dicom_print_config": state["config"], "dicom_print_enabled": True})
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_stop(self) -> dict:
+        try:
+            with self._dicom_print_lock:
+                state = self._dicom_print_service().stop()
+                self._save_dicom_print_config({"dicom_print_config": state["config"], "dicom_print_enabled": False})
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_autostart(self) -> None:
+        saved = self._client_config()
+        if saved.get("dicom_print_enabled"):
+            result = self.dicom_print_start(saved.get("dicom_print_config") or {})
+            if not result.get("ok"):
+                print(f"DICOM Print local non démarré : {result.get('error')}", file=sys.stderr)
+
+    def dicom_print_recent_images(self) -> list[dict]:
+        with self._dicom_print_lock:
+            return self._dicom_print_service().recent_images()
+
+    def dicom_print_group_images(self, group_id: str) -> list[dict]:
+        with self._dicom_print_lock:
+            return self._dicom_print_service().group_images(group_id)
+
+    def dicom_print_reorder_group_images(self, group_id: str, image_names: list[str]) -> dict:
+        try:
+            with self._dicom_print_lock:
+                return self._dicom_print_service().reorder_group_images(group_id, image_names)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_import_group_images(self, target_group_id: str, source_group_id: str,
+                                        image_names: list[str]) -> dict:
+        try:
+            with self._dicom_print_lock:
+                return self._dicom_print_service().import_group_images(target_group_id, source_group_id, image_names)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_group_image(self, group_id: str, index: int) -> dict:
+        with self._dicom_print_lock:
+            return self._dicom_print_service().group_image(group_id, index)
+
+    def dicom_print_group_thumbnail(self, group_id: str, index: int) -> dict:
+        with self._dicom_print_lock:
+            return self._dicom_print_service().group_image_thumbnail(group_id, index)
+
+    def dicom_print_delete_group(self, group_id: str) -> dict:
+        try:
+            with self._dicom_print_lock:
+                return self._dicom_print_service().delete_group(group_id)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_group_image_pdf(self, group_id: str, index: int) -> dict:
+        import base64
+        import io
+        from PIL import Image
+
+        image_data = self.dicom_print_group_image(group_id, index)
+        raw = base64.b64decode(image_data["data_url"].split(",", 1)[1])
+        with Image.open(io.BytesIO(raw)) as source:
+            page = Image.new("RGB", (3508, 4961), "white")
+            image = source.convert("RGB")
+            image.thumbnail((3388, 4841), Image.Resampling.LANCZOS)
+            page.paste(image, ((3508 - image.width) // 2, (4961 - image.height) // 2))
+            output = io.BytesIO()
+            page.save(output, format="PDF", resolution=300.0)
+        group = next((item for item in self.dicom_print_recent_images() if item.get("id") == group_id), {})
+        return {"name": image_data["name"], "patient_name": group.get("patient_name", ""),
+                "pdf_data_url": "data:application/pdf;base64," + base64.b64encode(output.getvalue()).decode("ascii")}
+
+    def dicom_print_save_pdf(self, pdf_data_url: str, suggested_name: str = "Image_DICOM_A3.pdf") -> dict:
+        import base64
+        try:
+            import webview
+            if not webview.windows:
+                return {"ok": False, "error": "La fenêtre Cliniva n’est pas prête à enregistrer le PDF."}
+            header, separator, encoded = str(pdf_data_url or "").partition(",")
+            if not separator or header.strip().lower() != "data:application/pdf;base64":
+                return {"ok": False, "error": "Le contenu PDF à enregistrer est invalide."}
+            content = base64.b64decode(encoded, validate=True)
+            name = _safe_filename(suggested_name, "Image_DICOM_A3.pdf", ".pdf")
+            dialog = getattr(webview, "FileDialog", None)
+            selected = webview.windows[0].create_file_dialog(
+                dialog.SAVE if dialog else webview.SAVE_DIALOG,
+                save_filename=name, file_types=("Fichiers PDF (*.pdf)",),
+            )
+            if not selected:
+                return {"ok": True, "cancelled": True}
+            target = Path(selected[0] if isinstance(selected, (list, tuple)) else selected)
+            if target.suffix.lower() != ".pdf":
+                target = target.with_suffix(".pdf")
+            target.write_bytes(content)
+            return {"ok": True, "path": str(target)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_open_folder(self) -> dict:
+        try:
+            folder = self._dicom_print_service().status()["config"]["storage_dir"]
+            Path(folder).mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(folder)
+            else:
+                return {"ok": False, "error": "L’ouverture du dossier nécessite Windows."}
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": f"Impossible d’ouvrir le dossier local : {exc}"}
 
     @staticmethod
     def _word_sync_key(path: Path, document_kind: str, record_id: int) -> tuple[str, str, int]:
@@ -534,6 +739,7 @@ def open_client_window(server_url: str) -> None:
             "Le code Cliniva du serveur n'est pas nécessaire sur le poste client."
         ) from exc
     bridge = ClientHardwareBridge()
+    bridge.dicom_print_autostart()
     webview.create_window(
         "Cliniva", server_url, width=1440, height=940, min_size=(900, 650),
         resizable=True, zoomable=True, js_api=bridge,
