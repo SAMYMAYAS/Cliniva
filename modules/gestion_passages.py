@@ -3128,6 +3128,7 @@ def render_html(mode: str = "general") -> str:
                 const doctor = [p.medecin_traitant_grade || 'Dr', p.medecin_traitant_nom || '', p.medecin_traitant_prenom || ''].filter(Boolean).join(' ');
                 const exam = (p.actes || []).map(act => act.nom || '').filter(Boolean).join(' · ') || p.type_passage || 'Examen non précisé';
                 const doctorSpecialty = String(p.medecin_traitant_specialite || '').trim();
+                const secretary = escapePassageDisplay(String(p.utilisateur || '').trim() || 'Inconnu');
                 const actions = [];
                 if (canEditPatientInfo && p.editable_pre_consultation) actions.push('<button type="button" onclick="closePassageActionMenu(this); openPassagePatientEditModal(' + passageIdParam + ')" class="radio-menu-item"><i class="ph-bold ph-identification-card"></i>Modifier le passage</button>');
                 if (docsCount > 0) actions.push('<button type="button" onclick="closePassageActionMenu(this); viewPassageDocsFromTable(' + passageIdParam + ')" class="radio-menu-item"><i class="ph-bold ph-folder-open"></i>Documents scannés (' + docsCount + ')</button>');
@@ -3140,7 +3141,7 @@ def render_html(mode: str = "general") -> str:
                     '<div class="min-w-0"><button type="button" onclick="openDmeFromPassage(' + patientIdParam + ',' + passageIdParam + ')" class="block text-left font-extrabold text-[15px] text-slate-900 uppercase leading-tight hover:text-violet-700">' +
                     escapePassageDisplay((p.nom || '') + ' ' + (p.prenom || '')) + '</button><div class="mt-1 text-[11px] text-slate-500">' + escapePassageDisplay(visitText) + '</div></div></div></td>' +
                     '<td class="radio-exam-cell"><div class="font-extrabold text-[15px] uppercase leading-tight text-slate-900">' + escapePassageDisplay(exam) +
-                    '</div><div class="mt-1 text-xs font-bold text-red-600"><i class="ph-bold ph-user-circle"></i> ' + escapePassageDisplay(doctor) + (doctorSpecialty ? ' | Sp: ' + escapePassageDisplay(doctorSpecialty) : '') + '</div></td>' +
+                    '</div><div class="mt-1 text-xs font-bold text-red-600"><i class="ph-bold ph-user-circle"></i> ' + escapePassageDisplay(doctor) + (doctorSpecialty ? ' | Sp: ' + escapePassageDisplay(doctorSpecialty) : '') + ' / SEC : ' + secretary + '</div></td>' +
                     '<td class="text-center"><span class="radio-state ' + resultClass + '">' + resultText + '</span></td>' +
                     '<td class="text-center"><span class="radio-state radio-state-passage">' + escapePassageDisplay(passageText) + '</span>' + consultationOwnerHtml + '</td>' +
                     '<td class="text-center"><span class="radio-state ' + paymentClass + '">' + escapePassageDisplay(paymentText) + '</span></td>' +
@@ -3232,8 +3233,9 @@ def render_html(mode: str = "general") -> str:
                                </div>`;
 
                         const medTraitantBadge = p.medecin_traitant_nom 
-                            ? `<span class="inline-flex max-w-full whitespace-normal break-words items-center gap-1 px-2 py-0.5 rounded-lg bg-sky-50 dark:bg-sky-950/40 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800/40 text-[10px] font-bold">🩺 ${{p.medecin_traitant_grade || 'Dr'}} ${{p.medecin_traitant_nom}}</span>` 
+                            ? `<span class="inline-flex max-w-full whitespace-normal break-words items-center gap-1 px-2 py-0.5 rounded-lg bg-sky-50 dark:bg-sky-950/40 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800/40 text-[10px] font-bold">🩺 ${{escapePassageDisplay(p.medecin_traitant_grade || 'Dr')}} ${{escapePassageDisplay(p.medecin_traitant_nom)}} ${{escapePassageDisplay(p.medecin_traitant_prenom || '')}}</span>`
                             : '<span class="text-slate-400 italic text-[11px]">-</span>';
+                        const passageSecretaryHtml = `<span class="ml-1 text-[10px] font-semibold text-slate-500 dark:text-slate-400">/ SEC : ${{escapePassageDisplay(String(p.utilisateur || '').trim() || 'Inconnu')}}</span>`;
 
                         const docsCount = p.documents_scannes ? p.documents_scannes.length : 0;
                         const patientIdParam = Number(p.id_patient || 0);
@@ -3264,7 +3266,7 @@ def render_html(mode: str = "general") -> str:
                                 </div>
                             </td>
                             <td class="py-4 px-2">
-                                ${{passageDisplayStyle === 'essential' ? `<span class="passage-essential-status ${{essentialStateTone}}"><i class="ph-bold ${{essentialStateIcon}}"></i>${{escapePassageDisplay(essentialState)}}</span>` : `<div>${{medTraitantBadge}}</div><div class="mt-2"><span class="inline-block max-w-full px-2 py-1 rounded-xl text-[10px] font-bold bg-slate-100 dark:bg-black/30 border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 break-words">${{escapePassageDisplay(p.type_passage || 'Type non précisé')}}</span></div>`}}
+                                ${{passageDisplayStyle === 'essential' ? `<span class="passage-essential-status ${{essentialStateTone}}"><i class="ph-bold ${{essentialStateIcon}}"></i>${{escapePassageDisplay(essentialState)}}</span><div class="mt-1">${{passageSecretaryHtml}}</div>` : `<div class="flex flex-wrap items-center gap-y-1">${{medTraitantBadge}}${{passageSecretaryHtml}}</div><div class="mt-2"><span class="inline-block max-w-full px-2 py-1 rounded-xl text-[10px] font-bold bg-slate-100 dark:bg-black/30 border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 break-words">${{escapePassageDisplay(p.type_passage || 'Type non précisé')}}</span></div>`}}
                             </td>
                             <td class="py-4 px-2"><div class="space-y-1.5">${{actesBadges}}</div></td>
                             <td class="py-4 px-2">
