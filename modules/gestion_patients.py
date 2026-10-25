@@ -2389,14 +2389,14 @@ def render_html() -> str:
     </div>
 
     <!-- MODAL SCANNEUR WIA -->
-    <div id="scannerDeviceModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center hidden z-50 p-4">
+    <div id="scannerDeviceModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center hidden z-[10000] p-4" role="dialog" aria-modal="true" aria-labelledby="scannerDeviceTitle">
         <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-md shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-100 dark:border-white/5 flex justify-between items-center bg-slate-50/50 dark:bg-black/20">
                 <div class="flex items-center space-x-2">
                     <div class="w-8 h-8 rounded-xl bg-brand-neon/20 text-brand-neon flex items-center justify-center font-bold text-sm">
                         <i class="ph-bold ph-printer"></i>
                     </div>
-                    <h3 class="text-base font-bold text-slate-800 dark:text-white">Scanneur Physique Détecté</h3>
+                    <h3 id="scannerDeviceTitle" class="text-base font-bold text-slate-800 dark:text-white">Scanneur Physique Détecté</h3>
                 </div>
                 <button type="button" onclick="closeScannerDeviceModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
                     <i class="ph-bold ph-x text-lg"></i>
@@ -2872,7 +2872,10 @@ def render_html() -> str:
 
             // Scanneur WIA Physique
             window.openScannerDeviceModal = async function() {{
-                document.getElementById('scannerDeviceModal').classList.remove('hidden');
+                const scannerModal = document.getElementById('scannerDeviceModal');
+                scannerModal.style.zIndex = '10000';
+                scannerModal.classList.remove('hidden');
+                requestAnimationFrame(() => scannerModal.querySelector('#scannerDeviceSelect')?.focus());
                 const select = document.getElementById('scannerDeviceSelect');
                 select.innerHTML = '<option value="">Détection en cours...</option>';
 
