@@ -2728,6 +2728,62 @@ async def api_download_word_cr(record_id: int):
                         filename=filename, headers={"Cache-Control": "private, no-store"})
 
 
+@dme_router.post("/cr/upload-word/{record_id}")
+async def api_upload_word_cr(record_id: int, request: Request, file: UploadFile = File(...)):
+    """Remplace le compte rendu patient par sa version Word sauvegardée sur le poste client."""
+    user = get_current_user_optional(request)
+    if not user or user.get("status") != "Actif":
+        raise HTTPException(status_code=401, detail="Session expirée ou compte inactif.")
+    cr = dme_manager.get_cr_record_by_id(record_id)
+    if not cr or str(cr.get("type_modele") or "").lower() != "word":
+        raise HTTPException(status_code=404, detail="Compte rendu Word introuvable.")
+    target_path = Path(str(cr.get("chemin_docx") or "")).resolve()
+    patient_root = (BASE_DIR / "uploads" / "dossiers_patients" / str(cr.get("id_patient"))).resolve()
+    if not target_path.is_relative_to(patient_root) or target_path.suffix.lower() != ".docx" or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="Le fichier du compte rendu n'est pas disponible dans le dossier de ce patient.")
+
+    contents = await file.read(100 * 1024 * 1024 + 1)
+    if not contents or len(contents) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Le document Word est vide ou dépasse 100 Mo.")
+    try:
+        with zipfile.ZipFile(BytesIO(contents)) as document:
+            names = set(document.namelist())
+            if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                raise zipfile.BadZipFile("Structure DOCX manquante")
+    except (zipfile.BadZipFile, OSError):
+        raise HTTPException(status_code=400, detail="Le fichier envoyé n'est pas un DOCX valide. Le compte rendu serveur n'a pas été modifié.")
+
+    temporary_path = target_path.with_name(target_path.name + ".upload.tmp")
+    try:
+        temporary_path.write_bytes(contents)
+        os.replace(temporary_path, target_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+    track_action(request, "COMPTE_RENDU_PATIENT_MIS_A_JOUR", f"Compte rendu Word #{record_id} synchronisé depuis un poste client")
+    return {"success": True, "message": "Le compte rendu patient a été synchronisé sur le serveur."}
+
+
+@dme_router.post("/cr/open-word-server")
+async def api_open_word_cr_server(payload: Dict[str, Any], request: Request):
+    """Ouvre le fichier original du compte rendu dans Word sur le serveur local."""
+    user = get_current_user_optional(request)
+    if not user or user.get("status") != "Actif":
+        raise HTTPException(status_code=401, detail="Session expirée ou compte inactif.")
+    cr = dme_manager.get_cr_record_by_id(payload.get("id"))
+    path = str((cr or {}).get("chemin_docx") or "")
+    if not cr or str(cr.get("type_modele") or "").lower() != "word" or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Fichier Word introuvable sur le serveur.")
+    try:
+        if os.name != "nt":
+            raise RuntimeError("L'ouverture locale de Microsoft Word est disponible sur Windows.")
+        os.startfile(path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Impossible d'ouvrir Word sur le serveur : {exc}")
+    return {"success": True, "message": "Le fichier original du compte rendu est ouvert dans Word sur le serveur."}
+
+
 @dme_router.get("/cr/view-pdf/{record_id}")
 async def view_word_cr_as_pdf(record_id: int):
     """Affiche soit un Livret PDF existant, soit convertit le fichier Word en PDF pour le visionneur interne."""
@@ -7224,12 +7280,27 @@ def _render_html() -> str:
 
             window.openWordCrDocument = async function(recordId) {
                 try {
+                    const bridge = window.pywebview?.api;
+                    if (bridge?.get_deployment_mode && await bridge.get_deployment_mode() === 'local') {
+                        const serverResponse = await fetch('/api/dme/cr/open-word-server', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify({ id: Number(recordId) })
+                        });
+                        const serverResult = await serverResponse.json().catch(() => ({}));
+                        if (!serverResponse.ok || !serverResult.success) {
+                            throw new Error(serverResult.detail || serverResult.message || 'Impossible d’ouvrir le compte rendu sur le serveur.');
+                        }
+                        if (typeof window.showToast === 'function') window.showToast('Le compte rendu original est ouvert sur le serveur.', 'success');
+                        return true;
+                    }
+
                     const response = await fetch(`/api/dme/cr/download-word/${Number(recordId)}`, {cache: 'no-store'});
                     if (!response.ok) {
                         const detail = await response.json().catch(() => ({}));
                         throw new Error(detail.detail || 'Le fichier Word est introuvable sur le serveur.');
                     }
-                    const bridge = window.pywebview?.api;
                     if (!bridge?.client_open_word_document) {
                         const link = document.createElement('a');
                         link.href = URL.createObjectURL(await response.blob());
@@ -7245,8 +7316,13 @@ def _render_html() -> str:
                     const chunkSize = 0x8000;
                     for (let offset = 0; offset < bytes.length; offset += chunkSize) binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
                     const dataUrl = 'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,' + btoa(binary);
-                    const result = await bridge.client_open_word_document(dataUrl, `Compte_rendu_${Number(recordId)}.docx`);
+                    const result = bridge.get_deployment_mode
+                        ? await bridge.client_open_word_document(dataUrl, `Compte_rendu_${Number(recordId)}.docx`)
+                        : await bridge.client_open_word_document(dataUrl, `Compte_rendu_${Number(recordId)}.docx`, Number(recordId), 'dme_cr');
                     if (!result?.ok) throw new Error(result?.error || 'Microsoft Word n’a pas pu ouvrir le compte rendu.');
+                    if (result.sync_started && typeof window.showToast === 'function') {
+                        window.showToast('Après Ctrl+S, le compte rendu patient sera synchronisé automatiquement sur le serveur.', 'success');
+                    }
                     return true;
                 } catch(e) {
                     alert("Erreur lors de l'ouverture du document Word : " + (e.message || 'erreur inconnue'));
