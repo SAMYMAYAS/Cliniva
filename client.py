@@ -183,10 +183,37 @@ class ClientHardwareBridge:
             device = info.Connect()
             if device.Items.Count < 1:
                 return {"success": False, "message": "Le scanner ne contient aucun élément de numérisation."}
-            image = device.Items.Item(1).Transfer("{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}")
+            item = device.Items.Item(1)
+            jpeg_format = "{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}"
+            image = None
+            transfer_error = None
+            try:
+                image = item.Transfer(jpeg_format)
+            except Exception as exc:
+                transfer_error = exc
+
+            # Certains pilotes WIA renvoient None pour Item.Transfer, même si le
+            # scanner est présent. Le CommonDialog gère leur transfert avec la
+            # boîte de progression native Windows et retourne l'ImageFile.
+            if image is None:
+                try:
+                    common_dialog = win32com.client.Dispatch("WIA.CommonDialog")
+                    image = common_dialog.ShowTransfer(item, jpeg_format, False)
+                except Exception as exc:
+                    transfer_error = exc
+            if image is None:
+                detail = f" ({transfer_error})" if transfer_error else ""
+                return {"success": False, "message":
+                        "Le pilote WIA n'a fourni aucune image. Vérifie le pilote du scanner et réessaie." + detail}
+
             fd, temporary_path = tempfile.mkstemp(prefix="cliniva_scan_", suffix=".jpg")
             os.close(fd)
-            image.SaveFile(temporary_path)
+            save_image = getattr(image, "SaveFile", None)
+            if not callable(save_image):
+                return {"success": False, "message":
+                        "Le pilote a terminé le scan sans renvoyer un fichier image exploitable. "
+                        "Essaie le pilote WIA du fabricant ou vérifie son mode de numérisation."}
+            save_image(temporary_path)
             content = Path(temporary_path).read_bytes()
             if not content or len(content) > 12 * 1024 * 1024:
                 return {"success": False, "message": "Le scan est vide ou dépasse 12 Mo. Réduis la résolution."}
