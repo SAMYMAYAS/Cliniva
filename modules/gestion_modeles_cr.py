@@ -1090,9 +1090,16 @@ def render_html() -> str:
                             reader.readAsDataURL(blob);
                         });
                         const safeName = String(designation || 'Modele_compte_rendu').replace(/[\\/:*?"<>|]+/g, '_');
-                        const result = await bridge.client_open_word_document(dataUrl, `Modele_CR_${safeName}.docx`);
+                        const opened = bridge.get_deployment_mode
+                            ? await bridge.client_open_word_document(dataUrl, `Modele_CR_${safeName}.docx`)
+                            : await bridge.client_open_word_document(dataUrl, `Modele_CR_${safeName}.docx`, Number(templateId));
+                        const result = opened;
                         if (!result?.ok) throw new Error(result?.error || 'Word n’a pas pu ouvrir le modèle sur ce poste.');
-                        alert(`Le modèle est ouvert dans Word sur ce poste. Après vos modifications et Ctrl+S, cliquez sur « Synchroniser » et choisissez ce fichier :\n${result.path || ''}`);
+                        if (result.sync_started) {
+                            alert(`Le modèle est ouvert dans Word sur ce poste. Après chaque Ctrl+S, Cliniva synchronise automatiquement le document avec le serveur. Fichier local :\n${result.path || ''}`);
+                        } else {
+                            alert(`Le modèle est ouvert dans Word sur ce poste. Après vos modifications, utilisez le bouton « Synchroniser » pour envoyer le fichier au serveur.\n${result.path || ''}`);
+                        }
                         return;
                     }
                     const url = URL.createObjectURL(blob);
