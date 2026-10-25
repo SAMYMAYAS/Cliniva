@@ -8,7 +8,9 @@ import platform
 import random
 import re
 import shutil
+import secrets
 import subprocess
+import threading
 import time
 import unicodedata
 import uuid
@@ -32,6 +34,9 @@ from database import get_db_cursor
 from app.auth import get_current_user_optional, track_action
 
 logger = logging.getLogger("DmeModule")
+
+_DME_CR_SYNC_TICKETS: Dict[str, Dict[str, Any]] = {}
+_DME_CR_SYNC_TICKETS_LOCK = threading.Lock()
 
 dme_router = APIRouter(prefix="/api/dme", tags=["Dossier Médical"])
 
@@ -2728,12 +2733,52 @@ async def api_download_word_cr(record_id: int):
                         filename=filename, headers={"Cache-Control": "private, no-store"})
 
 
+@dme_router.post("/cr/client-sync-ticket/{record_id}")
+async def api_create_word_cr_sync_ticket(record_id: int, request: Request):
+    """Crée un droit temporaire, limité à un seul compte rendu, pour le client Cliniva."""
+    user = get_current_user_optional(request)
+    if not user or user.get("status") != "Actif":
+        raise HTTPException(status_code=401, detail="Session expirée ou compte inactif.")
+    cr = dme_manager.get_cr_record_by_id(record_id)
+    path = Path(str((cr or {}).get("chemin_docx") or "")).resolve()
+    patient_root = (BASE_DIR / "uploads" / "dossiers_patients" / str((cr or {}).get("id_patient"))).resolve()
+    if (not cr or str(cr.get("type_modele") or "").lower() != "word"
+            or not path.is_relative_to(patient_root) or path.suffix.lower() != ".docx" or not path.is_file()):
+        raise HTTPException(status_code=404, detail="Compte rendu Word introuvable dans le dossier du patient.")
+
+    now = time.time()
+    expires_at = now + 12 * 60 * 60
+    token = secrets.token_urlsafe(32)
+    with _DME_CR_SYNC_TICKETS_LOCK:
+        expired = [key for key, value in _DME_CR_SYNC_TICKETS.items() if value.get("expires_at", 0) <= now]
+        for key in expired:
+            _DME_CR_SYNC_TICKETS.pop(key, None)
+        _DME_CR_SYNC_TICKETS[token] = {
+            "record_id": int(record_id),
+            "user_id": str(user.get("id") or user.get("id_utilisateur") or user.get("username") or ""),
+            "expires_at": expires_at,
+        }
+    return {"success": True, "token": token, "expires_at": int(expires_at)}
+
+
 @dme_router.post("/cr/upload-word/{record_id}")
 async def api_upload_word_cr(record_id: int, request: Request, file: UploadFile = File(...)):
     """Remplace le compte rendu patient par sa version Word sauvegardée sur le poste client."""
     user = get_current_user_optional(request)
-    if not user or user.get("status") != "Actif":
-        raise HTTPException(status_code=401, detail="Session expirée ou compte inactif.")
+    ticket = request.headers.get("x-cliniva-cr-sync-token", "").strip()
+    ticket_user_id = ""
+    if user and user.get("status") == "Actif":
+        ticket_user_id = str(user.get("id") or user.get("id_utilisateur") or user.get("username") or "")
+    elif ticket:
+        now = time.time()
+        with _DME_CR_SYNC_TICKETS_LOCK:
+            ticket_data = _DME_CR_SYNC_TICKETS.get(ticket)
+            if ticket_data and ticket_data.get("expires_at", 0) > now and ticket_data.get("record_id") == int(record_id):
+                ticket_user_id = str(ticket_data.get("user_id") or "")
+        if not ticket_user_id:
+            raise HTTPException(status_code=401, detail="Autorisation de synchronisation expirée ou invalide. Rouvrez le compte rendu depuis le DME.")
+    else:
+        raise HTTPException(status_code=401, detail="Session expirée ou autorisation de synchronisation absente.")
     cr = dme_manager.get_cr_record_by_id(record_id)
     if not cr or str(cr.get("type_modele") or "").lower() != "word":
         raise HTTPException(status_code=404, detail="Compte rendu Word introuvable.")
@@ -2761,7 +2806,8 @@ async def api_upload_word_cr(record_id: int, request: Request, file: UploadFile 
         if temporary_path.exists():
             temporary_path.unlink()
 
-    track_action(request, "COMPTE_RENDU_PATIENT_MIS_A_JOUR", f"Compte rendu Word #{record_id} synchronisé depuis un poste client")
+    if user and user.get("status") == "Actif":
+        track_action(request, "COMPTE_RENDU_PATIENT_MIS_A_JOUR", f"Compte rendu Word #{record_id} synchronisé depuis un poste client")
     return {"success": True, "message": "Le compte rendu patient a été synchronisé sur le serveur."}
 
 
@@ -7309,6 +7355,15 @@ def _render_html() -> str:
                         setTimeout(() => URL.revokeObjectURL(link.href), 30000);
                         return true;
                     }
+                    const ticketResponse = await fetch(`/api/dme/cr/client-sync-ticket/${Number(recordId)}`, {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        cache: 'no-store'
+                    });
+                    const ticketResult = await ticketResponse.json().catch(() => ({}));
+                    if (!ticketResponse.ok || !ticketResult.success || !ticketResult.token) {
+                        throw new Error(ticketResult.detail || 'Impossible d’autoriser la synchronisation du compte rendu vers le serveur.');
+                    }
                     const buffer = await response.arrayBuffer();
                     if (!buffer.byteLength || buffer.byteLength > 100 * 1024 * 1024) throw new Error('Le document est vide ou dépasse 100 Mo.');
                     let binary = '';
@@ -7316,12 +7371,36 @@ def _render_html() -> str:
                     const chunkSize = 0x8000;
                     for (let offset = 0; offset < bytes.length; offset += chunkSize) binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
                     const dataUrl = 'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,' + btoa(binary);
-                    const result = bridge.get_deployment_mode
-                        ? await bridge.client_open_word_document(dataUrl, `Compte_rendu_${Number(recordId)}.docx`)
-                        : await bridge.client_open_word_document(dataUrl, `Compte_rendu_${Number(recordId)}.docx`, Number(recordId), 'dme_cr');
+                    const result = await bridge.client_open_word_document(
+                        dataUrl,
+                        `Compte_rendu_${Number(recordId)}.docx`,
+                        Number(recordId),
+                        'dme_cr',
+                        ticketResult.token
+                    );
                     if (!result?.ok) throw new Error(result?.error || 'Microsoft Word n’a pas pu ouvrir le compte rendu.');
                     if (result.sync_started && typeof window.showToast === 'function') {
-                        window.showToast('Après Ctrl+S, le compte rendu patient sera synchronisé automatiquement sur le serveur.', 'success');
+                        window.showToast('Compte rendu ouvert dans Word. Enregistrez avec Ctrl+S pour le synchroniser sur le serveur.', 'success');
+                        if (bridge.client_word_sync_status) {
+                            let syncErrorShown = false;
+                            const syncStartedAt = Date.now();
+                            const syncPoll = setInterval(async () => {
+                                if (Date.now() - syncStartedAt > 15 * 60 * 1000) {
+                                    clearInterval(syncPoll);
+                                    return;
+                                }
+                                try {
+                                    const state = await bridge.client_word_sync_status('dme_cr', Number(recordId));
+                                    if (state?.status === 'synced') {
+                                        clearInterval(syncPoll);
+                                        window.showToast('Compte rendu enregistré et synchronisé sur le serveur.', 'success');
+                                    } else if (state?.status === 'retrying' && !syncErrorShown) {
+                                        syncErrorShown = true;
+                                        window.showToast('La synchronisation est en attente : ' + (state.message || 'vérifiez la connexion au serveur.'), 'error');
+                                    }
+                                } catch (_) {}
+                            }, 2000);
+                        }
                     }
                     return true;
                 } catch(e) {

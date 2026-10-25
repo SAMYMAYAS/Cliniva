@@ -154,7 +154,19 @@ class ClientHardwareBridge:
     def __init__(self) -> None:
         self._zoom_percent = 100
         self._word_sync_jobs: set[tuple[str, str, int]] = set()
+        self._word_sync_states: dict[tuple[str, str, int], dict] = {}
         self._word_sync_lock = threading.Lock()
+
+    @staticmethod
+    def _word_sync_key(path: Path, document_kind: str, record_id: int) -> tuple[str, str, int]:
+        return (str(path.resolve()).casefold(), str(document_kind), int(record_id))
+
+    def client_word_sync_status(self, document_kind: str, record_id: int) -> dict:
+        """Expose l'état de la dernière synchronisation Word au navigateur Cliniva."""
+        with self._word_sync_lock:
+            matches = [state for key, state in self._word_sync_states.items()
+                       if key[1] == str(document_kind) and key[2] == int(record_id)]
+            return dict(matches[-1]) if matches else {"status": "waiting", "message": "En attente d'une sauvegarde Word."}
 
     @staticmethod
     def _valid_docx_bytes(content: bytes) -> bool:
@@ -166,7 +178,7 @@ class ClientHardwareBridge:
             return False
 
     def _upload_word_document(self, server_url: str, document_kind: str,
-                              record_id: int, path: Path) -> None:
+                              record_id: int, path: Path, sync_token: str | None = None) -> None:
         """Envoie au serveur une version Word stable enregistrée depuis le client."""
         content = path.read_bytes()
         if not content or len(content) > 100 * 1024 * 1024 or not self._valid_docx_bytes(content):
@@ -179,6 +191,8 @@ class ClientHardwareBridge:
         route = routes.get(str(document_kind or "template"))
         if not route:
             raise ValueError("Type de document à synchroniser non autorisé.")
+        if document_kind == "dme_cr" and not sync_token:
+            raise ValueError("Autorisation de synchronisation absente. Rouvrez le compte rendu depuis le DME.")
         boundary = "----ClinivaWordSync" + uuid.uuid4().hex
         head = (
             f"--{boundary}\r\n"
@@ -193,6 +207,7 @@ class ClientHardwareBridge:
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
                 "Content-Length": str(len(body)),
                 "User-Agent": "ClinivaClient/2.0",
+                **({"X-Cliniva-CR-Sync-Token": sync_token} if document_kind == "dme_cr" else {}),
             },
             method="POST",
         )
@@ -202,7 +217,7 @@ class ClientHardwareBridge:
             raise RuntimeError(result.get("detail") or result.get("message") or "Le serveur a refusé la synchronisation du modèle.")
 
     def _watch_word_document(self, path: Path, server_url: str,
-                             document_kind: str, record_id: int) -> None:
+                             document_kind: str, record_id: int, sync_token: str | None = None) -> None:
         """Synchronise automatiquement chaque sauvegarde Word après stabilisation du fichier."""
         try:
             initial = path.stat()
@@ -225,31 +240,46 @@ class ClientHardwareBridge:
                 previous_signature = signature
                 pending_since = now
                 last_attempt = 0.0
+                with self._word_sync_lock:
+                    self._word_sync_states[self._word_sync_key(path, document_kind, record_id)] = {
+                        "status": "changed", "message": "Modification détectée, attente de la fin de l'enregistrement Word."
+                    }
                 continue
             if pending_since is None or now - pending_since < 2.5 or now - last_attempt < 5.0:
                 continue
 
             last_attempt = now
+            key = self._word_sync_key(path, document_kind, record_id)
+            with self._word_sync_lock:
+                self._word_sync_states[key] = {"status": "uploading", "message": "Envoi du compte rendu vers le serveur…"}
             try:
-                self._upload_word_document(server_url, document_kind, record_id, path)
+                self._upload_word_document(server_url, document_kind, record_id, path, sync_token)
                 pending_since = None
-            except Exception:
+                with self._word_sync_lock:
+                    self._word_sync_states[key] = {
+                        "status": "synced", "message": "Compte rendu enregistré sur le serveur.", "synced_at": int(time.time())
+                    }
+            except Exception as exc:
                 # Word peut encore verrouiller le fichier ou le réseau être
                 # momentanément indisponible : un nouvel essai sera fait.
+                with self._word_sync_lock:
+                    self._word_sync_states[key] = {"status": "retrying", "message": str(exc) or "Échec de synchronisation."}
                 continue
 
-    def _start_word_document_sync(self, path: Path, document_kind: str, record_id: int) -> bool:
+    def _start_word_document_sync(self, path: Path, document_kind: str, record_id: int,
+                                  sync_token: str | None = None) -> bool:
         server_url = load_server_url()
         if not server_url or not record_id or document_kind not in {"template", "dme_cr"}:
             return False
-        key = (str(path.resolve()).casefold(), str(document_kind), int(record_id))
+        key = self._word_sync_key(path, document_kind, record_id)
         with self._word_sync_lock:
             if key in self._word_sync_jobs:
                 return True
             self._word_sync_jobs.add(key)
+            self._word_sync_states[key] = {"status": "watching", "message": "En attente d'une sauvegarde dans Word."}
         threading.Thread(
             target=self._watch_word_document,
-            args=(path, server_url, str(document_kind), int(record_id)),
+            args=(path, server_url, str(document_kind), int(record_id), sync_token),
             name=f"ClinivaWordSync-{document_kind}-{int(record_id)}",
             daemon=True,
         ).start()
@@ -399,7 +429,8 @@ class ClientHardwareBridge:
                     pass
 
     def client_open_word_document(self, docx_data_url: str, suggested_name: str = "Compte_rendu.docx",
-                                  template_id: int | None = None, sync_kind: str = "template") -> dict:
+                                  template_id: int | None = None, sync_kind: str = "template",
+                                  sync_token: str | None = None) -> dict:
         try:
             if sys.platform != "win32":
                 return {"ok": False, "error": "L'ouverture dans Microsoft Word nécessite Windows."}
@@ -417,7 +448,7 @@ class ClientHardwareBridge:
                 target = folder / f"{target.stem}_{int(time.time())}{target.suffix}"
             target.write_bytes(content)
             os.startfile(str(target))
-            sync_started = self._start_word_document_sync(target, str(sync_kind), int(template_id)) if template_id else False
+            sync_started = self._start_word_document_sync(target, str(sync_kind), int(template_id), sync_token) if template_id else False
             return {"ok": True, "path": str(target), "sync_started": sync_started}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
