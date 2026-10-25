@@ -4855,12 +4855,18 @@ def _render_html() -> str:
             window.cancelAccidentalDmeStart = async function() {
                 const pendingKey = pendingDmeCloseTabKey;
                 if (!pendingKey || !confirm('Annuler le démarrage et remettre le passage en attente ? Les données saisies seront enregistrées en brouillon.')) return;
+                window.currentActiveDmeKey = pendingKey;
                 const modal = document.getElementById('dmeCloseConsultationModal');
                 modal?.classList.add('hidden');
                 modal?.classList.remove('flex');
                 document.body.style.overflow = '';
-                if (await window.saveActiveDmeConsultation({ closeAfter: true, cancelStart: true })) pendingDmeCloseTabKey = null;
-                else {
+                const cancelled = await window.saveActiveDmeConsultation({ closeAfter: true, cancelStart: true });
+                if (cancelled) {
+                    // La sauvegarde ferme déjà l'onglet courant. Ce contrôle
+                    // garantit sa fermeture même si son implémentation évolue.
+                    if (window.activeDmeTabs.some(tab => tab.key === pendingKey)) removeDmeTabNow(pendingKey);
+                    pendingDmeCloseTabKey = null;
+                } else {
                     modal?.classList.remove('hidden');
                     modal?.classList.add('flex');
                     document.body.style.overflow = 'hidden';
