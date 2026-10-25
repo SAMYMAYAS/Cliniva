@@ -2028,14 +2028,24 @@ class DmeManager:
                 shutil.copy2(src_docx, chemin_final_docx)
             else:
                 master_path = os.path.join(str(BASE_DIR), "uploads", "model_templates", "BASE_CR_TYPE.docx")
-                if os.path.exists(master_path):
-                    shutil.copy2(master_path, chemin_final_docx)
-                else:
-                    with open(chemin_final_docx, "wb") as f:
-                        f.write(b"")
+                if not os.path.exists(master_path) or not zipfile.is_zipfile(master_path):
+                    return {"success": False, "message": "Le fichier Word du modèle est introuvable et le modèle maître est absent ou invalide. Aucun compte rendu vierge n'a été créé."}
+                shutil.copy2(master_path, chemin_final_docx)
+
+            if not zipfile.is_zipfile(chemin_final_docx):
+                try:
+                    os.remove(chemin_final_docx)
+                except OSError:
+                    pass
+                return {"success": False, "message": "Le document Word du modèle est invalide. Aucun compte rendu vierge n'a été créé."}
 
             # Remplacement garanti des 8 variables dans le Word
-            replace_docx_variables_robust(chemin_final_docx, replacements)
+            if not replace_docx_variables_robust(chemin_final_docx, replacements):
+                try:
+                    os.remove(chemin_final_docx)
+                except OSError:
+                    pass
+                return {"success": False, "message": "Impossible de personnaliser le modèle Word sélectionné."}
 
         else:
             file_name = f"{base_name}.html"

@@ -290,6 +290,10 @@ class ClientDicomServicesBridge:
             logger.exception("Impossible d'ouvrir le document Word sur le poste client")
             return {"ok": False, "error": str(exc)}
 
+    def get_deployment_mode(self) -> str:
+        """Indique au front si Word doit ouvrir le modèle partagé ou une copie client."""
+        return str(self.config.get("server_mode") or "local").strip().lower()
+
     def _service(self):
         if self._print_server is None:
             from app.dicom_print_service import DicomPrintServer

@@ -6,6 +6,7 @@ Conforme strictement aux normes PEP 8.
 """
 
 from datetime import datetime
+from io import BytesIO
 import json
 import logging
 import os
@@ -14,6 +15,8 @@ import platform
 import shutil
 import subprocess
 from typing import Dict, Any, List, Optional
+import uuid
+import zipfile
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
@@ -26,6 +29,18 @@ cr_templates_router = APIRouter(prefix="/api/cr-templates", tags=["Modèles CR"]
 BASE_CR_TEMPLATE_PATH = os.path.abspath(
     os.path.join(MODEL_TEMPLATE_DIR, "BASE_CR_TYPE.docx")
 )
+
+
+def _is_valid_docx(filepath: str) -> bool:
+    """Vérifie qu'un fichier existe et contient bien la structure d'un DOCX."""
+    try:
+        if not filepath or not os.path.isfile(filepath) or os.path.getsize(filepath) == 0:
+            return False
+        with zipfile.ZipFile(filepath) as document:
+            names = set(document.namelist())
+            return "[Content_Types].xml" in names and "word/document.xml" in names
+    except (OSError, zipfile.BadZipFile):
+        return False
 
 DEFAULT_HTML_REPORT_TEMPLATE = """<p><strong><span style="text-decoration: underline; font-size: 12pt;">INDICATION CLINIQUE :</span></strong></p>
 <p style="font-size: 12pt;">Bilan d'exploration et contrôle radiologique.</p>
@@ -54,15 +69,13 @@ class ReportTemplateManager:
             dest_abs = os.path.abspath(destination_path)
             os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
 
-            if os.path.exists(BASE_CR_TEMPLATE_PATH):
-                shutil.copy2(BASE_CR_TEMPLATE_PATH, dest_abs)
-                return True
-
-            # Si le modèle maître n'existe pas encore, on crée un fichier vide initial
-            if not os.path.exists(dest_abs):
-                with open(dest_abs, "wb") as f:
-                    f.write(b"")
-            return True
+            if os.path.exists(dest_abs):
+                return _is_valid_docx(dest_abs)
+            if not _is_valid_docx(BASE_CR_TEMPLATE_PATH):
+                logger.error("Modèle Word maître manquant ou invalide : %s", BASE_CR_TEMPLATE_PATH)
+                return False
+            shutil.copy2(BASE_CR_TEMPLATE_PATH, dest_abs)
+            return _is_valid_docx(dest_abs)
         except Exception as err:
             logger.error("Erreur duplication DOCX : %s", err)
             return False
@@ -76,10 +89,11 @@ class ReportTemplateManager:
         abs_path = os.path.abspath(os.path.normpath(filepath))
 
         if not os.path.exists(abs_path):
-            cls.create_docx_from_base_model(abs_path)
+            if not cls.create_docx_from_base_model(abs_path):
+                return {"success": False, "message": "Le modèle Word de base est absent ou invalide. Aucun document vierge n'a été créé."}
 
-        if not os.path.exists(abs_path):
-            return {"success": False, "message": f"Fichier introuvable : {abs_path}"}
+        if not _is_valid_docx(abs_path):
+            return {"success": False, "message": f"Le fichier du modèle Word est absent ou invalide : {abs_path}"}
 
         try:
             if platform.system() == "Windows":
@@ -158,16 +172,25 @@ class ReportTemplateManager:
                 "message": "La Désignation, la Modalité et le Service sont obligatoires.",
             }
 
-        safe_name = "".join([c if c.isalnum() else "_" for c in designation]).strip("_")
         abs_cr_dir = os.path.abspath(CR_TEMPLATES_DIR)
         os.makedirs(abs_cr_dir, exist_ok=True)
-        file_path = os.path.normpath(os.path.join(abs_cr_dir, f"CR_TYPE_{safe_name}.docx"))
-
-        if type_modele == "Word" and not os.path.exists(file_path):
-            self.create_docx_from_base_model(file_path)
+        file_path = ""
 
         with get_db_cursor() as cursor:
             if t_id:
+                cursor.execute("SELECT chemin FROM cr_templates WHERE id = %s;", (t_id,))
+                existing = cursor.fetchone()
+                if not existing:
+                    return {"success": False, "message": "Modèle de compte rendu introuvable."}
+                existing_path = str(existing.get("chemin") or "").strip()
+                if type_modele == "Word":
+                    file_path = existing_path
+                    if not file_path or not _is_valid_docx(file_path):
+                        if file_path and os.path.exists(file_path):
+                            return {"success": False, "message": "Le document Word existant est invalide. Il n'a pas été remplacé pour protéger son contenu."}
+                        file_path = os.path.join(abs_cr_dir, f"CR_TYPE_{uuid.uuid4().hex}.docx")
+                        if not self.create_docx_from_base_model(file_path):
+                            return {"success": False, "message": "Impossible de créer le modèle : le document maître Word est absent ou invalide."}
                 query = """
                         UPDATE cr_templates \
                         SET designation  = %s, \
@@ -184,6 +207,10 @@ class ReportTemplateManager:
                 ))
                 saved_id = t_id
             else:
+                if type_modele == "Word":
+                    file_path = os.path.join(abs_cr_dir, f"CR_TYPE_{uuid.uuid4().hex}.docx")
+                    if not self.create_docx_from_base_model(file_path):
+                        return {"success": False, "message": "Impossible de créer le modèle : le document maître Word est absent ou invalide."}
                 query = """
                         INSERT INTO cr_templates
                         (designation, type_modele, modalite, service, utilisateur, chemin, contenu_html, \
@@ -258,8 +285,10 @@ async def api_open_word(payload: Dict[str, Any]):
             if row and row["chemin"]:
                 filepath = row["chemin"]
             elif row:
-                safe_name = "".join([c if c.isalnum() else "_" for c in row["designation"]]).strip("_")
-                filepath = os.path.join(CR_TEMPLATES_DIR, f"CR_TYPE_{safe_name}.docx")
+                filepath = os.path.join(CR_TEMPLATES_DIR, f"CR_TYPE_{uuid.uuid4().hex}.docx")
+                if not manager.create_docx_from_base_model(filepath):
+                    return {"success": False, "message": "Le document maître Word est absent ou invalide."}
+                cursor.execute("UPDATE cr_templates SET chemin = %s WHERE id = %s;", (filepath, t_id))
 
     return manager.open_file_in_word(filepath)
 
@@ -275,9 +304,14 @@ async def api_download_word(template_id: int):
 
     filepath = row["chemin"]
     if not filepath or not os.path.exists(filepath):
-        safe_name = "".join([c if c.isalnum() else "_" for c in row["designation"]]).strip("_")
-        filepath = os.path.join(CR_TEMPLATES_DIR, f"CR_TYPE_{safe_name}.docx")
-        manager.create_docx_from_base_model(filepath)
+        filepath = os.path.join(CR_TEMPLATES_DIR, f"CR_TYPE_{uuid.uuid4().hex}.docx")
+        if not manager.create_docx_from_base_model(filepath):
+            raise HTTPException(status_code=500, detail="Le modèle Word enregistré est introuvable et le document maître est absent ou invalide.")
+        with get_db_cursor() as cursor:
+            cursor.execute("UPDATE cr_templates SET chemin = %s WHERE id = %s;", (filepath, template_id))
+
+    if not _is_valid_docx(filepath):
+        raise HTTPException(status_code=500, detail="Le fichier du modèle Word est invalide. Il n'a pas été remplacé par un document vierge.")
 
     abs_path = os.path.abspath(filepath)
     filename = os.path.basename(abs_path)
@@ -305,8 +339,22 @@ async def api_upload_word(template_id: int, file: UploadFile = File(...)):
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
     contents = await file.read()
-    with open(abs_path, "wb") as f:
-        f.write(contents)
+    try:
+        with zipfile.ZipFile(BytesIO(contents)) as document:
+            names = set(document.namelist())
+            if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                raise zipfile.BadZipFile("Structure DOCX manquante")
+    except (zipfile.BadZipFile, OSError):
+        raise HTTPException(status_code=400, detail="Le fichier choisi n'est pas un document Word DOCX valide. Le modèle enregistré n'a pas été modifié.")
+
+    temporary_path = abs_path + ".upload.tmp"
+    try:
+        with open(temporary_path, "wb") as f:
+            f.write(contents)
+        os.replace(temporary_path, abs_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
     return {"success": True, "message": "Fichier Word synchronisé avec succès sur le serveur central !"}
 
@@ -1015,10 +1063,25 @@ def render_html() -> str:
 
             window.openWordTemplateById = async function(templateId, designation) {
                 try {
+                    const bridge = window.pywebview?.api;
+                    if (bridge?.get_deployment_mode && await bridge.get_deployment_mode() === 'local') {
+                        const serverResponse = await fetch('/api/cr-templates/open-word', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify({ id: Number(templateId) })
+                        });
+                        const serverResult = await serverResponse.json().catch(() => ({}));
+                        if (!serverResponse.ok || !serverResult.success) {
+                            throw new Error(serverResult.message || serverResult.detail || 'Impossible d’ouvrir le modèle Word partagé sur le serveur.');
+                        }
+                        alert('Le modèle Word original est ouvert sur le serveur. Enregistrez vos modifications dans Word : elles seront conservées dans le dossier des modèles Cliniva.');
+                        return;
+                    }
+
                     const response = await fetch('/api/cr-templates/download-word/' + Number(templateId), {credentials: 'same-origin'});
                     if (!response.ok) throw new Error('Le modèle Word ne peut pas être téléchargé depuis le serveur.');
                     const blob = await response.blob();
-                    const bridge = window.pywebview?.api;
                     if (bridge?.client_open_word_document) {
                         const dataUrl = await new Promise((resolve, reject) => {
                             const reader = new FileReader();
