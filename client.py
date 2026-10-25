@@ -220,25 +220,27 @@ class ClientHardwareBridge:
                 return {"success": False, "message":
                         "Le pilote WIA n'a fourni aucune image. Vérifie le pilote du scanner et réessaie." + detail}
 
-            # Utilise un nom réellement absent. Certains pilotes WIA gardent un
-            # état interne du fichier même après suppression d'un fichier créé
-            # par mkstemp, et refusent alors SaveFile avec « Le fichier existe ».
-            temporary_path = str(Path(tempfile.gettempdir()) / f"cliniva_scan_{uuid.uuid4().hex}.jpg")
-            save_image = getattr(image, "SaveFile", None)
-            if not callable(save_image):
-                return {"success": False, "message":
-                        "Le pilote a terminé le scan sans renvoyer un fichier image exploitable. "
-                        "Essaie le pilote WIA du fabricant ou vérifie son mode de numérisation."}
-            # mkstemp crée un fichier vide. WIA refuse d'écraser un fichier existant.
-            os.unlink(temporary_path)
-            save_image(temporary_path)
-            if not os.path.isfile(temporary_path):
-                return {"success": False, "message": "Le scanner n'a pas créé le fichier image attendu."}
-            content = Path(temporary_path).read_bytes()
+            # Lire directement le vecteur d'octets WIA évite les pilotes qui
+            # échouent à créer le fichier demandé par ImageFile.SaveFile.
+            try:
+                content = bytes(image.FileData.BinaryData)
+            except Exception:
+                # Certains pilotes exposent mal FileData.BinaryData ; le chemin
+                # fichier reste disponible en secours avec un nom neuf.
+                temporary_path = str(Path(tempfile.gettempdir()) / f"cliniva_scan_{uuid.uuid4().hex}.jpg")
+                save_image = getattr(image, "SaveFile", None)
+                if not callable(save_image):
+                    return {"success": False, "message":
+                            "Le pilote a terminé le scan sans fournir les octets de l'image. "
+                            "Vérifie le pilote WIA du scanner."}
+                save_image(temporary_path)
+                if not os.path.isfile(temporary_path):
+                    return {"success": False, "message": "Le pilote n'a pas fourni de données image exploitables."}
+                content = Path(temporary_path).read_bytes()
             if not content or len(content) > 12 * 1024 * 1024:
                 return {"success": False, "message": "Le scan est vide ou dépasse 12 Mo. Réduis la résolution."}
             return {"success": True, "image_data": "data:image/jpeg;base64," + base64.b64encode(content).decode("ascii"),
-                    "name": Path(temporary_path).name}
+                    "name": Path(temporary_path).name if temporary_path else f"cliniva_scan_{uuid.uuid4().hex}.jpg"}
         except Exception as exc:
             return {"success": False, "message": f"Le scanner n'a pas pu numériser le document : {exc}"}
         finally:
