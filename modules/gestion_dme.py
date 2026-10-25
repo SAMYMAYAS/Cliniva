@@ -34,6 +34,7 @@ from database import get_db_cursor
 from app.auth import get_current_user_optional, track_action
 
 logger = logging.getLogger("DmeModule")
+_DOCX_PDF_CONVERSION_LOCK = threading.Lock()
 
 _DME_CR_SYNC_TICKETS: Dict[str, Dict[str, Any]] = {}
 _DME_CR_SYNC_TICKETS_LOCK = threading.Lock()
@@ -438,37 +439,86 @@ def format_date_display(dt_val: Any) -> str:
 
 def convert_docx_to_pdf_windows(docx_path: str, pdf_path: str) -> bool:
     """Convertit un fichier Word (.docx) en PDF sous Windows via Microsoft Word COM."""
-    if not os.path.exists(docx_path):
+    source = Path(docx_path)
+    destination = Path(pdf_path)
+    if not source.is_file():
         return False
+    temporary_pdf = destination.with_name(f"{destination.stem}.conversion-{uuid.uuid4().hex}.pdf")
 
-    if platform.system() == "Windows":
+    def valid_pdf(path: Path) -> bool:
         try:
-            import win32com.client
-            import pythoncom
-            pythoncom.CoInitialize()
-            word = win32com.client.DispatchEx("Word.Application")
-            word.Visible = False
-            word.DisplayAlerts = False
-            abs_docx = os.path.abspath(docx_path)
-            abs_pdf = os.path.abspath(pdf_path)
-            doc = word.Documents.Open(abs_docx)
-            doc.SaveAs(abs_pdf, FileFormat=17)  # 17 = wdFormatPDF
-            doc.Close()
-            word.Quit()
-            pythoncom.CoUninitialize()
-            return True
-        except Exception as err:
-            logger.warning("Erreur conversion Word vers PDF via COM : %s", err)
+            if not path.is_file() or path.stat().st_size <= 100:
+                return False
+            with path.open("rb") as stream:
+                return stream.read(5) == b"%PDF-"
+        except OSError:
+            return False
 
-    # Tentative de secours avec docx2pdf si installé
-    try:
-        from docx2pdf import convert
-        convert(docx_path, pdf_path)
-        return True
-    except Exception:
-        pass
+    with _DOCX_PDF_CONVERSION_LOCK:
+        try:
+            if platform.system() == "Windows":
+                for attempt in range(3):
+                    word = document = pythoncom = None
+                    com_initialized = False
+                    try:
+                        import pythoncom as win_pythoncom
+                        import win32com.client
+                        pythoncom = win_pythoncom
+                        pythoncom.CoInitialize()
+                        com_initialized = True
+                        word = win32com.client.DispatchEx("Word.Application")
+                        word.Visible = False
+                        word.DisplayAlerts = False
+                        document = word.Documents.Open(
+                            os.path.abspath(str(source)), ConfirmConversions=False,
+                            ReadOnly=True, AddToRecentFiles=False,
+                        )
+                        document.ExportAsFixedFormat(os.path.abspath(str(temporary_pdf)), 17)
+                        if valid_pdf(temporary_pdf):
+                            os.replace(temporary_pdf, destination)
+                            return True
+                        raise OSError("Word n'a pas produit un PDF valide.")
+                    except Exception as err:
+                        logger.warning("Conversion Word vers PDF COM (tentative %s/3) : %s", attempt + 1, err)
+                    finally:
+                        if document is not None:
+                            try:
+                                document.Close(False)
+                            except Exception:
+                                pass
+                        if word is not None:
+                            try:
+                                word.Quit()
+                            except Exception:
+                                pass
+                        if com_initialized and pythoncom is not None:
+                            try:
+                                pythoncom.CoUninitialize()
+                            except Exception:
+                                pass
+                        try:
+                            temporary_pdf.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    if attempt < 2:
+                        time.sleep(0.5 * (attempt + 1))
 
-    return False
+            # Secours si Word COM n'est pas disponible sur cet hôte.
+            try:
+                from docx2pdf import convert
+                convert(str(source), str(temporary_pdf))
+                if valid_pdf(temporary_pdf):
+                    os.replace(temporary_pdf, destination)
+                    return True
+                logger.warning("docx2pdf n'a pas produit un PDF valide pour %s", source)
+            except Exception as err:
+                logger.warning("Conversion de secours DOCX vers PDF indisponible : %s", err)
+            return False
+        finally:
+            try:
+                temporary_pdf.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def generate_livret_pdf_file(
@@ -2806,6 +2856,14 @@ async def api_upload_word_cr(record_id: int, request: Request, file: UploadFile 
         if temporary_path.exists():
             temporary_path.unlink()
 
+    # Le PDF adjacent au DOCX est une conversion en cache : il ne doit jamais
+    # rester affichable après la synchronisation d'une nouvelle version Word.
+    cached_pdf_path = target_path.with_suffix(".pdf")
+    try:
+        cached_pdf_path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Impossible d'invalider l'aperçu PDF du compte rendu %s : %s", record_id, exc)
+
     if user and user.get("status") == "Actif":
         track_action(request, "COMPTE_RENDU_PATIENT_MIS_A_JOUR", f"Compte rendu Word #{record_id} synchronisé depuis un poste client")
     return {"success": True, "message": "Le compte rendu patient a été synchronisé sur le serveur."}
@@ -2888,11 +2946,11 @@ async def view_word_cr_as_pdf(record_id: int):
                 <body style="font-family:sans-serif; background:#0f1712; color:#f8fafc; padding:40px; text-align:center; display:flex; flex-direction:column; justify-content:center; height:80vh;">
                     <div style="font-size:36px; margin-bottom:10px;">⚠️</div>
                     <h2 style="color:#8be140; margin-bottom:8px;">Conversion PDF indisponible</h2>
-                    <p style="font-size:13px; color:#94a3b8; max-width:480px; margin:0 auto 20px auto; line-height:1.5;">
-                        Pour visualiser le PDF d'un document Word dans la fenêtre intégrée, la bibliothèque <b>pywin32</b> doit être installée.
+                    <p style="font-size:13px; color:#94a3b8; max-width:520px; margin:0 auto 20px auto; line-height:1.5;">
+                        Le serveur n'a pas pu convertir ce document Word en PDF. Vérifiez que Microsoft Word et <b>pywin32</b> sont disponibles sur le serveur, puis réessayez.
                     </p>
                     <div style="background:#000; padding:12px; border-radius:12px; font-family:monospace; font-size:12px; color:#8be140; max-width:320px; margin:0 auto 20px auto;">
-                        pip install pywin32
+                        Conversion Word COM · consultez le journal Cliniva pour le détail
                     </div>
                 </body>
                 </html>
@@ -7416,7 +7474,7 @@ def _render_html() -> str:
                 activeLivretDraftToken = null;
                 setDmeCrPreviewMode('archived');
                 if (titleEl) titleEl.innerText = "Aperçu Compte Rendu Médical A4";
-                if (iframe) iframe.src = '/api/dme/cr/print/' + recordId;
+                if (iframe) iframe.src = '/api/dme/cr/print/' + recordId + '?t=' + Date.now();
                 if (modal) { modal.classList.remove('hidden'); modal.classList.add('flex'); document.body.style.overflow = 'hidden'; }
             };
 
