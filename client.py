@@ -14,11 +14,13 @@ import os
 import re
 import shutil
 import sys
+import subprocess
 import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 import zipfile
 from pathlib import Path
 from tkinter import LEFT, X, Label, StringVar, Tk, messagebox
@@ -29,6 +31,7 @@ APP_TITLE = "Cliniva — Poste client"
 DEFAULT_PORT = 8000
 CONFIG_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Cliniva" / "client_config.json"
 DOCX_MIME = "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64"
+CLIENT_UPDATED_ON_START = False
 
 
 def normalize_server_url(value: str) -> str:
@@ -77,11 +80,11 @@ def update_client_launcher(server_url: str) -> str | None:
             or len(expected_hash) != 64 or not package_url.startswith("/static/client_updates/")
             or ".." in package_url or manifest.get("contents") != ["client.py"]):
         raise ValueError("Le serveur n'a pas publié une mise à jour client.py valide.")
-    try:
-        settings = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        settings = {}
-    if settings.get("client_version") == version:
+    # Compare le contenu réellement exécuté, pas seulement la version mémorisée
+    # dans la configuration, afin qu'un ancien client ne saute pas la mise à jour.
+    global CLIENT_UPDATED_ON_START
+    current_version = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+    if current_version == version:
         return version
 
     download_url = server_url.rstrip("/") + package_url
@@ -104,6 +107,7 @@ def update_client_launcher(server_url: str) -> str | None:
         replacement.write_bytes(source)
         shutil.copystat(Path(__file__), replacement)
         os.replace(replacement, Path(__file__))
+        CLIENT_UPDATED_ON_START = True
     return version
 
 
@@ -206,8 +210,10 @@ class ClientHardwareBridge:
                 return {"success": False, "message":
                         "Le pilote WIA n'a fourni aucune image. Vérifie le pilote du scanner et réessaie." + detail}
 
-            fd, temporary_path = tempfile.mkstemp(prefix="cliniva_scan_", suffix=".jpg")
-            os.close(fd)
+            # Utilise un nom réellement absent. Certains pilotes WIA gardent un
+            # état interne du fichier même après suppression d'un fichier créé
+            # par mkstemp, et refusent alors SaveFile avec « Le fichier existe ».
+            temporary_path = str(Path(tempfile.gettempdir()) / f"cliniva_scan_{uuid.uuid4().hex}.jpg")
             save_image = getattr(image, "SaveFile", None)
             if not callable(save_image):
                 return {"success": False, "message":
@@ -400,14 +406,34 @@ class ClinivaClient:
 
     def _launch_window(self, server_url: str) -> None:
         self.root.destroy()
+        update_error = None
         try:
             try:
                 version = update_client_launcher(server_url)
-            except Exception:
-                # Le lanceur reste utilisable même si le serveur n'a pas encore
-                # publié de paquet client ou si le dossier est en lecture seule.
+            except Exception as exc:
+                update_error = str(exc)
                 version = None
             save_server_url(server_url, version)
+            if CLIENT_UPDATED_ON_START:
+                # Le processus courant a encore l'ancien pont WIA chargé en
+                # mémoire. Un nouveau processus lance la version réellement à jour.
+                subprocess.Popen(
+                    [sys.executable, str(Path(__file__).resolve()), server_url],
+                    cwd=str(Path(__file__).resolve().parent),
+                )
+                return
+            if update_error:
+                warning = Tk()
+                warning.withdraw()
+                messagebox.showwarning(
+                    APP_TITLE,
+                    "La mise à jour automatique du client n'a pas abouti. "
+                    "Le lanceur installé est conservé.\n\n"
+                    f"Détail : {update_error}\n\n"
+                    "Vérifie que le serveur a été redémarré et que le dossier du client est accessible en écriture.",
+                    parent=warning,
+                )
+                warning.destroy()
             open_client_window(server_url)
         except Exception as exc:
             fallback = Tk()
@@ -432,6 +458,12 @@ def main() -> int:
             try:
                 version = update_client_launcher(server_url)
                 save_server_url(server_url, version)
+                if CLIENT_UPDATED_ON_START:
+                    subprocess.Popen(
+                        [sys.executable, str(Path(__file__).resolve()), server_url],
+                        cwd=str(Path(__file__).resolve().parent),
+                    )
+                    return 0
             except Exception:
                 pass
             open_client_window(server_url)
