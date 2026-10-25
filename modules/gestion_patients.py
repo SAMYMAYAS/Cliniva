@@ -2916,8 +2916,10 @@ def render_html() -> str:
                             date: new Date().toLocaleDateString('fr-FR'),
                             data: res.image_data
                         }});
+                        const addedPieceIndex = scannedPiecesList.length - 1;
                         renderScannedPiecesGallery();
                         closeScannerDeviceModal();
+                        scrollPatientScannedPieceIntoView(addedPieceIndex);
                     }} else {{
                         alert(res.message || "Erreur de numérisation.");
                     }}
@@ -2953,7 +2955,9 @@ def render_html() -> str:
                             date: new Date().toLocaleDateString('fr-FR'),
                             data: e.target.result
                         }});
+                        const addedPieceIndex = scannedPiecesList.length - 1;
                         renderScannedPiecesGallery();
+                        scrollPatientScannedPieceIntoView(addedPieceIndex);
                     }};
                     reader.readAsDataURL(file);
                 }}
@@ -2970,6 +2974,7 @@ def render_html() -> str:
 
                 scannedPiecesList.forEach((piece, index) => {{
                     const div = document.createElement('div');
+                    div.id = `patientScannedPiece-${{index}}`;
                     div.className = "bg-white dark:bg-black/30 p-2.5 rounded-2xl border border-slate-200 dark:border-white/10 shadow-sm flex flex-col justify-between relative group";
                     const isPdf = String(piece.data || '').toLowerCase().startsWith('data:application/pdf');
 
@@ -2986,6 +2991,15 @@ def render_html() -> str:
                         <button type="button" onclick="removeScannedPiece(${{index}})" class="absolute top-1.5 right-1.5 bg-rose-500 text-white w-5 h-5 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition text-[10px]">✕</button>
                     `;
                     container.appendChild(div);
+                }});
+            }}
+
+            function scrollPatientScannedPieceIntoView(index) {{
+                requestAnimationFrame(() => {{
+                    const piece = document.getElementById(`patientScannedPiece-${{index}}`);
+                    piece?.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                    piece?.classList.add('ring-2', 'ring-brand-neon');
+                    window.setTimeout(() => piece?.classList.remove('ring-2', 'ring-brand-neon'), 1800);
                 }});
             }}
 
