@@ -3366,29 +3366,10 @@ def render_html(mode: str = "general") -> str:
             // 3. AUTO-SÉLECTION NOUVEAU PATIENT COMPLET (Z-[100])
             // =================================================================
             window.openPassagePatientForm = function() {{
-                if (passageEditMode) {{
-                    window.openFullPatientModal();
-                    return;
-                }}
-                if (typeof window.openPatientModal !== 'function') {{
-                    alert("Le formulaire complet du module Patients n'a pas pu être initialisé. Rechargez le module puis réessayez.");
-                    return;
-                }}
-                window.onPatientCreatedForPassage = async function(patient) {{
-                    try {{
-                        await window.loadReceptionPassagesModule();
-                        window.selectPassagePatient(Number(patient.id));
-                        window.checkPassageFormValidity();
-                    }} catch (err) {{
-                        console.error('Patient créé, mais impossible de le sélectionner dans le passage :', err);
-                        alert('Le patient a été créé. Recherchez-le dans le formulaire pour le sélectionner.');
-                    }} finally {{
-                        window.onPatientCreatedForPassage = null;
-                    }}
-                }};
-                const patientModal = document.getElementById('patientModal');
-                if (patientModal) patientModal.classList.add('z-[120]');
-                window.openPatientModal();
+                // Dans le contexte d'un passage, utiliser le formulaire embarqué
+                // afin que le scanner WIA et sa galerie restent liés à la fiche
+                // patient, sans dépendre de la modale globale du module Patients.
+                window.openFullPatientModal();
             }};
 
             window.openFullPatientModal = function() {{
