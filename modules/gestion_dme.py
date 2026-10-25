@@ -7383,6 +7383,9 @@ def _render_html() -> str:
             };
 
             window.openWordCrDocument = async function(recordId) {
+                const activeTab = (window.activeDmeTabs || []).find(tab => tab.key === window.currentActiveDmeKey);
+                const reportRecord = (activeTab?.data?.archived_crs || []).find(item => Number(item.id) === Number(recordId));
+                const reportName = String(reportRecord?.titre || reportRecord?.nom_fichier || `Compte rendu #${Number(recordId)}`).replace(/[.]docx$/i, '');
                 try {
                     const bridge = window.pywebview?.api;
                     if (bridge?.get_deployment_mode && await bridge.get_deployment_mode() === 'local') {
@@ -7451,7 +7454,7 @@ def _render_html() -> str:
                                     const state = await bridge.client_word_sync_status('dme_cr', Number(recordId));
                                     if (state?.status === 'synced') {
                                         clearInterval(syncPoll);
-                                        window.showToast('Compte rendu enregistré et synchronisé sur le serveur.', 'success');
+                                        window.showToast(`Compte rendu « ${reportName} » enregistré et synchronisé sur le serveur.`, 'success');
                                     } else if (state?.status === 'retrying' && !syncErrorShown) {
                                         syncErrorShown = true;
                                         window.showToast('La synchronisation est en attente : ' + (state.message || 'vérifiez la connexion au serveur.'), 'error');
