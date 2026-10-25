@@ -213,7 +213,11 @@ class ClientHardwareBridge:
                 return {"success": False, "message":
                         "Le pilote a terminé le scan sans renvoyer un fichier image exploitable. "
                         "Essaie le pilote WIA du fabricant ou vérifie son mode de numérisation."}
+            # mkstemp crée un fichier vide. WIA refuse d'écraser un fichier existant.
+            os.unlink(temporary_path)
             save_image(temporary_path)
+            if not os.path.isfile(temporary_path):
+                return {"success": False, "message": "Le scanner n'a pas créé le fichier image attendu."}
             content = Path(temporary_path).read_bytes()
             if not content or len(content) > 12 * 1024 * 1024:
                 return {"success": False, "message": "Le scan est vide ou dépasse 12 Mo. Réduis la résolution."}
