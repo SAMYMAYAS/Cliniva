@@ -715,6 +715,25 @@ async def api_get_passages(request: Request, service: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@reception_router.get("/patient/{patient_id}/identity-documents")
+async def api_get_patient_identity_documents(patient_id: int, request: Request):
+    _require_reception_permission(request, "reception_create")
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT pieces_scannees FROM patients WHERE id = %s;", (patient_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Patient introuvable.")
+    documents = row.get("pieces_scannees") or []
+    if isinstance(documents, str):
+        try:
+            documents = json.loads(documents)
+        except (TypeError, ValueError):
+            documents = []
+    if not isinstance(documents, list):
+        documents = []
+    return {"documents": [doc for doc in documents if isinstance(doc, dict) and doc.get("data")]}
+
+
 @reception_router.post("/patient/update-from-passage")
 async def api_update_patient_from_passage(payload: Dict[str, Any], request: Request):
     """Modifie les coordonnées du patient depuis un passage autorisé."""
@@ -2577,6 +2596,7 @@ def render_html(mode: str = "general") -> str:
             let currentPassageActs = [];
             let currentPassageTypeValue = '';
             let currentPassageScannedDocs = [];
+            let selectedPatientDocsRequest = 0;
             let receptionPatientScannedPieces = [];
             let activePassageScannerTarget = 'passage';
             let passageMobileScanToken = null;
@@ -3757,9 +3777,15 @@ def render_html(mode: str = "general") -> str:
                 }}
             }};
 
-            window.selectPassagePatient = function(patientId) {{
-                const patient = (receptionInitData.patients || []).find(p => p.id === patientId);
+            window.selectPassagePatient = async function(patientId) {{
+                const patient = (receptionInitData.patients || []).find(p => Number(p.id) === Number(patientId));
                 if (!patient) return;
+
+                const docsRequest = ++selectedPatientDocsRequest;
+                if (!passageEditMode) {{
+                    currentPassageScannedDocs = currentPassageScannedDocs.filter(doc => !doc?._patient_identity_doc);
+                    renderPassageScannedDocsGallery();
+                }}
 
                 document.getElementById('passagePatientId').value = patient.id;
                 document.getElementById('passagePatientSearchInput').value = `${{patient.nom}} ${{patient.prenom}}`;
@@ -3776,9 +3802,36 @@ def render_html(mode: str = "general") -> str:
                 card.classList.remove('hidden');
 
                 checkPassageFormValidity();
+
+                // Les pièces d'identité restent enregistrées dans la fiche patient.
+                // On les affiche aussi dans la galerie du passage sélectionné.
+                if (!passageEditMode) {{
+                    try {{
+                        const response = await fetch(`/api/reception/patient/${{encodeURIComponent(patient.id)}}/identity-documents`);
+                        const result = await response.json();
+                        if (!response.ok) throw new Error(result.detail || 'Impossible de charger les pièces du patient.');
+                        if (docsRequest !== selectedPatientDocsRequest
+                            || Number(document.getElementById('passagePatientId')?.value) !== Number(patient.id)) return;
+                        const patientDocs = Array.isArray(result.documents) ? result.documents : [];
+                        currentPassageScannedDocs.push(...patientDocs.map(doc => ({{
+                            ...doc,
+                            date: doc.date || '',
+                            _patient_identity_doc: true
+                        }})));
+                        renderPassageScannedDocsGallery();
+                    }} catch (error) {{
+                        console.error('Chargement des pièces d’identité du patient impossible :', error);
+                        if (typeof window.showToast === 'function') window.showToast(error.message, 'error');
+                    }}
+                }}
             }};
 
             window.clearSelectedPatient = function() {{
+                selectedPatientDocsRequest += 1;
+                if (!passageEditMode) {{
+                    currentPassageScannedDocs = currentPassageScannedDocs.filter(doc => !doc?._patient_identity_doc);
+                    renderPassageScannedDocsGallery();
+                }}
                 document.getElementById('passagePatientId').value = '';
                 document.getElementById('passagePatientSearchInput').value = '';
                 document.getElementById('patientSelectedSummaryCard').classList.add('hidden');
