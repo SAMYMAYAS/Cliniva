@@ -384,11 +384,11 @@ def render_html() -> str:
                 <input type="text" id="searchCrTemplateInput" oninput="filterCrTemplates()" placeholder="Rechercher par désignation, modalité, service, type (Word/HTML)..." class="w-full text-xs outline-none bg-transparent text-slate-700 dark:text-slate-200">
             </div>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full lg:w-auto lg:min-w-[24rem]">
-                <select id="crTemplateFilterModalite" onchange="filterCrTemplates()" aria-label="Filtrer par modalité" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none bg-slate-50 dark:bg-black/30 text-slate-700 dark:text-slate-200">
-                    <option value="">Toutes les modalités</option>
+                <select id="crTemplateFilterModalite" onchange="filterCrTemplates()" aria-label="Choisir une catégorie ou modalité" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none bg-slate-50 dark:bg-black/30 text-slate-700 dark:text-slate-200">
+                    <option value="">Choisir une catégorie / modalité…</option>
                 </select>
-                <select id="crTemplateFilterService" onchange="filterCrTemplates()" aria-label="Filtrer par service rattaché" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none bg-slate-50 dark:bg-black/30 text-slate-700 dark:text-slate-200">
-                    <option value="">Toutes les spécialités</option>
+                <select id="crTemplateFilterService" onchange="filterCrTemplates()" aria-label="Choisir un service rattaché" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none bg-slate-50 dark:bg-black/30 text-slate-700 dark:text-slate-200">
+                    <option value="">Choisir un service…</option>
                 </select>
             </div>
         </div>
@@ -624,8 +624,8 @@ def render_html() -> str:
                     crServicesList = data.services || [];
 
                     document.getElementById('totalCrTemplatesCount').innerText = data.total_count || crTemplatesData.length;
-                    filterCrTemplates();
                     populateCrDropdowns();
+                    filterCrTemplates();
                 } catch (err) {
                     console.error("Erreur chargement modèles CR:", err);
                 }
@@ -635,7 +635,7 @@ def render_html() -> str:
                 const q = (document.getElementById('searchCrTemplateInput')?.value || '').toLowerCase().trim();
                 const modalite = document.getElementById('crTemplateFilterModalite')?.value || '';
                 const service = document.getElementById('crTemplateFilterService')?.value || '';
-                filteredCrTemplatesList = crTemplatesData.filter(t => {
+                filteredCrTemplatesList = (!modalite && !service) ? [] : crTemplatesData.filter(t => {
                     const matchesText = !q ||
                         (t.designation && t.designation.toLowerCase().includes(q)) ||
                         (t.modalite && t.modalite.toLowerCase().includes(q)) ||
@@ -645,7 +645,9 @@ def render_html() -> str:
                         (t.date_heure_ajout && t.date_heure_ajout.toLowerCase().includes(q)) ||
                         String(t.id).includes(q);
                     return matchesText && (!modalite || t.modalite === modalite) && (!service || t.service === service);
-                });
+                }).sort((a, b) => String(a.designation || '').localeCompare(String(b.designation || ''), 'fr', { sensitivity: 'base', numeric: true })
+                    || String(a.modalite || '').localeCompare(String(b.modalite || ''), 'fr', { sensitivity: 'base' })
+                    || String(a.service || '').localeCompare(String(b.service || ''), 'fr', { sensitivity: 'base' }));
                 currentCrPage = 1;
                 renderCrTemplatesTable();
             };
@@ -656,6 +658,9 @@ def render_html() -> str:
 
                 const totalItems = filteredCrTemplatesList.length;
                 const totalPages = Math.ceil(totalItems / CR_PER_PAGE) || 1;
+                const category = document.getElementById('crTemplateFilterModalite')?.value || '';
+                const service = document.getElementById('crTemplateFilterService')?.value || '';
+                const hasSelection = Boolean(category || service);
 
                 if (currentCrPage > totalPages) currentCrPage = totalPages;
                 if (currentCrPage < 1) currentCrPage = 1;
@@ -664,8 +669,10 @@ def render_html() -> str:
                 const endIndex = startIndex + CR_PER_PAGE;
                 const pageItems = filteredCrTemplatesList.slice(startIndex, endIndex);
 
-                if (pageItems.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8 text-slate-400">Aucun modèle de compte rendu type trouvé.</td></tr>';
+                if (!hasSelection) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="py-14 text-center"><div class="mx-auto flex max-w-lg flex-col items-center gap-3"><span class="flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-300"><i class="ph-bold ph-funnel text-2xl"></i></span><strong class="text-sm text-slate-700 dark:text-slate-200">Choisissez une catégorie ou un service</strong><span class="text-xs text-slate-500 dark:text-slate-400">Les modèles de comptes rendus correspondants s’afficheront par ordre alphabétique.</span></div></td></tr>';
+                } else if (pageItems.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8 text-slate-400">Aucun modèle de compte rendu ne correspond à cette sélection.</td></tr>';
                 } else {
                     pageItems.forEach(t => {
                         const tr = document.createElement('tr');
@@ -722,7 +729,7 @@ def render_html() -> str:
                 const info = document.getElementById('crPaginationInfo');
                 const controls = document.getElementById('crPaginationControls');
 
-                if (totalItems > 0) {
+                if (hasSelection && totalItems > 0) {
                     paginationWrapper.classList.remove('hidden');
                     info.innerHTML = `Affichage de <strong>${startIndex + 1}</strong> à <strong>${Math.min(endIndex, totalItems)}</strong> sur <strong>${totalItems}</strong> modèles`;
 
@@ -775,12 +782,16 @@ def render_html() -> str:
                         : '<option value="">Aucune spécialité configurée</option>';
                 }
                 if (filterMod) {
-                    filterMod.innerHTML = '<option value="">Toutes les modalités</option>' +
+                    const previousValue = filterMod.value;
+                    filterMod.innerHTML = '<option value="">Choisir une catégorie / modalité…</option>' +
                         crModalitesList.map(m => `<option value="${m}">${m}</option>`).join('');
+                    if (crModalitesList.includes(previousValue)) filterMod.value = previousValue;
                 }
                 if (filterServ) {
-                    filterServ.innerHTML = '<option value="">Toutes les spécialités</option>' +
+                    const previousValue = filterServ.value;
+                    filterServ.innerHTML = '<option value="">Choisir un service…</option>' +
                         crServicesList.map(s => `<option value="${s}">${s}</option>`).join('');
+                    if (crServicesList.includes(previousValue)) filterServ.value = previousValue;
                 }
             };
 
