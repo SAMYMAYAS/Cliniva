@@ -1309,6 +1309,8 @@ class DmeManager:
                 cursor.execute("ALTER TABLE patient_dme_records ADD COLUMN IF NOT EXISTS verrouille BOOLEAN NOT NULL DEFAULT TRUE;")
                 cursor.execute("ALTER TABLE patient_dme_records ADD COLUMN IF NOT EXISTS specialite_consultation_json JSONB NOT NULL DEFAULT '{}'::jsonb;")
                 cursor.execute("ALTER TABLE patient_dme_records ADD COLUMN IF NOT EXISTS reset_history_json JSONB NOT NULL DEFAULT '[]'::jsonb;")
+                cursor.execute("ALTER TABLE patient_dme_records ADD COLUMN IF NOT EXISTS note_reprise TEXT NOT NULL DEFAULT ''; ")
+                cursor.execute("ALTER TABLE patient_dme_records ADD COLUMN IF NOT EXISTS note_medecin TEXT NOT NULL DEFAULT ''; ")
                 cursor.execute("ALTER TABLE patient_prescriptions ADD COLUMN IF NOT EXISTS id_consultation INT REFERENCES patient_dme_records(id) ON DELETE CASCADE;")
                 cursor.execute("""
                     UPDATE patient_prescriptions AS ordonnance
@@ -1395,6 +1397,7 @@ class DmeManager:
                                   p.versement,
                                   p.reste,
                                   p.medecin_traitant_id,
+                                  p.consultation_utilisateur,
                                   p.questionnaire_json,
                                   p.documents_scannes
                            FROM patient_passages p
@@ -1434,7 +1437,9 @@ class DmeManager:
                                   conduite_a_tenir,
                                   specialite_consultation_json,
                                   praticien,
-                                  verrouille
+                                  verrouille,
+                                  note_reprise,
+                                  note_medecin
                            FROM patient_dme_records
                            WHERE id_patient = %s AND id_passage = %s
                            ORDER BY id DESC LIMIT 1;
@@ -1496,8 +1501,9 @@ class DmeManager:
                 cursor.execute("""
                                SELECT id, nom, prenom, type_personnel, specialite
                                FROM clinic_staff
-                               WHERE type_personnel IN ('Docteur', 'Médecin', 'Professeur')
-                                  OR specialite ILIKE '%%radio%%'
+                               WHERE actif = TRUE
+                                 AND (type_personnel IN ('Docteur', 'Médecin', 'Professeur')
+                                      OR specialite ILIKE '%%radio%%')
                                ORDER BY nom ASC;
                                """)
                 radiologues = [dict(r) for r in cursor.fetchall()]
@@ -1686,7 +1692,8 @@ class DmeManager:
             "documents": archived_documents,
         }
 
-    def save_consultation(self, data: Dict[str, Any], user_fullname: str) -> Dict[str, Any]:
+    def save_consultation(self, data: Dict[str, Any], user_fullname: str, *, finalize: bool = True,
+                          handoff_note: Optional[str] = None, handoff_doctor: Optional[str] = None) -> Dict[str, Any]:
         """Enregistre les données cliniques et synchronise les actes avec la caisse."""
         self.ensure_dme_schema()
 
@@ -1740,22 +1747,25 @@ class DmeManager:
             return {"success": False, "message": "Identifiants manquants."}
 
         with get_db_cursor() as cursor:
-            cursor.execute("SELECT id_patient, statut FROM patient_passages WHERE id = %s FOR UPDATE;", (passage_id,))
+            cursor.execute("SELECT id_patient, statut, consultation_utilisateur FROM patient_passages WHERE id = %s FOR UPDATE;", (passage_id,))
             passage_row = cursor.fetchone()
             if not passage_row or passage_row.get("statut") != "En cours":
                 return {"success": False, "message": "Le passage doit être en cours pour enregistrer la consultation."}
             if int(passage_row.get("id_patient")) != int(patient_id):
                 return {"success": False, "message": "Ce passage ne correspond pas au patient sélectionné."}
+            owner = str(passage_row.get("consultation_utilisateur") or "").strip()
+            if owner and owner.casefold() != str(user_fullname or "").strip().casefold():
+                return {"success": False, "message": f"Consultation en cours par {owner}. Seul son médecin responsable peut la modifier."}
 
             if requested_consultation_id:
                 cursor.execute("""
-                    SELECT id, verrouille FROM patient_dme_records
+                    SELECT id, verrouille, praticien FROM patient_dme_records
                     WHERE id = %s AND id_patient = %s AND id_passage = %s
                     FOR UPDATE;
                 """, (requested_consultation_id, patient_id, passage_id))
             else:
                 cursor.execute("""
-                    SELECT id, verrouille FROM patient_dme_records
+                    SELECT id, verrouille, praticien FROM patient_dme_records
                     WHERE id_patient = %s AND id_passage = %s
                     ORDER BY id DESC LIMIT 1 FOR UPDATE;
                 """, (patient_id, passage_id))
@@ -1763,6 +1773,10 @@ class DmeManager:
 
             if requested_consultation_id and not existing:
                 return {"success": False, "message": "Cette consultation ne correspond pas au patient et au passage sélectionnés."}
+
+            existing_owner = str((existing or {}).get("praticien") or "").strip()
+            if existing_owner and existing_owner.casefold() != str(user_fullname or "").strip().casefold():
+                return {"success": False, "message": f"Consultation en cours par {existing_owner}. Seul son médecin responsable peut la modifier."}
 
             if existing and existing.get("verrouille", True):
                 return {"success": False, "message": "Cette consultation est déjà enregistrée et verrouillée en lecture seule."}
@@ -1779,20 +1793,23 @@ class DmeManager:
                         allergies_intolerances = %s, traitement_en_cours = %s,
                         antecedents_medicaux = %s, antecedents_chirurgicaux = %s,
                         notes_habitudes = %s, motif = %s, diagnostic = %s, conduite_a_tenir = %s,
-                        specialite_consultation_json = %s::jsonb, verrouille = TRUE,
+                        specialite_consultation_json = %s::jsonb,
+                        note_reprise = COALESCE(%s, note_reprise),
+                        note_medecin = COALESCE(%s, note_medecin),
+                        verrouille = %s,
                         date_consultation = CURRENT_TIMESTAMP
                     WHERE id = %s AND id_patient = %s AND id_passage = %s;
-                """, (*consultation_values, consultation_id, patient_id, passage_id))
+                """, (*consultation_values, handoff_note, handoff_doctor, not finalize, consultation_id, patient_id, passage_id))
             else:
                 cursor.execute("""
                     INSERT INTO patient_dme_records
                     (id_patient, id_passage, praticien, constantes_json, allergies_intolerances,
                      traitement_en_cours, antecedents_medicaux, antecedents_chirurgicaux,
                      notes_habitudes, motif, diagnostic, conduite_a_tenir,
-                     specialite_consultation_json, verrouille)
-                    VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, TRUE)
+                     specialite_consultation_json, verrouille, note_reprise, note_medecin)
+                    VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, COALESCE(%s, ''), COALESCE(%s, ''))
                     RETURNING id;
-                """, (patient_id, passage_id, *consultation_values))
+                """, (patient_id, passage_id, *consultation_values, not finalize, handoff_note, handoff_doctor))
                 consultation_id = cursor.fetchone()["id"]
 
             # Attache les anciennes ordonnances du même patient et passage
@@ -1821,9 +1838,12 @@ class DmeManager:
                                WHERE id = %s;
                                """, (actes_json, new_montant_total, new_reste, statut_paiement, passage_id))
 
-            cursor.execute("UPDATE patient_passages SET statut = 'Terminé' WHERE id = %s;", (passage_id,))
+            cursor.execute("UPDATE patient_passages SET statut = %s WHERE id = %s;", ("Terminé" if finalize else "En cours", passage_id))
 
-        return {"success": True, "message": "Consultation enregistrée et verrouillée en lecture seule !", "statut": "Terminé", "id_consultation": consultation_id}
+        return {"success": True,
+                "message": "Consultation enregistrée et verrouillée en lecture seule !" if finalize else "Consultation conservée en cours avec la note de reprise.",
+                "statut": "Terminé" if finalize else "En cours", "verrouille": finalize,
+                "id_consultation": consultation_id, "note_reprise": handoff_note, "note_medecin": handoff_doctor}
 
     def get_prescriptions_patient(self, patient_id: int, passage_id: int, consultation_id: Optional[int]) -> List[Dict[str, Any]]:
         self.ensure_dme_schema()
@@ -2101,6 +2121,16 @@ async def api_get_dme(patient_id: int, passage_id: int, request: Request):
         if not user:
             raise HTTPException(status_code=401, detail="Session expirée.")
         data = dme_manager.get_patient_dme_data(patient_id, passage_id)
+        current_user_name = " ".join(part for part in (str(user.get("prenom") or "").strip(), str(user.get("nom") or "").strip()) if part).strip()
+        current_user_name = current_user_name or str(user.get("login") or "").strip()
+        consultation = data.get("dme") or {}
+        consultation_owner = str((data.get("passage") or {}).get("consultation_utilisateur") or consultation.get("praticien") or "").strip()
+        consultation["consultation_en_cours_par_autre"] = bool(
+            consultation.get("id") and not consultation.get("verrouille", True)
+            and consultation_owner and consultation_owner.casefold() != current_user_name.casefold()
+        )
+        consultation["consultation_owner"] = consultation_owner
+        data["dme"] = consultation
         data["dme_display_permissions"] = display_permissions(user)
         from modules.dme_reset import user_can_reset_dme
         data["dme_can_reset"] = user_can_reset_dme(user)
@@ -2134,26 +2164,28 @@ async def api_start_dme_consultation(payload: Dict[str, Any], request: Request):
         part for part in (str(user.get("prenom") or "").strip(), str(user.get("nom") or "").strip()) if part
     ) or str(user.get("login") or "Utilisateur connecté").strip()
     with get_db_cursor() as cursor:
-        cursor.execute("SELECT id_patient FROM patient_passages WHERE id = %s FOR UPDATE;", (passage_id,))
+        cursor.execute("SELECT id_patient, statut, consultation_utilisateur FROM patient_passages WHERE id = %s FOR UPDATE;", (passage_id,))
         passage = cursor.fetchone()
         if not passage:
             raise HTTPException(status_code=404, detail="Passage introuvable.")
         if int(passage.get("id_patient")) != int(patient_id):
             raise HTTPException(status_code=403, detail="Ce passage ne correspond pas à ce patient.")
         cursor.execute("""
-            SELECT id, verrouille FROM patient_dme_records
+            SELECT id, verrouille, praticien FROM patient_dme_records
             WHERE id_patient = %s AND id_passage = %s
             ORDER BY id DESC LIMIT 1 FOR UPDATE;
         """, (patient_id, passage_id))
         consultation = cursor.fetchone()
         if consultation and consultation.get("verrouille", True):
             raise HTTPException(status_code=409, detail="Cette consultation est déjà enregistrée en lecture seule.")
+        current_owner = str(passage.get("consultation_utilisateur") or (consultation.get("praticien") if consultation else "") or "").strip()
+        if consultation and current_owner and current_owner.casefold() != user_fullname.casefold():
+            raise HTTPException(status_code=409, detail=f"Consultation déjà en cours par {current_owner}. Vous pouvez uniquement l’ouvrir en lecture seule.")
         if consultation:
             consultation_id = consultation["id"]
-            cursor.execute(
-                "UPDATE patient_dme_records SET praticien = %s WHERE id = %s;",
-                (user_fullname, consultation_id),
-            )
+            # Reprise autorisée pour le médecin responsable; un autre utilisateur
+            # ne peut ni prendre le verrou ni remplacer le praticien.
+            cursor.execute("UPDATE patient_dme_records SET praticien = %s WHERE id = %s;", (user_fullname, consultation_id))
         else:
             cursor.execute("""
                 INSERT INTO patient_dme_records (id_patient, id_passage, praticien, verrouille)
@@ -2172,6 +2204,44 @@ async def api_start_dme_consultation(payload: Dict[str, Any], request: Request):
         )
     track_action(request, "CONSULTATION_DEMARREE", f"Consultation démarrée pour le passage #{passage_id}")
     return {"success": True, "statut": "En cours", "id_consultation": consultation_id}
+
+
+@dme_router.post("/consultation/keep")
+async def api_keep_dme_consultation(payload: Dict[str, Any], request: Request):
+    user = get_current_user_optional(request)
+    if not user or user.get("status") != "Actif":
+        raise HTTPException(status_code=401, detail="Session expirée ou compte inactif.")
+    note = str(payload.get("note_reprise") or "").strip()
+    doctor_id = payload.get("note_medecin_id")
+    if not note:
+        raise HTTPException(status_code=400, detail="Écrivez une note avant de garder la consultation en cours.")
+    if not doctor_id:
+        raise HTTPException(status_code=400, detail="Choisissez le médecin à consulter.")
+    try:
+        doctor_id = int(doctor_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Médecin sélectionné invalide.")
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT prenom, nom, specialite FROM clinic_staff
+            WHERE id = %s AND actif = TRUE
+              AND (type_personnel IN ('Docteur', 'Médecin', 'Professeur') OR specialite ILIKE '%%radio%%')
+        """, (doctor_id,))
+        doctor = cursor.fetchone()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Le médecin sélectionné est introuvable ou inactif.")
+    doctor_name = " ".join(part for part in (str(doctor.get("prenom") or "").strip(), str(doctor.get("nom") or "").strip()) if part)
+    if doctor.get("specialite"):
+        doctor_name += f" — {doctor['specialite']}"
+    user_fullname = " ".join(part for part in (str(user.get("prenom") or "").strip(), str(user.get("nom") or "").strip()) if part) or str(user.get("login") or "Utilisateur connecté")
+    result = dme_manager.save_consultation(
+        payload, user_fullname, finalize=False,
+        handoff_note=note[:5000], handoff_doctor=doctor_name[:300]
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=409, detail=result.get("message") or "Impossible de garder cette consultation.")
+    track_action(request, "CONSULTATION_MISE_EN_ATTENTE", f"Consultation #{result.get('id_consultation')} conservée en cours; avis demandé à {doctor_name}")
+    return result
 
 
 @dme_router.post("/consultation/reset")
@@ -3069,6 +3139,9 @@ def _render_html() -> str:
                                 <span class="text-[11px] text-slate-400">Chargement…</span>
                             </div>
                         </div>
+                        <div id="dmeHandoffNoteBanner" class="hidden mt-3 max-w-3xl rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100">
+                            <div class="flex items-start gap-2"><i class="ph-bold ph-notepad text-base text-amber-600"></i><div><b>Note de reprise</b><div id="dmeHandoffNoteText" class="mt-1 whitespace-pre-wrap"></div><div id="dmeHandoffDoctorText" class="mt-1 text-[10px] font-bold"></div></div></div>
+                        </div>
                     </div>
                 </div>
 
@@ -3704,6 +3777,32 @@ def _render_html() -> str:
         </div>
     </div>
 
+    <div id="dmeCloseConsultationModal" class="fixed inset-0 bg-slate-950/70 backdrop-blur-sm hidden items-center justify-center z-[2147483600] p-4" role="dialog" aria-modal="true" aria-labelledby="dmeCloseConsultationTitle">
+        <div class="w-full max-w-2xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-white/10 dark:bg-[#121c15]">
+            <div class="border-b border-slate-100 bg-slate-50/80 p-5 dark:border-white/10 dark:bg-black/20">
+                <h3 id="dmeCloseConsultationTitle" class="text-base font-extrabold text-slate-900 dark:text-white">Fermer la consultation en cours</h3>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Choisissez quoi faire des informations saisies avant de fermer ce dossier.</p>
+            </div>
+            <div class="space-y-3 p-5">
+                <button type="button" onclick="saveAndCloseDmeConsultation()" class="flex w-full items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-left hover:bg-emerald-100 dark:border-emerald-900/50 dark:bg-emerald-950/20">
+                    <i class="ph-bold ph-floppy-disk text-2xl text-emerald-700"></i><span><b class="block text-sm text-emerald-900 dark:text-emerald-200">Enregistrer la consultation</b><small class="text-[11px] text-slate-600 dark:text-slate-300">La consultation sera finalisée et verrouillée en lecture seule.</small></span>
+                </button>
+                <button id="dmeCloseResetButton" type="button" onclick="resetAndCloseDmeConsultation()" class="flex w-full items-center gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-left hover:bg-rose-100 dark:border-rose-900/50 dark:bg-rose-950/20">
+                    <i class="ph-bold ph-arrow-counter-clockwise text-2xl text-rose-700"></i><span><b class="block text-sm text-rose-900 dark:text-rose-200">Fermer et réinitialiser</b><small id="dmeCloseResetHint" class="text-[11px] text-slate-600 dark:text-slate-300">Les données saisies dans cette consultation seront effacées.</small></span>
+                </button>
+                <button id="dmeCloseKeepButton" type="button" onclick="showDmeHandoffFields()" class="flex w-full items-center gap-3 rounded-2xl border border-sky-200 bg-sky-50 p-4 text-left hover:bg-sky-100 dark:border-sky-900/50 dark:bg-sky-950/20">
+                    <i class="ph-bold ph-pause-circle text-2xl text-sky-700"></i><span><b class="block text-sm text-sky-900 dark:text-sky-200">Garder en l’état et fermer</b><small class="text-[11px] text-slate-600 dark:text-slate-300">La consultation restera en cours pour pouvoir être reprise.</small></span>
+                </button>
+                <div id="dmeHandoffFields" class="hidden space-y-3 rounded-2xl border border-sky-200 bg-sky-50/60 p-4 dark:border-sky-900/50 dark:bg-sky-950/10">
+                    <label class="block"><span class="mb-1 block text-[11px] font-bold text-slate-700 dark:text-slate-200">Note visible par les utilisateurs *</span><textarea id="dmeHandoffNoteInput" rows="3" maxlength="5000" placeholder="Ex. À reprendre demain, demander l’avis d’un autre médecin…" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs text-slate-800 outline-none focus:border-sky-400 dark:border-white/10 dark:bg-black/20 dark:text-white"></textarea></label>
+                    <label class="block"><span class="mb-1 block text-[11px] font-bold text-slate-700 dark:text-slate-200">Médecin à consulter *</span><select id="dmeHandoffDoctorSelect" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs text-slate-800 outline-none focus:border-sky-400 dark:border-white/10 dark:bg-black/20 dark:text-white"><option value="">Chargement des médecins…</option></select></label>
+                    <div class="flex justify-end"><button type="button" onclick="keepAndCloseDmeConsultation()" class="inline-flex items-center gap-2 rounded-xl bg-sky-700 px-4 py-2.5 text-xs font-extrabold text-white hover:bg-sky-800"><i class="ph-bold ph-pause"></i>Garder la consultation et fermer</button></div>
+                </div>
+            </div>
+            <div class="flex justify-end border-t border-slate-100 p-4 dark:border-white/10"><button type="button" onclick="cancelDmeCloseConsultation()" class="rounded-xl px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-white/5">Continuer la consultation</button></div>
+        </div>
+    </div>
+
     <!-- AJOUT RAPIDE D'UN MÉDICAMENT DEPUIS LA GÉNÉRATION D'ORDONNANCE -->
     <div id="dmeAddMedicationModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-center justify-center z-[130] p-4">
         <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-lg shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
@@ -4197,13 +4296,16 @@ def _render_html() -> str:
                 window.openDmeDicomPrint();
             };
 
-            function askDmeOpenMode(isLocked) {
+            function askDmeOpenMode(isLocked, isOwnedByAnotherUser = false, ownerName = '') {
                 const modal = document.getElementById('dmeOpenModeModal');
                 const message = document.getElementById('dmeOpenModeMessage');
                 const executeButton = document.getElementById('dmeOpenExecuteButton');
                 if (!modal) return Promise.resolve('lecture');
-                if (isLocked) {
-                    if (message) message.textContent = 'Cette consultation est déjà enregistrée et verrouillée. Vous pouvez consulter les informations et ouvrir les documents en lecture seule.';
+                if (isLocked || isOwnedByAnotherUser) {
+                    const ownerText = isOwnedByAnotherUser && ownerName ? ` Consultation en cours par ${ownerName}.` : '';
+                    if (message) message.textContent = isLocked
+                        ? 'Cette consultation est déjà enregistrée et verrouillée. Vous pouvez consulter les informations et ouvrir les documents en lecture seule.'
+                        : `Un autre utilisateur exécute cette consultation.${ownerText} Vous pouvez uniquement consulter le dossier en lecture seule.`;
                     if (executeButton) executeButton.classList.add('hidden');
                 } else {
                     if (message) message.textContent = 'Choisissez entre la consultation du dossier en lecture seule ou le démarrage de la consultation médicale.';
@@ -4251,13 +4353,14 @@ def _render_html() -> str:
                     const data = await res.json();
                     if (!data.patient || !data.passage) throw new Error('Le serveur a renvoyé des données patient ou passage incomplètes.');
                     const isLocked = Boolean(data.dme && data.dme.id && data.dme.verrouille);
-                    const openMode = await askDmeOpenMode(isLocked);
+                    const isOwnedByAnotherUser = Boolean(data.dme?.consultation_en_cours_par_autre);
+                    const openMode = await askDmeOpenMode(isLocked, isOwnedByAnotherUser, data.dme?.consultation_owner || '');
                     if (!openMode) {
                         if (loadingNotice) loadingNotice.classList.add('hidden');
                         return;
                     }
 
-                    if (openMode === 'execution' && !isLocked) {
+                    if (openMode === 'execution' && !isLocked && !isOwnedByAnotherUser) {
                         const startResponse = await fetch('/api/dme/consultation/start', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -4285,7 +4388,7 @@ def _render_html() -> str:
                         consultationId: data.dme?.id || null,
                         title: `${data.patient.nom} ${data.patient.prenom}`,
                         data: data,
-                    mode: isLocked ? 'lecture' : openMode,
+                        mode: (isLocked || isOwnedByAnotherUser) ? 'lecture' : openMode,
                         currentSubTab: 'consultation'
                     };
 
@@ -4612,14 +4715,109 @@ def _render_html() -> str:
                 displayActivePatientDme();
             };
 
+            let pendingDmeCloseTabKey = null;
             window.closeDmeTab = function(key, e) {
-                e.stopPropagation();
+                e?.stopPropagation();
+                const closingTab = window.activeDmeTabs.find(t => t.key === key);
+                if (closingTab?.mode === 'execution' && !closingTab.data?.dme?.verrouille) {
+                    window.currentActiveDmeKey = key;
+                    displayActivePatientDme();
+                    pendingDmeCloseTabKey = key;
+                    openDmeCloseConsultation(closingTab);
+                    return;
+                }
+                removeDmeTabNow(key);
+            };
+
+            function removeDmeTabNow(key) {
                 window.activeDmeTabs = window.activeDmeTabs.filter(t => t.key !== key);
                 if (window.currentActiveDmeKey === key) {
                     window.currentActiveDmeKey = window.activeDmeTabs.length > 0 ? window.activeDmeTabs[window.activeDmeTabs.length - 1].key : null;
                 }
                 renderDmeTabsBar();
                 displayActivePatientDme();
+            }
+
+            function openDmeCloseConsultation(tab) {
+                const modal = document.getElementById('dmeCloseConsultationModal');
+                const resetButton = document.getElementById('dmeCloseResetButton');
+                const resetHint = document.getElementById('dmeCloseResetHint');
+                const doctorSelect = document.getElementById('dmeHandoffDoctorSelect');
+                const noteInput = document.getElementById('dmeHandoffNoteInput');
+                const canReset = getDmeResetPermission(tab) === true;
+                if (resetButton) {
+                    resetButton.disabled = !canReset;
+                    resetButton.classList.toggle('opacity-50', !canReset);
+                    resetButton.classList.toggle('cursor-not-allowed', !canReset);
+                    resetButton.title = canReset ? '' : 'Autorisation « Réinitialiser une consultation DME en cours » requise.';
+                }
+                if (resetHint && !canReset) resetHint.textContent = 'Option réservée aux utilisateurs ayant le droit de réinitialiser une consultation DME.';
+                if (noteInput) noteInput.value = '';
+                if (doctorSelect) {
+                    const doctors = (tab?.data?.radiologues || []).filter(doc => doc && doc.id);
+                    doctorSelect.innerHTML = '<option value="">Choisir un médecin…</option>';
+                    doctors.forEach(doc => {
+                        const name = [doc.prenom, doc.nom].filter(Boolean).join(' ').trim() || 'Médecin';
+                        const option = new Option(doc.specialite ? `${name} — ${doc.specialite}` : name, String(doc.id));
+                        doctorSelect.add(option);
+                    });
+                    if (doctors.length === 0) doctorSelect.innerHTML = '<option value="">Aucun médecin actif dans le personnel</option>';
+                }
+                document.getElementById('dmeHandoffFields')?.classList.add('hidden');
+                if (modal) modal.classList.remove('hidden');
+            }
+
+            window.cancelDmeCloseConsultation = function() {
+                document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                document.getElementById('dmeHandoffFields')?.classList.add('hidden');
+                pendingDmeCloseTabKey = null;
+            };
+
+            window.showDmeHandoffFields = function() {
+                document.getElementById('dmeHandoffFields')?.classList.remove('hidden');
+                document.getElementById('dmeHandoffNoteInput')?.focus();
+            };
+
+            window.saveAndCloseDmeConsultation = async function() {
+                const key = pendingDmeCloseTabKey;
+                if (!key) return;
+                document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                if (await window.saveActiveDmeConsultation({ closeAfter: true })) pendingDmeCloseTabKey = null;
+                else document.getElementById('dmeCloseConsultationModal')?.classList.remove('hidden');
+            };
+
+            window.keepAndCloseDmeConsultation = async function() {
+                const key = pendingDmeCloseTabKey;
+                const note = document.getElementById('dmeHandoffNoteInput')?.value?.trim() || '';
+                const doctorId = document.getElementById('dmeHandoffDoctorSelect')?.value || '';
+                if (!note) { alert('Écrivez une note de reprise pour les autres utilisateurs.'); return; }
+                if (!doctorId) { alert('Choisissez le médecin à consulter.'); return; }
+                document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                if (await window.saveActiveDmeConsultation({ closeAfter: true, keepOpen: true, note, doctorId })) pendingDmeCloseTabKey = null;
+                else document.getElementById('dmeCloseConsultationModal')?.classList.remove('hidden');
+            };
+
+            window.resetAndCloseDmeConsultation = async function() {
+                const key = pendingDmeCloseTabKey;
+                const tab = window.activeDmeTabs.find(t => t.key === key);
+                if (!tab || getDmeResetPermission(tab) !== true) return;
+                const button = document.getElementById('dmeCloseResetButton');
+                if (button) button.disabled = true;
+                try {
+                    const response = await fetch('/api/dme/consultation/reset', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({id_patient: Number(tab.patientId), id_passage: Number(tab.passageId), id_consultation: Number(tab.consultationId || tab.data?.dme?.id)})
+                    });
+                    const result = await response.json();
+                    if (!response.ok || !result.success) throw new Error(result.detail || result.message || 'Réinitialisation impossible.');
+                    document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                    pendingDmeCloseTabKey = null;
+                    removeDmeTabNow(key);
+                    if (typeof window.loadReceptionPassagesModule === 'function') window.loadReceptionPassagesModule();
+                } catch (error) {
+                    alert(error.message || 'Impossible de réinitialiser la consultation.');
+                    if (button) button.disabled = false;
+                }
             };
 
             function applyDmeAccessMode(currentTab) {
@@ -5290,6 +5488,14 @@ def _render_html() -> str:
                 document.getElementById('dme_hdr_tel').innerText = p.telephone_1 || '-';
                 document.getElementById('dme_hdr_location').innerText = `${p.commune || ''} (${p.wilaya || ''})`;
                 document.getElementById('dme_hdr_medecin').innerText = pass.medecin_nom ? `${pass.medecin_grade || 'Dr.'} ${pass.medecin_nom}` : 'Aucun';
+                const handoffBanner = document.getElementById('dmeHandoffNoteBanner');
+                const handoffNote = String(dme.note_reprise || '').trim();
+                if (handoffBanner) {
+                    handoffBanner.classList.toggle('hidden', !handoffNote);
+                    document.getElementById('dmeHandoffNoteText').textContent = handoffNote;
+                    const doctorText = String(dme.note_medecin || '').trim();
+                    document.getElementById('dmeHandoffDoctorText').textContent = doctorText ? `Avis demandé à : ${doctorText}` : '';
+                }
                 renderDmePassagePrestations(Array.isArray(pass.actes) ? pass.actes : [], pass.type_passage);
 
                 const questionnaire = pass.questionnaire || {};
@@ -7063,13 +7269,13 @@ def _render_html() -> str:
                 }
             };
 
-            window.saveActiveDmeConsultation = async function() {
-                if (window.activeDmeTabs.find(item => item.key === window.currentActiveDmeKey)?.resetting) return;
+            window.saveActiveDmeConsultation = async function(options = {}) {
+                if (window.activeDmeTabs.find(item => item.key === window.currentActiveDmeKey)?.resetting) return false;
                 const currentTab = window.activeDmeTabs.find(t => t.key === window.currentActiveDmeKey);
-                if (!currentTab) return;
+                if (!currentTab) return false;
                 if (currentTab.mode !== 'execution' || currentTab.data?.dme?.verrouille) {
                     alert("Cette consultation est en lecture seule.");
-                    return;
+                    return false;
                 }
 
                 // Le tableau de rééducation stocke ses lignes dans un champ JSON caché.
@@ -7101,40 +7307,57 @@ def _render_html() -> str:
                     donnees_specialisees: collectDmeSpecialtyFields(),
                     actes: currentDmeActs
                 };
+                if (options.keepOpen) {
+                    payload.note_reprise = options.note;
+                    payload.note_medecin_id = Number(options.doctorId);
+                }
 
                 try {
-                    const res = await fetch('/api/dme/save', {
+                    const res = await fetch(options.keepOpen ? '/api/dme/consultation/keep' : '/api/dme/save', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload)
-                    }).then(r => r.json());
+                    }).then(async response => {
+                        const body = await response.json().catch(() => ({}));
+                        if (!response.ok) throw new Error(body.detail || body.message || 'Enregistrement impossible.');
+                        return body;
+                    });
 
                     if (res.success) {
-                        alert("✅ " + res.message);
+                        if (!options.closeAfter) alert("✅ " + res.message);
                         currentTab.data.dme = {
                             ...currentTab.data.dme,
                             ...payload,
                             id: res.id_consultation || currentTab.consultationId || currentTab.data.dme?.id,
                             constantes: payload.constantes,
                             praticien: res.praticien || currentTab.data.dme?.praticien,
-                            verrouille: true
+                            verrouille: options.keepOpen ? false : true,
+                            note_reprise: options.keepOpen ? res.note_reprise : currentTab.data.dme?.note_reprise,
+                            note_medecin: options.keepOpen ? res.note_medecin : currentTab.data.dme?.note_medecin
                         };
                         currentTab.consultationId = currentTab.data.dme.id;
                         currentTab.data.passage.actes = currentDmeActs;
-                        currentTab.data.passage.statut = res.statut || 'Terminé';
+                        currentTab.data.passage.statut = res.statut || (options.keepOpen ? 'En cours' : 'Terminé');
                         currentTab.data.historique = (currentTab.data.historique || []).map(item =>
                             Number(item.id_passage) === Number(currentTab.passageId)
                                 ? { ...item, statut: currentTab.data.passage.statut, diagnostic: payload.diagnostic, praticien: currentTab.data.dme.praticien, constantes: payload.constantes }
                                 : item
                         );
-                        currentTab.mode = 'lecture';
-                        displayActivePatientDme();
+                        currentTab.mode = options.keepOpen ? 'execution' : 'lecture';
+                        if (options.closeAfter) {
+                            document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                            pendingDmeCloseTabKey = null;
+                            removeDmeTabNow(currentTab.key);
+                        } else displayActivePatientDme();
                         if (typeof window.loadReceptionPassagesModule === 'function') window.loadReceptionPassagesModule();
+                        return true;
                     } else {
                         alert("❌ " + res.message);
+                        return false;
                     }
                 } catch (err) {
-                    alert("Erreur de sauvegarde du DME.");
+                    alert(err.message || "Erreur de sauvegarde du DME.");
+                    return false;
                 }
             };
 

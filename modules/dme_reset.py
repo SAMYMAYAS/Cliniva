@@ -71,6 +71,7 @@ def reset_active_consultation(cursor, user, patient_id, passage_id, consultation
                     'date', CURRENT_TIMESTAMP, 'user_id', %s,
                     'snapshot', to_jsonb(d) - 'reset_history_json', 'related', %s::jsonb)),
             constantes_json='{}'::jsonb, specialite_consultation_json='{}'::jsonb,
+            note_reprise='', note_medecin='',
             allergies_intolerances='', traitement_en_cours='', antecedents_medicaux='',
             antecedents_chirurgicaux='', notes_habitudes='', motif='', examen_clinique='',
             diagnostic='', conduite_a_tenir='', remarques='', ordonnance_text=''
