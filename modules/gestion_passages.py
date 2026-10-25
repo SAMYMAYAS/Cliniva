@@ -2446,11 +2446,11 @@ def render_html(mode: str = "general") -> str:
     </div>
 
     <!-- ================= MODALE APERÇU DOCUMENT AVANT VALIDATION ================= -->
-    <div id="passageDocPreviewModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center hidden z-[110] p-4">
+    <div id="passageDocPreviewModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center hidden z-[10000] p-4" role="dialog" aria-modal="true" aria-labelledby="passageDocPreviewHeading" tabindex="-1">
         <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-4xl max-h-[92vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
             <div class="px-6 py-3.5 border-b border-slate-100 dark:border-white/5 flex justify-between items-center bg-slate-50 dark:bg-black/20">
                 <div>
-                    <h3 class="text-sm font-bold text-slate-800 dark:text-white">Aperçu du Document Scanné</h3>
+                    <h3 id="passageDocPreviewHeading" class="text-sm font-bold text-slate-800 dark:text-white">Aperçu du Document Scanné</h3>
                     <p id="passageDocPreviewTitle" class="text-[11px] text-slate-400">Vérifiez la lisibilité avant validation définitive.</p>
                     <p id="passageDocPreviewSize" class="text-[11px] font-semibold text-slate-500 dark:text-slate-300 mt-1">Taille : — Mo</p>
                 </div>
@@ -4058,7 +4058,11 @@ def render_html(mode: str = "general") -> str:
                 if (statusMsg) statusMsg.classList.add('hidden');
                 if (noScanner) noScanner.classList.add('hidden');
                 if (select) select.innerHTML = '<option value="">Recherche du matériel en cours...</option>';
-                if (modal) modal.classList.remove('hidden');
+                if (modal) {{
+                    modal.style.zIndex = '10000';
+                    modal.classList.remove('hidden');
+                    modal.focus?.();
+                }}
 
                 try {{
                     const bridge = window.pywebview?.api;
@@ -4137,7 +4141,11 @@ def render_html(mode: str = "general") -> str:
                 if (sizeLabel) sizeLabel.textContent = `Taille : ${{formatScannedDocumentSize(base64Data)}}`;
                 if (img) {{ img.classList.toggle('hidden', isPdf); img.src = isPdf ? '' : base64Data; }}
                 if (pdf) {{ pdf.classList.toggle('hidden', !isPdf); pdf.src = isPdf ? base64Data : 'about:blank'; }}
-                if (modal) modal.classList.remove('hidden');
+                if (modal) {{
+                    modal.style.zIndex = '10000';
+                    modal.classList.remove('hidden');
+                    modal.focus?.();
+                }}
             }}
 
             window.validatePassageDocPreview = function() {{
