@@ -2414,6 +2414,17 @@ def render_html() -> str:
                     <p class="text-[11px] leading-snug">Vérifiez la connexion USB de votre scanneur puis réessayez.</p>
                 </div>
 
+                <div class="border-t border-slate-100 dark:border-white/10 pt-3">
+                    <button type="button" onclick="startPatientPhoneScan()" class="w-full px-4 py-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-300 text-xs font-bold inline-flex justify-center items-center gap-2 border border-emerald-200 dark:border-emerald-800">
+                        <i class="ph-bold ph-qr-code text-base"></i> Scanner avec mon téléphone
+                    </button>
+                    <div id="patientPhoneScanPanel" class="hidden mt-3 p-3 rounded-2xl bg-white dark:bg-black/30 border border-slate-200 dark:border-white/10 text-center">
+                        <p class="text-[11px] text-slate-600 dark:text-slate-300 mb-2">Connectez le téléphone au même réseau, scannez ce QR code, prenez la photo puis validez son envoi.</p>
+                        <img id="patientPhoneScanQr" class="mx-auto w-44 h-44 object-contain rounded-xl bg-white p-2" alt="QR code de scan mobile">
+                        <p id="patientPhoneScanStatus" class="text-[10px] text-slate-500 mt-2">Création de la session…</p>
+                    </div>
+                </div>
+
                 <div id="scannerStatusMsg" class="hidden text-center py-2 text-xs font-bold text-brand-neon">
                     ⏳ Numérisation en cours... Veuillez patienter.
                 </div>
@@ -2429,6 +2440,23 @@ def render_html() -> str:
         </div>
     </div>
 
+    <div id="patientScanPreviewModal" class="fixed inset-0 bg-black/85 backdrop-blur-md hidden z-[10001] p-4 flex items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="patientScanPreviewHeading" tabindex="-1">
+        <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-4xl max-h-[92vh] flex flex-col shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
+                <div><h3 id="patientScanPreviewHeading" class="text-sm font-bold text-slate-800 dark:text-white">Vérifier le document d’identité</h3><p id="patientScanPreviewTitle" class="text-[11px] text-slate-400">Validez pour l’ajouter à la fiche patient.</p></div>
+                <button type="button" onclick="cancelPatientScanPreview()" class="text-slate-400 p-2" aria-label="Fermer">✕</button>
+            </div>
+            <div class="p-5 flex-1 min-h-0 overflow-auto bg-slate-100 dark:bg-black/40 flex items-center justify-center">
+                <img id="patientScanPreviewImage" class="hidden max-w-full max-h-[65vh] object-contain rounded-xl shadow-lg bg-white" alt="Aperçu du document scanné">
+                <iframe id="patientScanPreviewPdf" class="hidden w-full h-[65vh] rounded-xl bg-white"></iframe>
+            </div>
+            <div class="px-6 py-4 border-t border-slate-100 dark:border-white/5 flex justify-end gap-3">
+                <button type="button" onclick="cancelPatientScanPreview()" class="px-4 py-2 rounded-xl text-slate-500 text-xs font-semibold">Reprendre / Annuler</button>
+                <button type="button" onclick="validatePatientScanPreview()" class="px-5 py-2.5 rounded-xl bg-brand-neon text-black text-xs font-bold">✓ Valider et ajouter à la fiche</button>
+            </div>
+        </div>
+    </div>
+
     <!-- SCRIPT JS COMPLET AVEC PAGINATION PAR 15 -->
     <script>
         (function() {{
@@ -2439,6 +2467,11 @@ def render_html() -> str:
             const PATIENTS_PER_PAGE = 15;
 
             let scannedPiecesList = [];
+            let pendingPatientScannedPiece = null;
+            let patientMobileScanToken = null;
+            let patientMobileScanTimer = null;
+            let patientMobileScanCursor = 0;
+            let patientMobileScanDocType = '';
             let currentMediaStream = null;
 
             window.loadPatientsModule = async function() {{
@@ -2636,6 +2669,8 @@ def render_html() -> str:
 
             window.closePatientModal = function() {{
                 document.getElementById('patientModal').classList.add('hidden');
+                stopPatientPhoneScan();
+                if (pendingPatientScannedPiece) cancelPatientScanPreview();
                 // Effacer le raccordement passage si la création a été annulée.
                 window.onPatientCreatedForPassage = null;
             }};
@@ -2872,6 +2907,8 @@ def render_html() -> str:
 
             // Scanneur WIA Physique
             window.openScannerDeviceModal = async function() {{
+                document.getElementById('noScannerAlert')?.classList.add('hidden');
+                document.getElementById('patientPhoneScanPanel')?.classList.add('hidden');
                 const scannerModal = document.getElementById('scannerDeviceModal');
                 scannerModal.style.zIndex = '10000';
                 scannerModal.classList.remove('hidden');
@@ -2898,7 +2935,91 @@ def render_html() -> str:
 
             window.closeScannerDeviceModal = function() {{
                 document.getElementById('scannerDeviceModal').classList.add('hidden');
+                stopPatientPhoneScan();
             }};
+
+            window.startPatientPhoneScan = async function(){{
+                const panel = document.getElementById('patientPhoneScanPanel');
+                const qr = document.getElementById('patientPhoneScanQr');
+                const status = document.getElementById('patientPhoneScanStatus');
+                panel?.classList.remove('hidden');
+                if (status) status.textContent = 'Création de la session sécurisée…';
+                stopPatientPhoneScan();
+                patientMobileScanDocType = document.getElementById('patientTypePiece')?.value || 'Document patient';
+                patientMobileScanCursor = 0;
+                try {{
+                    const response = await fetch('/api/mobile-scan/session', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ target: 'patient' }}) }});
+                    const result = await response.json();
+                    if (!response.ok) throw new Error(result.detail || 'Impossible de créer le QR code.');
+                    patientMobileScanToken = result.token;
+                    if (qr) qr.src = result.qr;
+                    if (status) status.textContent = 'Scannez le QR avec le téléphone connecté au même réseau Wi-Fi. Session valable 20 minutes.';
+                    patientMobileScanTimer = window.setInterval(pollPatientPhoneScans, 1200);
+                }} catch (error) {{
+                    if (status) status.textContent = error.message || 'Erreur de création du QR code.';
+                }}
+            }};
+
+            async function pollPatientPhoneScans() {{
+                if (!patientMobileScanToken) return;
+                try {{
+                    const response = await fetch(`/api/mobile-scan/${{encodeURIComponent(patientMobileScanToken)}}/uploads?after=${{patientMobileScanCursor}}&target=patient`);
+                    const result = await response.json();
+                    if (!response.ok) throw new Error(result.detail || 'Session mobile expirée.');
+                    for (const upload of (result.uploads || [])) {{
+                        scannedPiecesList.push({{ type: patientMobileScanDocType, date: new Date().toLocaleDateString('fr-FR'), data: upload.data }});
+                        patientMobileScanCursor += 1;
+                        renderScannedPiecesGallery();
+                        scrollPatientScannedPieceIntoView(scannedPiecesList.length - 1);
+                    }}
+                    const status = document.getElementById('patientPhoneScanStatus');
+                    if (status && result.uploads?.length) status.textContent = `${{patientMobileScanCursor}} document(s) reçu(s) dans la fiche patient.`;
+                }} catch (error) {{
+                    const status = document.getElementById('patientPhoneScanStatus');
+                    if (status) status.textContent = error.message || 'Connexion au téléphone interrompue.';
+                    stopPatientPhoneScan();
+                }}
+            }}
+
+            function stopPatientPhoneScan() {{
+                if (patientMobileScanTimer) window.clearInterval(patientMobileScanTimer);
+                patientMobileScanTimer = null;
+                const token = patientMobileScanToken;
+                patientMobileScanToken = null;
+                if (token) fetch(`/api/mobile-scan/${{encodeURIComponent(token)}}`, {{ method: 'DELETE' }}).catch(() => {{}});
+            }}
+
+            function showPatientScanPreview(type, data) {{
+                pendingPatientScannedPiece = {{ type: type || 'Document patient', data }};
+                const modal = document.getElementById('patientScanPreviewModal');
+                const image = document.getElementById('patientScanPreviewImage');
+                const pdf = document.getElementById('patientScanPreviewPdf');
+                const isPdf = String(data || '').toLowerCase().startsWith('data:application/pdf');
+                document.getElementById('patientScanPreviewTitle').textContent = pendingPatientScannedPiece.type + ' — vérifiez avant ajout';
+                image.classList.toggle('hidden', isPdf); image.src = isPdf ? '' : data;
+                pdf.classList.toggle('hidden', !isPdf); pdf.src = isPdf ? data : 'about:blank';
+                modal.style.zIndex = '10001'; modal.classList.remove('hidden'); modal.focus();
+            }}
+
+            window.validatePatientScanPreview = function() {{
+                if (!pendingPatientScannedPiece) return;
+                scannedPiecesList.push({{ ...pendingPatientScannedPiece, date: new Date().toLocaleDateString('fr-FR') }});
+                pendingPatientScannedPiece = null;
+                closePatientScanPreview();
+                renderScannedPiecesGallery();
+                scrollPatientScannedPieceIntoView(scannedPiecesList.length - 1);
+            }};
+
+            window.cancelPatientScanPreview = function() {{
+                pendingPatientScannedPiece = null;
+                closePatientScanPreview();
+            }};
+
+            function closePatientScanPreview() {{
+                document.getElementById('patientScanPreviewModal').classList.add('hidden');
+                document.getElementById('patientScanPreviewImage').src = '';
+                document.getElementById('patientScanPreviewPdf').src = 'about:blank';
+            }}
 
             window.executeRealHardwareScan = async function() {{
                 const statusMsg = document.getElementById('scannerStatusMsg');
@@ -2911,15 +3032,8 @@ def render_html() -> str:
 
                     if (res.success && res.image_data) {{
                         const typeDoc = document.getElementById('patientTypePiece').value;
-                        scannedPiecesList.push({{
-                            type: typeDoc,
-                            date: new Date().toLocaleDateString('fr-FR'),
-                            data: res.image_data
-                        }});
-                        const addedPieceIndex = scannedPiecesList.length - 1;
-                        renderScannedPiecesGallery();
                         closeScannerDeviceModal();
-                        scrollPatientScannedPieceIntoView(addedPieceIndex);
+                        showPatientScanPreview(typeDoc, res.image_data);
                     }} else {{
                         alert(res.message || "Erreur de numérisation.");
                     }}

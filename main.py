@@ -71,6 +71,7 @@ from modules.gestion_serveur_impression import print_server_router
 from modules import gestion_dicom_print
 from modules.gestion_backup import backup_router, start_backup_scheduler, stop_backup_scheduler
 from modules.gestion_kacel_job import kacel_job_router
+from app.mobile_scan import mobile_scan_router
 
 
 # Configuration centralisée de la journalisation
@@ -968,6 +969,7 @@ app.include_router(telephony_router)
 app.include_router(print_server_router)
 app.include_router(backup_router)
 app.include_router(kacel_job_router)
+app.include_router(mobile_scan_router)
 
 
 async def start_worklist_service() -> None:

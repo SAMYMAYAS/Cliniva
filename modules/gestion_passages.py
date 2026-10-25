@@ -2405,14 +2405,14 @@ def render_html(mode: str = "general") -> str:
     </div>
 
     <!-- ================= MODALE SCANNEUR PHYSIQUE WIA ================= -->
-    <div id="scannerDeviceModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center hidden z-[110] p-4">
+    <div id="scannerDeviceModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center hidden z-[10000] p-4" role="dialog" aria-modal="true" aria-labelledby="passageScannerHeading">
         <div class="bg-white dark:bg-[#121c15] rounded-3xl w-full max-w-md shadow-2xl border border-slate-100 dark:border-white/10 overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-100 dark:border-white/5 flex justify-between items-center bg-slate-50 dark:bg-black/20">
                 <div class="flex items-center space-x-2">
                     <div class="w-8 h-8 rounded-xl bg-brand-neon/20 text-brand-neon flex items-center justify-center font-bold text-sm">
                         <i class="ph-bold ph-printer"></i>
                     </div>
-                    <h3 class="text-base font-bold text-slate-800 dark:text-white">Scanneur Physique Détecté</h3>
+                    <h3 id="passageScannerHeading" class="text-base font-bold text-slate-800 dark:text-white">Scanneur Physique Détecté</h3>
                 </div>
                 <button type="button" onclick="closeScannerDeviceModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
                     <i class="ph-bold ph-x text-lg"></i>
@@ -2428,6 +2428,17 @@ def render_html(mode: str = "general") -> str:
                 <div id="noScannerAlert" class="hidden p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-500 text-xs font-medium space-y-1">
                     <div class="font-bold flex items-center gap-1.5">⚠️ Aucun scanneur WIA détecté</div>
                     <p class="text-[11px] leading-snug">Vérifiez le câble USB de votre scanneur puis réessayez.</p>
+                </div>
+
+                <div class="border-t border-slate-100 dark:border-white/10 pt-3">
+                    <button type="button" onclick="startPassagePhoneScan()" class="w-full px-4 py-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-300 text-xs font-bold inline-flex justify-center items-center gap-2 border border-emerald-200 dark:border-emerald-800">
+                        <i class="ph-bold ph-qr-code text-base"></i> Scanner avec mon téléphone
+                    </button>
+                    <div id="passagePhoneScanPanel" class="hidden mt-3 p-3 rounded-2xl bg-white dark:bg-black/30 border border-slate-200 dark:border-white/10 text-center">
+                        <p class="text-[11px] text-slate-600 dark:text-slate-300 mb-2">Connectez le téléphone au même réseau, scannez ce QR code, prenez la photo puis validez son envoi.</p>
+                        <img id="passagePhoneScanQr" class="mx-auto w-44 h-44 object-contain rounded-xl bg-white p-2" alt="QR code de scan mobile pour le passage">
+                        <p id="passagePhoneScanStatus" class="text-[10px] text-slate-500 mt-2">Création de la session…</p>
+                    </div>
                 </div>
 
                 <div id="scannerStatusMsg" class="hidden text-center py-2 text-xs font-bold text-brand-neon">
@@ -2556,6 +2567,10 @@ def render_html(mode: str = "general") -> str:
             let currentPassageActs = [];
             let currentPassageTypeValue = '';
             let currentPassageScannedDocs = [];
+            let passageMobileScanToken = null;
+            let passageMobileScanTimer = null;
+            let passageMobileScanCursor = 0;
+            let passageMobileScanDocType = '';
             let currentMatchingPrestations = [];
             let selectedPrestationTemp = null;
             let pendingPassageDocPreview = null;
@@ -4057,6 +4072,7 @@ def render_html(mode: str = "general") -> str:
 
                 if (statusMsg) statusMsg.classList.add('hidden');
                 if (noScanner) noScanner.classList.add('hidden');
+                document.getElementById('passagePhoneScanPanel')?.classList.add('hidden');
                 if (select) select.innerHTML = '<option value="">Recherche du matériel en cours...</option>';
                 if (modal) {{
                     modal.style.zIndex = '10000';
@@ -4084,7 +4100,62 @@ def render_html(mode: str = "general") -> str:
             window.closeScannerDeviceModal = function() {{
                 const modal = document.getElementById('scannerDeviceModal');
                 if (modal) modal.classList.add('hidden');
+                stopPassagePhoneScan();
             }};
+
+            window.startPassagePhoneScan = async function(){{
+                const panel = document.getElementById('passagePhoneScanPanel');
+                const qr = document.getElementById('passagePhoneScanQr');
+                const status = document.getElementById('passagePhoneScanStatus');
+                panel?.classList.remove('hidden');
+                if (status) status.textContent = 'Création de la session sécurisée…';
+                stopPassagePhoneScan();
+                passageMobileScanDocType = document.getElementById('passageDocTypeSelect')?.value || 'Document passage';
+                passageMobileScanCursor = 0;
+                try {{
+                    const response = await fetch('/api/mobile-scan/session', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ target: 'passage' }}) }});
+                    const result = await response.json();
+                    if (!response.ok) throw new Error(result.detail || 'Impossible de créer le QR code.');
+                    passageMobileScanToken = result.token;
+                    if (qr) qr.src = result.qr;
+                    if (status) status.textContent = 'Scannez le QR avec le téléphone connecté au même réseau Wi-Fi. Session valable 20 minutes.';
+                    passageMobileScanTimer = window.setInterval(pollPassagePhoneScans, 1200);
+                }} catch (error) {{
+                    if (status) status.textContent = error.message || 'Erreur de création du QR code.';
+                }}
+            }};
+
+            async function pollPassagePhoneScans() {{
+                if (!passageMobileScanToken) return;
+                try {{
+                    const response = await fetch(`/api/mobile-scan/${{encodeURIComponent(passageMobileScanToken)}}/uploads?after=${{passageMobileScanCursor}}&target=passage`);
+                    const result = await response.json();
+                    if (!response.ok) throw new Error(result.detail || 'Session mobile expirée.');
+                    for (const upload of (result.uploads || [])) {{
+                        currentPassageScannedDocs.push({{ type: passageMobileScanDocType, heure: new Date().toLocaleTimeString('fr-FR', {{ hour: '2-digit', minute: '2-digit' }}), data: upload.data }});
+                        passageMobileScanCursor += 1;
+                        renderPassageScannedDocsGallery();
+                        const added = document.getElementById(`passageScannedDoc-${{currentPassageScannedDocs.length - 1}}`);
+                        added?.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                        added?.classList.add('ring-2', 'ring-brand-neon');
+                        window.setTimeout(() => added?.classList.remove('ring-2', 'ring-brand-neon'), 1800);
+                    }}
+                    const status = document.getElementById('passagePhoneScanStatus');
+                    if (status && result.uploads?.length) status.textContent = `${{passageMobileScanCursor}} document(s) reçu(s) dans le formulaire du passage.`;
+                }} catch (error) {{
+                    const status = document.getElementById('passagePhoneScanStatus');
+                    if (status) status.textContent = error.message || 'Connexion au téléphone interrompue.';
+                    stopPassagePhoneScan();
+                }}
+            }}
+
+            function stopPassagePhoneScan() {{
+                if (passageMobileScanTimer) window.clearInterval(passageMobileScanTimer);
+                passageMobileScanTimer = null;
+                const token = passageMobileScanToken;
+                passageMobileScanToken = null;
+                if (token) fetch(`/api/mobile-scan/${{encodeURIComponent(token)}}`, {{ method: 'DELETE' }}).catch(() => {{}});
+            }}
 
             window.executePassageHardwareScan = async function() {{
                 const statusMsg = document.getElementById('scannerStatusMsg');
@@ -4368,6 +4439,7 @@ def render_html(mode: str = "general") -> str:
 
             window.closePassageModal = function() {{
                 document.getElementById('passageModal').classList.add('hidden');
+                stopPassagePhoneScan();
             }};
 
             window.handlePassageSubmit = async function(e) {{
