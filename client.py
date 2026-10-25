@@ -66,8 +66,10 @@ def save_server_url(server_url: str, client_version: str | None = None) -> None:
     CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def update_client_launcher(server_url: str) -> str | None:
+def update_client_launcher(server_url: str, report_status=None) -> str | None:
     """Actualise uniquement ce fichier client.py; aucune source serveur n'est acceptée."""
+    if report_status:
+        report_status("Recherche d'une mise à jour sur le serveur…")
     manifest_url = server_url.rstrip("/") + "/static/client_updates/latest.json"
     request = urllib.request.Request(manifest_url, headers={"User-Agent": "ClinivaClient/2.0"})
     with urllib.request.urlopen(request, timeout=15) as response:
@@ -85,8 +87,12 @@ def update_client_launcher(server_url: str) -> str | None:
     global CLIENT_UPDATED_ON_START
     current_version = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
     if current_version == version:
+        if report_status:
+            report_status(f"Client déjà à jour ({version}).")
         return version
 
+    if report_status:
+        report_status(f"Mise à jour disponible ({version}) : téléchargement…")
     download_url = server_url.rstrip("/") + package_url
     request = urllib.request.Request(download_url, headers={"User-Agent": "ClinivaClient/2.0"})
     with urllib.request.urlopen(request, timeout=60) as response:
@@ -94,6 +100,8 @@ def update_client_launcher(server_url: str) -> str | None:
     if len(payload) > 32 * 1024 * 1024 or hashlib.sha256(payload).hexdigest() != expected_hash:
         raise ValueError("La vérification de la mise à jour client a échoué.")
 
+    if report_status:
+        report_status("Archive vérifiée : installation de la mise à jour…")
     app_dir = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="cliniva-client-update-", dir=app_dir) as staging_dir:
         archive_path = Path(staging_dir) / filename
@@ -108,6 +116,8 @@ def update_client_launcher(server_url: str) -> str | None:
         shutil.copystat(Path(__file__), replacement)
         os.replace(replacement, Path(__file__))
         CLIENT_UPDATED_ON_START = True
+    if report_status:
+        report_status("Mise à jour installée avec succès. Redémarrage du client…")
     return version
 
 
@@ -370,11 +380,13 @@ class ClinivaClient:
         self.entry.pack(fill=X, padx=24, ipady=7)
         self.entry.bind("<Return>", lambda _event: self.connect())
         self.status_var = StringVar(value="Le port 8000 est ajouté automatiquement si nécessaire.")
-        Label(self.root, textvariable=self.status_var, font=("Segoe UI", 9), fg="#58665f",
-              bg="#f3f6f5", wraplength=510, justify=LEFT).pack(anchor="w", padx=24, pady=12)
+        self.status_label = Label(self.root, textvariable=self.status_var, font=("Segoe UI", 9), fg="#58665f",
+                                  bg="#f3f6f5", wraplength=510, justify=LEFT)
+        self.status_label.pack(anchor="w", padx=24, pady=12)
         buttons = Frame(self.root)
         buttons.pack(fill=X, padx=24, pady=(2, 18))
-        Button(buttons, text="Se connecter à Cliniva", command=self.connect).pack(side=LEFT)
+        self.connect_button = Button(buttons, text="Se connecter à Cliniva", command=self.connect)
+        self.connect_button.pack(side=LEFT)
         Button(buttons, text="Quitter", command=self.root.destroy).pack(side=LEFT, padx=(10, 0))
         self.root.mainloop()
 
@@ -385,6 +397,8 @@ class ClinivaClient:
             messagebox.showerror(APP_TITLE, str(exc), parent=self.root)
             return
         self.status_var.set("Vérification du serveur…")
+        self.status_label.configure(fg="#58665f")
+        self.connect_button.state(["disabled"])
         self.root.update_idletasks()
         threading.Thread(target=self._check_and_open, args=(server_url,), daemon=True).start()
 
@@ -398,42 +412,66 @@ class ClinivaClient:
         except OSError as exc:
             self.root.after(0, self._show_error, f"Impossible d'enregistrer l'adresse du serveur : {exc}")
             return
-        self.root.after(0, self._launch_window, server_url)
+        self.root.after(0, self._begin_update, server_url)
 
-    def _show_error(self, message: str) -> None:
-        self.status_var.set(message)
-        messagebox.showerror(APP_TITLE, message + "\n\nVérifie que le serveur est lancé et que le port 8000 est autorisé sur le réseau.", parent=self.root)
-
-    def _launch_window(self, server_url: str) -> None:
-        self.root.destroy()
-        update_error = None
+    def _set_status(self, message: str, color: str = "#58665f") -> None:
         try:
-            try:
-                version = update_client_launcher(server_url)
-            except Exception as exc:
-                update_error = str(exc)
-                version = None
+            self.status_var.set(message)
+            self.status_label.configure(fg=color)
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+    def _begin_update(self, server_url: str) -> None:
+        self._set_status("Connexion établie. Recherche d'une mise à jour…", "#2563eb")
+        threading.Thread(target=self._update_and_open, args=(server_url,), daemon=True).start()
+
+    def _update_and_open(self, server_url: str) -> None:
+        update_error = None
+        version = None
+        try:
+            version = update_client_launcher(
+                server_url,
+                report_status=lambda message: self.root.after(0, self._set_status, message, "#2563eb"),
+            )
             save_server_url(server_url, version)
-            if CLIENT_UPDATED_ON_START:
-                # Le processus courant a encore l'ancien pont WIA chargé en
-                # mémoire. Un nouveau processus lance la version réellement à jour.
-                subprocess.Popen(
-                    [sys.executable, str(Path(__file__).resolve()), server_url],
-                    cwd=str(Path(__file__).resolve().parent),
-                )
-                return
-            if update_error:
-                warning = Tk()
-                warning.withdraw()
-                messagebox.showwarning(
-                    APP_TITLE,
-                    "La mise à jour automatique du client n'a pas abouti. "
-                    "Le lanceur installé est conservé.\n\n"
-                    f"Détail : {update_error}\n\n"
-                    "Vérifie que le serveur a été redémarré et que le dossier du client est accessible en écriture.",
-                    parent=warning,
-                )
-                warning.destroy()
+        except Exception as exc:
+            update_error = str(exc)
+        self.root.after(0, self._finish_update, server_url, version, update_error)
+
+    def _finish_update(self, server_url: str, version: str | None, update_error: str | None) -> None:
+        if update_error:
+            self._set_status(f"Échec de la mise à jour : {update_error}", "#b91c1c")
+            messagebox.showwarning(
+                APP_TITLE,
+                "La mise à jour du client a échoué. La version installée sera lancée.\n\n"
+                f"Détail : {update_error}\n\n"
+                "Vérifie que le serveur a été redémarré et que le dossier du client est accessible en écriture.",
+                parent=self.root,
+            )
+            self.root.after(100, self._open_webview, server_url)
+            return
+        if CLIENT_UPDATED_ON_START:
+            self._set_status(f"Mise à jour réussie ({version}). Redémarrage du client…", "#15803d")
+            self.root.after(1000, self._restart_updated_client, server_url)
+            return
+        self._set_status(f"Aucune mise à jour nécessaire : client à jour ({version}).", "#15803d")
+        self.root.after(900, self._open_webview, server_url)
+
+    def _restart_updated_client(self, server_url: str) -> None:
+        try:
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), server_url],
+                cwd=str(Path(__file__).resolve().parent),
+            )
+            self.root.destroy()
+        except Exception as exc:
+            self._set_status(f"Mise à jour faite, mais redémarrage impossible : {exc}", "#b91c1c")
+            self.connect_button.state(["!disabled"])
+
+    def _open_webview(self, server_url: str) -> None:
+        self.root.destroy()
+        try:
             open_client_window(server_url)
         except Exception as exc:
             fallback = Tk()
@@ -441,6 +479,10 @@ class ClinivaClient:
             messagebox.showerror(APP_TITLE, str(exc), parent=fallback)
             fallback.destroy()
 
+    def _show_error(self, message: str) -> None:
+        self._set_status(message, "#b91c1c")
+        self.connect_button.state(["!disabled"])
+        messagebox.showerror(APP_TITLE, message + "\n\nVérifie que le serveur est lancé et que le port 8000 est autorisé sur le réseau.", parent=self.root)
 
 def main() -> int:
     if len(sys.argv) > 1:
