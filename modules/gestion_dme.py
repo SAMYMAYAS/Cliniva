@@ -2124,9 +2124,11 @@ async def api_get_dme(patient_id: int, passage_id: int, request: Request):
         current_user_name = " ".join(part for part in (str(user.get("prenom") or "").strip(), str(user.get("nom") or "").strip()) if part).strip()
         current_user_name = current_user_name or str(user.get("login") or "").strip()
         consultation = data.get("dme") or {}
-        consultation_owner = str((data.get("passage") or {}).get("consultation_utilisateur") or consultation.get("praticien") or "").strip()
+        passage = data.get("passage") or {}
+        consultation_owner = str(passage.get("consultation_utilisateur") or consultation.get("praticien") or "").strip()
         consultation["consultation_en_cours_par_autre"] = bool(
             consultation.get("id") and not consultation.get("verrouille", True)
+            and passage.get("statut") == "En cours"
             and consultation_owner and consultation_owner.casefold() != current_user_name.casefold()
         )
         consultation["consultation_owner"] = consultation_owner
@@ -2178,7 +2180,11 @@ async def api_start_dme_consultation(payload: Dict[str, Any], request: Request):
         consultation = cursor.fetchone()
         if consultation and consultation.get("verrouille", True):
             raise HTTPException(status_code=409, detail="Cette consultation est déjà enregistrée en lecture seule.")
-        current_owner = str(passage.get("consultation_utilisateur") or (consultation.get("praticien") if consultation else "") or "").strip()
+        current_owner = str(
+            passage.get("consultation_utilisateur")
+            or ((consultation.get("praticien") if consultation else "") if passage.get("statut") == "En cours" else "")
+            or ""
+        ).strip()
         if consultation and current_owner and current_owner.casefold() != user_fullname.casefold():
             raise HTTPException(status_code=409, detail=f"Consultation déjà en cours par {current_owner}. Vous pouvez uniquement l’ouvrir en lecture seule.")
         if consultation:
@@ -2241,6 +2247,49 @@ async def api_keep_dme_consultation(payload: Dict[str, Any], request: Request):
     if not result.get("success"):
         raise HTTPException(status_code=409, detail=result.get("message") or "Impossible de garder cette consultation.")
     track_action(request, "CONSULTATION_MISE_EN_ATTENTE", f"Consultation #{result.get('id_consultation')} conservée en cours; avis demandé à {doctor_name}")
+    return result
+
+
+@dme_router.post("/consultation/cancel-start")
+async def api_cancel_dme_consultation_start(payload: Dict[str, Any], request: Request):
+    """Annule un démarrage accidentel en sauvegardant le brouillon et en libérant le passage."""
+    user = get_current_user_optional(request)
+    if not user or user.get("status") != "Actif":
+        raise HTTPException(status_code=401, detail="Session expirée ou compte inactif.")
+    user_fullname = " ".join(
+        part for part in (str(user.get("prenom") or "").strip(), str(user.get("nom") or "").strip()) if part
+    ) or str(user.get("login") or "Utilisateur connecté").strip()
+
+    # Enregistre les champs actuellement saisis comme brouillon avant de libérer
+    # l'affectation : aucune donnée clinique n'est supprimée.
+    result = dme_manager.save_consultation(payload, user_fullname, finalize=False)
+    if not result.get("success"):
+        raise HTTPException(status_code=409, detail=result.get("message") or "Impossible de conserver le brouillon.")
+
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT id_patient, statut, consultation_utilisateur
+            FROM patient_passages WHERE id = %s FOR UPDATE;
+        """, (payload.get("id_passage"),))
+        passage = cursor.fetchone()
+        if (not passage or int(passage.get("id_patient") or 0) != int(payload.get("id_patient") or 0)
+                or passage.get("statut") != "En cours"):
+            raise HTTPException(status_code=409, detail="Le passage a changé d’état. Rechargez le dossier avant de réessayer.")
+        owner = str(passage.get("consultation_utilisateur") or "").strip()
+        if owner and owner.casefold() != user_fullname.casefold():
+            raise HTTPException(status_code=409, detail=f"Cette consultation est maintenant attribuée à {owner}.")
+        cursor.execute("""
+            UPDATE patient_passages
+            SET statut = 'En attente', consultation_utilisateur = NULL
+            WHERE id = %s AND id_patient = %s AND statut = 'En cours';
+        """, (payload.get("id_passage"), payload.get("id_patient")))
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Impossible de libérer le passage. Rechargez le dossier.")
+
+    track_action(request, "DEMARRAGE_CONSULTATION_ANNULE", f"Démarrage annulé par erreur pour le passage #{payload.get('id_passage')}; brouillon conservé")
+    result["statut"] = "En attente"
+    result["verrouille"] = False
+    result["message"] = "Démarrage annulé. Le passage est remis en attente et le brouillon est conservé."
     return result
 
 
@@ -3787,6 +3836,9 @@ def _render_html() -> str:
                 <button type="button" onclick="saveAndCloseDmeConsultation()" class="flex w-full items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-left hover:bg-emerald-100 dark:border-emerald-900/50 dark:bg-emerald-950/20">
                     <i class="ph-bold ph-floppy-disk text-2xl text-emerald-700"></i><span><b class="block text-sm text-emerald-900 dark:text-emerald-200">Enregistrer la consultation</b><small class="text-[11px] text-slate-600 dark:text-slate-300">La consultation sera finalisée et verrouillée en lecture seule.</small></span>
                 </button>
+                <button type="button" onclick="cancelAccidentalDmeStart()" class="flex w-full items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-left hover:bg-amber-100 dark:border-amber-900/50 dark:bg-amber-950/20">
+                    <i class="ph-bold ph-arrow-counter-clockwise text-2xl text-amber-700"></i><span><b class="block text-sm text-amber-900 dark:text-amber-200">Annuler le démarrage fait par erreur</b><small class="text-[11px] text-slate-600 dark:text-slate-300">Le passage revient en attente et les données saisies restent conservées en brouillon.</small></span>
+                </button>
                 <button id="dmeCloseResetButton" type="button" onclick="resetAndCloseDmeConsultation()" class="flex w-full items-center gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-left hover:bg-rose-100 dark:border-rose-900/50 dark:bg-rose-950/20">
                     <i class="ph-bold ph-arrow-counter-clockwise text-2xl text-rose-700"></i><span><b class="block text-sm text-rose-900 dark:text-rose-200">Fermer et réinitialiser</b><small id="dmeCloseResetHint" class="text-[11px] text-slate-600 dark:text-slate-300">Les données saisies dans cette consultation seront effacées.</small></span>
                 </button>
@@ -4793,6 +4845,21 @@ def _render_html() -> str:
                 modal?.classList.remove('flex');
                 document.body.style.overflow = '';
                 if (await window.saveActiveDmeConsultation({ closeAfter: true })) pendingDmeCloseTabKey = null;
+                else {
+                    modal?.classList.remove('hidden');
+                    modal?.classList.add('flex');
+                    document.body.style.overflow = 'hidden';
+                }
+            };
+
+            window.cancelAccidentalDmeStart = async function() {
+                const pendingKey = pendingDmeCloseTabKey;
+                if (!pendingKey || !confirm('Annuler le démarrage et remettre le passage en attente ? Les données saisies seront enregistrées en brouillon.')) return;
+                const modal = document.getElementById('dmeCloseConsultationModal');
+                modal?.classList.add('hidden');
+                modal?.classList.remove('flex');
+                document.body.style.overflow = '';
+                if (await window.saveActiveDmeConsultation({ closeAfter: true, cancelStart: true })) pendingDmeCloseTabKey = null;
                 else {
                     modal?.classList.remove('hidden');
                     modal?.classList.add('flex');
@@ -7341,7 +7408,10 @@ def _render_html() -> str:
                 }
 
                 try {
-                    const res = await fetch(options.keepOpen ? '/api/dme/consultation/keep' : '/api/dme/save', {
+                    const saveUrl = options.cancelStart
+                        ? '/api/dme/consultation/cancel-start'
+                        : (options.keepOpen ? '/api/dme/consultation/keep' : '/api/dme/save');
+                    const res = await fetch(saveUrl, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload)
@@ -7359,19 +7429,19 @@ def _render_html() -> str:
                             id: res.id_consultation || currentTab.consultationId || currentTab.data.dme?.id,
                             constantes: payload.constantes,
                             praticien: res.praticien || currentTab.data.dme?.praticien,
-                            verrouille: options.keepOpen ? false : true,
+                            verrouille: (options.keepOpen || options.cancelStart) ? false : true,
                             note_reprise: options.keepOpen ? res.note_reprise : currentTab.data.dme?.note_reprise,
                             note_medecin: options.keepOpen ? res.note_medecin : currentTab.data.dme?.note_medecin
                         };
                         currentTab.consultationId = currentTab.data.dme.id;
                         currentTab.data.passage.actes = currentDmeActs;
-                        currentTab.data.passage.statut = res.statut || (options.keepOpen ? 'En cours' : 'Terminé');
+                        currentTab.data.passage.statut = res.statut || (options.cancelStart ? 'En attente' : (options.keepOpen ? 'En cours' : 'Terminé'));
                         currentTab.data.historique = (currentTab.data.historique || []).map(item =>
                             Number(item.id_passage) === Number(currentTab.passageId)
                                 ? { ...item, statut: currentTab.data.passage.statut, diagnostic: payload.diagnostic, praticien: currentTab.data.dme.praticien, constantes: payload.constantes }
                                 : item
                         );
-                        currentTab.mode = options.keepOpen ? 'execution' : 'lecture';
+                        currentTab.mode = (options.keepOpen || options.cancelStart) ? 'execution' : 'lecture';
                         if (options.closeAfter) {
                             const closeModal = document.getElementById('dmeCloseConsultationModal');
                             closeModal?.classList.add('hidden');
