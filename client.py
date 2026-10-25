@@ -245,7 +245,7 @@ class ClientHardwareBridge:
                         "status": "changed", "message": "Modification détectée, attente de la fin de l'enregistrement Word."
                     }
                 continue
-            if pending_since is None or now - pending_since < 2.5 or now - last_attempt < 5.0:
+            if pending_since is None or now - pending_since < 1.5 or now - last_attempt < 5.0:
                 continue
 
             last_attempt = now
