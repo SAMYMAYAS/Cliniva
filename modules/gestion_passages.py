@@ -2332,6 +2332,16 @@ def render_html(mode: str = "general") -> str:
                     </div>
                 </div>
 
+                <!-- Pièces patient propres au formulaire Ajouter un nouveau patient -->
+                <div class="bg-slate-50 dark:bg-black/30 p-4 rounded-3xl border border-slate-200/80 dark:border-white/10 space-y-3">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <h4 class="text-xs font-bold text-slate-800 dark:text-white flex items-center gap-1.5"><i class="ph-bold ph-identification-card text-brand-neon text-base"></i> Pièces d’identité et documents numérisés</h4>
+                        <button type="button" onclick="openReceptionPatientScanner()" class="bg-brand-neon text-black px-3.5 py-1.5 rounded-xl text-xs font-bold shadow-sm inline-flex items-center gap-1.5"><i class="ph-bold ph-scan"></i> Scanner Doc WIA</button>
+                    </div>
+                    <label class="block sm:max-w-xs"><span class="block text-[10px] text-slate-500 mb-1">Type de pièce patient</span><select id="recPatScanType" class="w-full text-xs p-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-black/30 text-slate-800 dark:text-white">{pieces_options}</select></label>
+                    <div id="recPatScannedPiecesGallery" class="grid grid-cols-2 sm:grid-cols-4 gap-2.5"></div>
+                </div>
+
                 <div class="flex items-center justify-end space-x-3 pt-3 border-t border-slate-100 dark:border-white/5">
                     <button type="button" onclick="closeFullPatientModal()" class="px-4 py-2 rounded-xl text-slate-400 hover:text-white text-xs font-semibold">Annuler</button>
                     <button id="fullPatientModalSubmit" type="submit" class="px-6 py-2.5 rounded-xl bg-brand-neon text-black text-xs font-bold shadow-md">Enregistrer & Sélectionner</button>
@@ -2475,7 +2485,7 @@ def render_html(mode: str = "general") -> str:
             </div>
             <div class="px-6 py-4 border-t border-slate-100 dark:border-white/5 bg-white dark:bg-[#121c15] flex justify-end gap-3">
                 <button type="button" onclick="cancelPassageDocPreview()" class="px-4 py-2 rounded-xl text-slate-400 hover:text-white text-xs font-semibold">Annuler / Supprimer</button>
-                <button type="button" onclick="validatePassageDocPreview()" class="px-5 py-2.5 rounded-xl bg-brand-neon text-black text-xs font-bold shadow-md">✓ Valider et Ajouter</button>
+                <button type="button" id="passageDocPreviewValidateButton" onclick="validatePassageDocPreview()" class="px-5 py-2.5 rounded-xl bg-brand-neon text-black text-xs font-bold shadow-md">✓ Valider et Ajouter</button>
             </div>
         </div>
     </div>
@@ -2567,10 +2577,13 @@ def render_html(mode: str = "general") -> str:
             let currentPassageActs = [];
             let currentPassageTypeValue = '';
             let currentPassageScannedDocs = [];
+            let receptionPatientScannedPieces = [];
+            let activePassageScannerTarget = 'passage';
             let passageMobileScanToken = null;
             let passageMobileScanTimer = null;
             let passageMobileScanCursor = 0;
             let passageMobileScanDocType = '';
+            let passageMobileScanTarget = 'passage';
             let currentMatchingPrestations = [];
             let selectedPrestationTemp = null;
             let pendingPassageDocPreview = null;
@@ -3403,6 +3416,8 @@ def render_html(mode: str = "general") -> str:
                 document.getElementById('recPatPhotoPGauche').value = '';
                 document.getElementById('recPatEmpreinte').value = '';
                 document.getElementById('recPatAgeDisplay').value = '';
+                receptionPatientScannedPieces = JSON.parse(JSON.stringify(passageEditPatientDraft?.pieces_scannees || []));
+                renderReceptionPatientScannedPieces();
 
                 const def = '/static/images/avatar-placeholder.svg?w=120';
                 document.getElementById('recPreviewFace').src = def;
@@ -3445,6 +3460,10 @@ def render_html(mode: str = "general") -> str:
 
             window.closeFullPatientModal = function() {{
                 document.getElementById('receptionFullPatientModal').classList.add('hidden');
+                if (activePassageScannerTarget === 'reception_patient') {{
+                    stopPassagePhoneScan();
+                    if (pendingPassageDocPreview?.target === 'reception_patient') cancelPassageDocPreview();
+                }}
             }};
 
             window.handleRecPatWilayaChange = function() {{
@@ -3501,7 +3520,7 @@ def render_html(mode: str = "general") -> str:
                     photo_profil_droit: document.getElementById('recPatPhotoPDroit').value,
                     photo_profil_gauche: document.getElementById('recPatPhotoPGauche').value,
                     empreinte_index: document.getElementById('recPatEmpreinte').value,
-                    pieces_scannees: passageEditPatientDraft?.pieces_scannees || []
+                    pieces_scannees: receptionPatientScannedPieces
                 }};
 
                 if (passageEditMode) {{
@@ -4064,7 +4083,12 @@ def render_html(mode: str = "general") -> str:
             // =================================================================
             // 8. NUMÉRISATION WIA, GESTION DES SCANS & LIGHTBOX
             // =================================================================
-            window.openPassageHardwareScannerModal = async function() {{
+            window.openReceptionPatientScanner = function() {{
+                window.openPassageHardwareScannerModal('reception_patient');
+            }};
+
+            window.openPassageHardwareScannerModal = async function(target = 'passage') {{
+                activePassageScannerTarget = target === 'reception_patient' ? 'reception_patient' : 'passage';
                 const modal = document.getElementById('scannerDeviceModal');
                 const select = document.getElementById('scannerDeviceSelect');
                 const noScanner = document.getElementById('noScannerAlert');
@@ -4110,15 +4134,18 @@ def render_html(mode: str = "general") -> str:
                 panel?.classList.remove('hidden');
                 if (status) status.textContent = 'Création de la session sécurisée…';
                 stopPassagePhoneScan();
-                passageMobileScanDocType = document.getElementById('passageDocTypeSelect')?.value || 'Document passage';
+                passageMobileScanTarget = activePassageScannerTarget === 'reception_patient' ? 'patient' : 'passage';
+                passageMobileScanDocType = passageMobileScanTarget === 'patient'
+                    ? (document.getElementById('recPatScanType')?.value || 'Document patient')
+                    : (document.getElementById('passageDocTypeSelect')?.value || 'Document passage');
                 passageMobileScanCursor = 0;
                 try {{
-                    const response = await fetch('/api/mobile-scan/session', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ target: 'passage' }}) }});
+                    const response = await fetch('/api/mobile-scan/session', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ target: passageMobileScanTarget }}) }});
                     const result = await response.json();
                     if (!response.ok) throw new Error(result.detail || 'Impossible de créer le QR code.');
                     passageMobileScanToken = result.token;
                     if (qr) qr.src = result.qr;
-                    if (status) status.textContent = 'Scannez le QR avec le téléphone connecté au même réseau Wi-Fi. Session valable 20 minutes.';
+                    if (status) status.textContent = `Scannez le QR avec le téléphone connecté au même réseau Wi-Fi. Les photos iront dans le formulaire ${{passageMobileScanTarget === 'patient' ? 'patient' : 'passage'}}.`;
                     passageMobileScanTimer = window.setInterval(pollPassagePhoneScans, 1200);
                 }} catch (error) {{
                     if (status) status.textContent = error.message || 'Erreur de création du QR code.';
@@ -4128,20 +4155,28 @@ def render_html(mode: str = "general") -> str:
             async function pollPassagePhoneScans() {{
                 if (!passageMobileScanToken) return;
                 try {{
-                    const response = await fetch(`/api/mobile-scan/${{encodeURIComponent(passageMobileScanToken)}}/uploads?after=${{passageMobileScanCursor}}&target=passage`);
+                    const response = await fetch(`/api/mobile-scan/${{encodeURIComponent(passageMobileScanToken)}}/uploads?after=${{passageMobileScanCursor}}&target=${{passageMobileScanTarget}}`);
                     const result = await response.json();
                     if (!response.ok) throw new Error(result.detail || 'Session mobile expirée.');
                     for (const upload of (result.uploads || [])) {{
-                        currentPassageScannedDocs.push({{ type: passageMobileScanDocType, heure: new Date().toLocaleTimeString('fr-FR', {{ hour: '2-digit', minute: '2-digit' }}), data: upload.data }});
+                        const scannedDoc = {{ type: passageMobileScanDocType, heure: new Date().toLocaleTimeString('fr-FR', {{ hour: '2-digit', minute: '2-digit' }}), date: new Date().toLocaleDateString('fr-FR'), data: upload.data }};
+                        if (activePassageScannerTarget === 'reception_patient') {{
+                            receptionPatientScannedPieces.push(scannedDoc);
+                            renderReceptionPatientScannedPieces();
+                        }} else {{
+                            currentPassageScannedDocs.push(scannedDoc);
+                            renderPassageScannedDocsGallery();
+                        }}
                         passageMobileScanCursor += 1;
-                        renderPassageScannedDocsGallery();
-                        const added = document.getElementById(`passageScannedDoc-${{currentPassageScannedDocs.length - 1}}`);
+                        const added = activePassageScannerTarget === 'reception_patient'
+                            ? document.getElementById('recPatScannedPiecesGallery')?.lastElementChild
+                            : document.getElementById(`passageScannedDoc-${{currentPassageScannedDocs.length - 1}}`);
                         added?.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
                         added?.classList.add('ring-2', 'ring-brand-neon');
                         window.setTimeout(() => added?.classList.remove('ring-2', 'ring-brand-neon'), 1800);
                     }}
                     const status = document.getElementById('passagePhoneScanStatus');
-                    if (status && result.uploads?.length) status.textContent = `${{passageMobileScanCursor}} document(s) reçu(s) dans le formulaire du passage.`;
+                    if (status && result.uploads?.length) status.textContent = `${{passageMobileScanCursor}} document(s) reçu(s) dans le formulaire ${{passageMobileScanTarget === 'patient' ? 'patient' : 'du passage'}}.`;
                 }} catch (error) {{
                     const status = document.getElementById('passagePhoneScanStatus');
                     if (status) status.textContent = error.message || 'Connexion au téléphone interrompue.';
@@ -4157,11 +4192,66 @@ def render_html(mode: str = "general") -> str:
                 if (token) fetch(`/api/mobile-scan/${{encodeURIComponent(token)}}`, {{ method: 'DELETE' }}).catch(() => {{}});
             }}
 
+            function renderReceptionPatientScannedPieces() {{
+                const gallery = document.getElementById('recPatScannedPiecesGallery');
+                if (!gallery) return;
+                gallery.innerHTML = '';
+                if (!receptionPatientScannedPieces.length) {{
+                    gallery.innerHTML = '<p class="col-span-full text-center text-[11px] text-slate-400 italic py-2">Aucune pièce patient numérisée.</p>';
+                    return;
+                }}
+                receptionPatientScannedPieces.forEach((piece, index) => {{
+                    const item = document.createElement('div');
+                    item.className = 'flex items-center gap-2 p-2 rounded-xl bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10';
+                    const isPdf = String(piece.data || '').toLowerCase().startsWith('data:application/pdf');
+                    const viewButton = document.createElement('button');
+                    viewButton.type = 'button';
+                    viewButton.className = 'flex min-w-0 flex-1 items-center gap-2 text-left';
+                    viewButton.onclick = () => window.viewReceptionPatientScannedPiece(index);
+                    const preview = document.createElement(isPdf ? 'div' : 'img');
+                    preview.className = isPdf
+                        ? 'w-12 h-12 shrink-0 rounded-lg bg-rose-100 text-rose-600 flex items-center justify-center'
+                        : 'w-12 h-12 shrink-0 rounded-lg object-cover border border-slate-200';
+                    if (isPdf) preview.innerHTML = '<i class="ph-bold ph-file-pdf text-xl"></i>';
+                    else {{ preview.src = piece.data; preview.alt = 'Pièce patient'; }}
+                    const labels = document.createElement('span');
+                    labels.className = 'min-w-0';
+                    const name = document.createElement('b');
+                    name.className = 'block truncate text-[11px] text-slate-700 dark:text-slate-200';
+                    name.textContent = piece.type || 'Pièce patient';
+                    const date = document.createElement('small');
+                    date.className = 'text-[9px] text-slate-400';
+                    date.textContent = (piece.date || piece.heure || '') + ' · Voir';
+                    labels.append(name, date);
+                    viewButton.append(preview, labels);
+                    const removeButton = document.createElement('button');
+                    removeButton.type = 'button';
+                    removeButton.className = 'px-2 py-1 text-rose-500';
+                    removeButton.textContent = '✕';
+                    removeButton.setAttribute('aria-label', 'Supprimer la pièce');
+                    removeButton.onclick = () => window.removeReceptionPatientScannedPiece(index);
+                    item.append(viewButton, removeButton);
+                    gallery.appendChild(item);
+                }});
+            }}
+
+            window.removeReceptionPatientScannedPiece = function(index) {{
+                receptionPatientScannedPieces.splice(index, 1);
+                renderReceptionPatientScannedPieces();
+            }};
+            window.viewReceptionPatientScannedPiece = function(index) {{
+                const piece = receptionPatientScannedPieces[index];
+                if (piece) openPassageDocCollection([piece], 0);
+            }};
+
             window.executePassageHardwareScan = async function() {{
                 const statusMsg = document.getElementById('scannerStatusMsg');
                 const btnLaunch = document.getElementById('btnLaunchScan');
                 const deviceSelect = document.getElementById('scannerDeviceSelect');
-                const typeDoc = document.getElementById('passageDocTypeSelect')?.value || 'Ordonnance';
+                const isReceptionPatientScan = activePassageScannerTarget === 'reception_patient';
+                const typeDoc = isReceptionPatientScan
+                    ? (document.getElementById('recPatScanType')?.value || 'Document patient')
+                    : (document.getElementById('passageDocTypeSelect')?.value || 'Ordonnance');
 
                 if (statusMsg) statusMsg.classList.remove('hidden');
                 if (btnLaunch) btnLaunch.disabled = true;
@@ -4173,7 +4263,7 @@ def render_html(mode: str = "general") -> str:
 
                     if (res.success && res.image_data) {{
                         closeScannerDeviceModal();
-                        showPassageDocPreview(typeDoc, res.image_data);
+                        showPassageDocPreview(typeDoc, res.image_data, isReceptionPatientScan ? 'reception_patient' : 'passage');
                     }} else {{
                         alert(res.message || "Erreur lors de l'acquisition du scan.");
                     }}
@@ -4197,9 +4287,9 @@ def render_html(mode: str = "general") -> str:
                 reader.readAsDataURL(file);
             }};
 
-            function showPassageDocPreview(typeDoc, base64Data) {{
+            function showPassageDocPreview(typeDoc, base64Data, target = 'passage') {{
                 if (!base64Data) return;
-                pendingPassageDocPreview = {{ type: typeDoc || 'Document', data: base64Data }};
+                pendingPassageDocPreview = {{ type: typeDoc || 'Document', data: base64Data, target }};
 
                 const modal = document.getElementById('passageDocPreviewModal');
                 const title = document.getElementById('passageDocPreviewTitle');
@@ -4207,7 +4297,10 @@ def render_html(mode: str = "general") -> str:
                 const pdf = document.getElementById('passageDocPreviewPdf');
                 const isPdf = String(base64Data).toLowerCase().includes('application/pdf');
 
-                if (title) title.innerText = (typeDoc || 'Document') + ' — vérifiez avant validation';
+                const isPatientTarget = target === 'reception_patient';
+                if (title) title.innerText = (typeDoc || 'Document') + (isPatientTarget ? ' — vérifiez avant ajout à la fiche patient' : ' — vérifiez avant validation');
+                const validateButton = document.getElementById('passageDocPreviewValidateButton');
+                if (validateButton) validateButton.textContent = isPatientTarget ? '✓ Valider et ajouter à la fiche patient' : '✓ Valider et Ajouter';
                 const sizeLabel = document.getElementById('passageDocPreviewSize');
                 if (sizeLabel) sizeLabel.textContent = `Taille : ${{formatScannedDocumentSize(base64Data)}}`;
                 if (img) {{ img.classList.toggle('hidden', isPdf); img.src = isPdf ? '' : base64Data; }}
@@ -4221,17 +4314,23 @@ def render_html(mode: str = "general") -> str:
 
             window.validatePassageDocPreview = function() {{
                 if (!pendingPassageDocPreview) return;
-                const addedDocIndex = currentPassageScannedDocs.length;
-                currentPassageScannedDocs.push({{
+                const patientTarget = pendingPassageDocPreview.target === 'reception_patient';
+                const destinationDocs = patientTarget ? receptionPatientScannedPieces : currentPassageScannedDocs;
+                const addedDocIndex = destinationDocs.length;
+                destinationDocs.push({{
                     type: pendingPassageDocPreview.type,
                     heure: new Date().toLocaleTimeString('fr-FR', {{ hour: '2-digit', minute: '2-digit' }}),
+                    date: new Date().toLocaleDateString('fr-FR'),
                     data: pendingPassageDocPreview.data
                 }});
                 pendingPassageDocPreview = null;
                 closePassageDocPreview();
-                renderPassageScannedDocsGallery();
+                if (patientTarget) renderReceptionPatientScannedPieces();
+                else renderPassageScannedDocsGallery();
                 requestAnimationFrame(() => {{
-                    const addedDoc = document.getElementById(`passageScannedDoc-${{addedDocIndex}}`);
+                    const addedDoc = patientTarget
+                        ? document.getElementById('recPatScannedPiecesGallery')?.lastElementChild
+                        : document.getElementById(`passageScannedDoc-${{addedDocIndex}}`);
                     addedDoc?.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
                     addedDoc?.classList.add('ring-2', 'ring-brand-neon');
                     window.setTimeout(() => addedDoc?.classList.remove('ring-2', 'ring-brand-neon'), 1800);
