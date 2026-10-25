@@ -4764,12 +4764,19 @@ def _render_html() -> str:
                     if (doctors.length === 0) doctorSelect.innerHTML = '<option value="">Aucun médecin actif dans le personnel</option>';
                 }
                 document.getElementById('dmeHandoffFields')?.classList.add('hidden');
-                if (modal) modal.classList.remove('hidden');
+                if (modal) {
+                    modal.classList.remove('hidden');
+                    modal.classList.add('flex');
+                    document.body.style.overflow = 'hidden';
+                }
             }
 
             window.cancelDmeCloseConsultation = function() {
-                document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                const modal = document.getElementById('dmeCloseConsultationModal');
+                modal?.classList.add('hidden');
+                modal?.classList.remove('flex');
                 document.getElementById('dmeHandoffFields')?.classList.add('hidden');
+                document.body.style.overflow = '';
                 pendingDmeCloseTabKey = null;
             };
 
@@ -4781,9 +4788,16 @@ def _render_html() -> str:
             window.saveAndCloseDmeConsultation = async function() {
                 const key = pendingDmeCloseTabKey;
                 if (!key) return;
-                document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                const modal = document.getElementById('dmeCloseConsultationModal');
+                modal?.classList.add('hidden');
+                modal?.classList.remove('flex');
+                document.body.style.overflow = '';
                 if (await window.saveActiveDmeConsultation({ closeAfter: true })) pendingDmeCloseTabKey = null;
-                else document.getElementById('dmeCloseConsultationModal')?.classList.remove('hidden');
+                else {
+                    modal?.classList.remove('hidden');
+                    modal?.classList.add('flex');
+                    document.body.style.overflow = 'hidden';
+                }
             };
 
             window.keepAndCloseDmeConsultation = async function() {
@@ -4792,9 +4806,16 @@ def _render_html() -> str:
                 const doctorId = document.getElementById('dmeHandoffDoctorSelect')?.value || '';
                 if (!note) { alert('Écrivez une note de reprise pour les autres utilisateurs.'); return; }
                 if (!doctorId) { alert('Choisissez le médecin à consulter.'); return; }
-                document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                const modal = document.getElementById('dmeCloseConsultationModal');
+                modal?.classList.add('hidden');
+                modal?.classList.remove('flex');
+                document.body.style.overflow = '';
                 if (await window.saveActiveDmeConsultation({ closeAfter: true, keepOpen: true, note, doctorId })) pendingDmeCloseTabKey = null;
-                else document.getElementById('dmeCloseConsultationModal')?.classList.remove('hidden');
+                else {
+                    modal?.classList.remove('hidden');
+                    modal?.classList.add('flex');
+                    document.body.style.overflow = 'hidden';
+                }
             };
 
             window.resetAndCloseDmeConsultation = async function() {
@@ -4810,13 +4831,20 @@ def _render_html() -> str:
                     });
                     const result = await response.json();
                     if (!response.ok || !result.success) throw new Error(result.detail || result.message || 'Réinitialisation impossible.');
-                    document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                    const modal = document.getElementById('dmeCloseConsultationModal');
+                    modal?.classList.add('hidden');
+                    modal?.classList.remove('flex');
+                    document.body.style.overflow = '';
                     pendingDmeCloseTabKey = null;
                     removeDmeTabNow(key);
                     if (typeof window.loadReceptionPassagesModule === 'function') window.loadReceptionPassagesModule();
                 } catch (error) {
                     alert(error.message || 'Impossible de réinitialiser la consultation.');
                     if (button) button.disabled = false;
+                    const modal = document.getElementById('dmeCloseConsultationModal');
+                    modal?.classList.remove('hidden');
+                    modal?.classList.add('flex');
+                    document.body.style.overflow = 'hidden';
                 }
             };
 
@@ -7345,7 +7373,10 @@ def _render_html() -> str:
                         );
                         currentTab.mode = options.keepOpen ? 'execution' : 'lecture';
                         if (options.closeAfter) {
-                            document.getElementById('dmeCloseConsultationModal')?.classList.add('hidden');
+                            const closeModal = document.getElementById('dmeCloseConsultationModal');
+                            closeModal?.classList.add('hidden');
+                            closeModal?.classList.remove('flex');
+                            document.body.style.overflow = '';
                             pendingDmeCloseTabKey = null;
                             removeDmeTabNow(currentTab.key);
                         } else displayActivePatientDme();
