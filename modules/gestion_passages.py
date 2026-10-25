@@ -2452,6 +2452,7 @@ def render_html(mode: str = "general") -> str:
                 <div>
                     <h3 class="text-sm font-bold text-slate-800 dark:text-white">Aperçu du Document Scanné</h3>
                     <p id="passageDocPreviewTitle" class="text-[11px] text-slate-400">Vérifiez la lisibilité avant validation définitive.</p>
+                    <p id="passageDocPreviewSize" class="text-[11px] font-semibold text-slate-500 dark:text-slate-300 mt-1">Taille : — Mo</p>
                 </div>
                 <button type="button" onclick="cancelPassageDocPreview()" class="text-slate-400 hover:text-white p-1">
                     <i class="ph-bold ph-x text-lg"></i>
@@ -2474,7 +2475,10 @@ def render_html(mode: str = "general") -> str:
             <div class="px-6 py-3.5 border-b border-slate-100 dark:border-white/5 flex justify-between items-center bg-slate-50 dark:bg-black/20">
                 <div class="flex items-center space-x-2">
                     <span class="w-2.5 h-2.5 rounded-full bg-brand-neon"></span>
-                    <h3 id="lightboxDocTitle" class="text-sm font-bold text-slate-800 dark:text-white">Document Scanné</h3>
+                    <div class="min-w-0">
+                        <h3 id="lightboxDocTitle" class="text-sm font-bold text-slate-800 dark:text-white">Document Scanné</h3>
+                        <p id="lightboxDocSize" class="text-[10px] text-slate-500 dark:text-slate-400">Taille : — Mo</p>
+                    </div>
                 </div>
                 <div class="flex flex-wrap items-center justify-end gap-1.5">
                     <span id="lightboxDocCounter" class="px-2 text-[10px] font-mono text-slate-500"></span>
@@ -4129,6 +4133,8 @@ def render_html(mode: str = "general") -> str:
                 const isPdf = String(base64Data).toLowerCase().includes('application/pdf');
 
                 if (title) title.innerText = (typeDoc || 'Document') + ' — vérifiez avant validation';
+                const sizeLabel = document.getElementById('passageDocPreviewSize');
+                if (sizeLabel) sizeLabel.textContent = `Taille : ${{formatScannedDocumentSize(base64Data)}}`;
                 if (img) {{ img.classList.toggle('hidden', isPdf); img.src = isPdf ? '' : base64Data; }}
                 if (pdf) {{ pdf.classList.toggle('hidden', !isPdf); pdf.src = isPdf ? base64Data : 'about:blank'; }}
                 if (modal) modal.classList.remove('hidden');
@@ -4250,6 +4256,7 @@ def render_html(mode: str = "general") -> str:
                 const img = document.getElementById('lightboxDocImg'); const pdf = document.getElementById('lightboxDocPdf');
                 const isPdf = String(doc.data).toLowerCase().startsWith('data:application/pdf') || /pdf/i.test(doc.type || '');
                 document.getElementById('lightboxDocTitle').textContent = doc.type || `Document scanné ${{passageViewerDocIndex + 1}}`;
+                document.getElementById('lightboxDocSize').textContent = `Taille : ${{formatScannedDocumentSize(doc.data)}}`;
                 document.getElementById('lightboxDocCounter').textContent = `${{passageViewerDocIndex + 1}} / ${{passageViewerDocs.length}}`;
                 document.getElementById('lightboxPrevBtn').disabled = passageViewerDocIndex <= 0;
                 document.getElementById('lightboxNextBtn').disabled = passageViewerDocIndex >= passageViewerDocs.length - 1;
@@ -4266,6 +4273,14 @@ def render_html(mode: str = "general") -> str:
             window.viewFirstPassageDocFromTable = window.viewPassageDocsFromTable;
             window.openPassageDocLightbox = function(data, title){{ openPassageDocCollection([{{data, type:title}}], 0); }};
             window.closePassageDocLightbox = function(){{ document.getElementById('passageDocLightboxModal')?.classList.add('hidden'); document.getElementById('lightboxDocImg').removeAttribute('src'); document.getElementById('lightboxDocPdf').src = 'about:blank'; passageViewerDocs = []; }};
+            function formatScannedDocumentSize(data) {{
+                const value = String(data || '');
+                const encoded = value.includes(',') ? value.slice(value.indexOf(',') + 1) : value;
+                if (!encoded) return 'indisponible';
+                const padding = encoded.endsWith('==') ? 2 : (encoded.endsWith('=') ? 1 : 0);
+                const bytes = Math.max(0, Math.floor(encoded.length * 3 / 4) - padding);
+                return `${{(bytes / (1024 * 1024)).toLocaleString('fr-FR', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }})}} Mo`;
+            }}
             window.rotateLightboxDoc = function(){{ currentLightboxRotation = (currentLightboxRotation + 90) % 360; const img = document.getElementById('lightboxDocImg'); if (img && !img.classList.contains('hidden')) img.style.transform = `rotate(${{currentLightboxRotation}}deg)`; }};
             window.printLightboxDoc = function(){{ const pdf = document.getElementById('lightboxDocPdf'); const img = document.getElementById('lightboxDocImg'); if (pdf && !pdf.classList.contains('hidden')) {{ pdf.contentWindow?.focus(); pdf.contentWindow?.print(); return; }} if (!img || !img.src) return; const win = window.open('', '_blank'); if (!win) return; win.document.write(`<html><head><title>Impression Document</title></head><body style="margin:0;display:flex;justify-content:center;align-items:center;height:100vh;"><img src="${{img.src}}" style="max-width:100%;max-height:100%;transform:rotate(${{currentLightboxRotation}}deg);" onload="window.print();window.close();"></body></html>`); win.document.close(); }};
 
