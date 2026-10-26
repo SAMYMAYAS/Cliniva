@@ -40,10 +40,6 @@ _SETTINGS_LOCK = threading.RLock()
 _SCHEDULER_STOP = threading.Event()
 _SCHEDULER_THREAD: threading.Thread | None = None
 _EXCLUDED_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
-# Ce paquet Python est un runtime tiers de l'outil Neuro-Atlas présent dans
-# l'espace de travail, pas un composant de Cliniva. Ses fichiers sont protégés
-# par des ACL propres à l'environnement et ne sont pas lisibles par le serveur.
-_EXCLUDED_PROJECT_DIRS = {Path("standalone/neuro-atlas/tools/python")}
 
 
 def _require_admin(request: Request) -> dict[str, Any]:
@@ -228,7 +224,6 @@ def _iter_files(root: Path, project_root: bool = False):
         current_path = Path(current)
         directories[:] = [name for name in directories
                           if name not in _EXCLUDED_DIRS
-                          and not (project_root and (current_path / name).relative_to(root) in _EXCLUDED_PROJECT_DIRS)
                           and not (current_path / name).is_symlink()]
         for filename in filenames:
             path = current_path / filename
@@ -417,7 +412,6 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
             "included": ["Fichiers de l’application et uploads", "Base PostgreSQL", "Données PACS/DICOM Print configurées"],
             "external_data_roots": [{"label": label, "source": str(path)} for label, path in external_roots],
             "excluded_generated_directories": sorted(_EXCLUDED_DIRS),
-            "excluded_project_directories": sorted(path.as_posix() for path in _EXCLUDED_PROJECT_DIRS),
             "database_credentials_included": False,
         }
         (partial_dir / "MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
