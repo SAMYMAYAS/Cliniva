@@ -72,6 +72,7 @@ from modules.gestion_serveur_impression import print_server_router
 from modules import gestion_dicom_print
 from modules.gestion_backup import backup_router, start_backup_scheduler, stop_backup_scheduler
 from modules.gestion_kacel_job import kacel_job_router
+from modules.gestion_service_technique import service_tech_router
 from app.mobile_scan import mobile_scan_router
 
 
@@ -974,6 +975,7 @@ app.include_router(telephony_router)
 app.include_router(print_server_router)
 app.include_router(backup_router)
 app.include_router(kacel_job_router)
+app.include_router(service_tech_router)
 app.include_router(mobile_scan_router)
 
 
@@ -1309,7 +1311,7 @@ async def execute_python_module(module_name: str, request: Request) -> HTMLRespo
             if not module_target.user_can_access_caisse(user):
                 raise HTTPException(status_code=403, detail="Aucun droit de caisse n'est accordé à ce compte.")
             html_output = module_target.render_html(user)
-        elif module_name == "gestion_kacel_job":
+        elif module_name in {"gestion_kacel_job", "gestion_service_technique"}:
             html_output = module_target.render_html(user)
         elif module_name in {"gestion_dme", "gestion_worklist", "gestion_dicom_print", "gestion_pacs_server", "gestion_backup", "gestion_telephonie_ip"}:
             html_output = module_target.render_html(user)

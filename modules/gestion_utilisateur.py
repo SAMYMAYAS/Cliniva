@@ -581,6 +581,13 @@ def _render_html() -> str:
                             <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_kacel_job_manage_companies" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Gérer les entreprises</span></label>
                             <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_kacel_job_manage_conventions" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Gérer les conventions</span></label>
                         </div>
+                        <div class="space-y-1.5 bg-white dark:bg-[#121c15] p-3 rounded-2xl border border-amber-200/70 dark:border-amber-400/20">
+                            <div class="font-bold text-amber-800 dark:text-amber-300 text-[11px] border-b border-amber-100 dark:border-white/10 pb-1 flex items-center gap-1.5">
+                                <i class="ph-bold ph-wrench text-amber-600"></i> Service Technique
+                            </div>
+                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_service_tech_view" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Consulter équipements et interventions</span></label>
+                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_service_tech_manage" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Gérer équipements et interventions</span></label>
+                        </div>
                         <!-- 13. Administration Système -->
                         <div class="space-y-1.5 bg-brand-neon/10 dark:bg-brand-neon/5 p-3 rounded-2xl border border-brand-neon/30">
                             <div class="font-bold text-emerald-950 dark:text-brand-neon text-[11px] border-b border-brand-neon/20 pb-1 flex items-center gap-1.5">

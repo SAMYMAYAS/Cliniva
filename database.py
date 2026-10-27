@@ -605,6 +605,48 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_kacel_job_categories_convention
         ON kacel_job_convention_categories (convention_id, ordre, id);
 
+    -- Inventaire des équipements et suivi des interventions du service technique.
+    CREATE TABLE IF NOT EXISTS service_tech_equipment (
+        id SERIAL PRIMARY KEY,
+        code TEXT NOT NULL DEFAULT '',
+        designation TEXT NOT NULL,
+        categorie TEXT NOT NULL DEFAULT '',
+        marque_modele TEXT NOT NULL DEFAULT '',
+        numero_serie TEXT NOT NULL DEFAULT '',
+        localisation TEXT NOT NULL DEFAULT '',
+        fournisseur TEXT NOT NULL DEFAULT '',
+        date_acquisition DATE,
+        statut TEXT NOT NULL DEFAULT 'En service',
+        derniere_maintenance DATE,
+        prochaine_maintenance DATE,
+        notes TEXT NOT NULL DEFAULT '',
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_service_tech_equipment_status
+        ON service_tech_equipment (statut, prochaine_maintenance);
+    CREATE TABLE IF NOT EXISTS service_tech_tickets (
+        id SERIAL PRIMARY KEY,
+        equipment_id INT REFERENCES service_tech_equipment(id) ON DELETE SET NULL,
+        type TEXT NOT NULL DEFAULT 'Incident',
+        titre TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        priorite TEXT NOT NULL DEFAULT 'Normale',
+        statut TEXT NOT NULL DEFAULT 'Nouveau',
+        demandeur TEXT NOT NULL DEFAULT '',
+        responsable TEXT NOT NULL DEFAULT '',
+        date_echeance DATE,
+        date_cloture TIMESTAMP WITH TIME ZONE,
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_service_tech_tickets_status
+        ON service_tech_tickets (statut, priorite, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_service_tech_tickets_equipment
+        ON service_tech_tickets (equipment_id, created_at DESC);
+
     """
     from modules.exam_requests_core import SCHEMA as EXAM_REQUESTS_SCHEMA
     query_schema += EXAM_REQUESTS_SCHEMA

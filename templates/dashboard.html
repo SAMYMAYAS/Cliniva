@@ -277,6 +277,13 @@
     </button>
     {% endif %}
 
+    {% if user.role == 'Administrateur' or user.permissions.service_tech_view or user.permissions.service_tech_manage %}
+    <button onclick="loadModule('gestion_service_technique')" data-module="gestion_service_technique" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph-bold ph-wrench text-xl text-amber-400"></i>
+        <span>Service Technique</span>
+    </button>
+    {% endif %}
+
     <!-- Médicaments -->
     <button onclick="loadModule('gestion_medicaments')" data-module="gestion_medicaments" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
         <i class="ph ph-pill text-xl"></i>
