@@ -31,6 +31,7 @@ SETTINGS_FILE = APP_DATA_DIR / "backup_settings.json"
 _JOB_LOCK = threading.RLock()
 _PAUSE_EVENT = threading.Event()
 _PAUSE_EVENT.set()
+_CANCEL_EVENT = threading.Event()
 _PG_PROCESS_LOCK = threading.RLock()
 _PG_PROCESS: subprocess.Popen | None = None
 _PG_PROCESS_SUSPENDED = False
@@ -43,6 +44,10 @@ _SETTINGS_LOCK = threading.RLock()
 _SCHEDULER_STOP = threading.Event()
 _SCHEDULER_THREAD: threading.Thread | None = None
 _EXCLUDED_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+
+
+class BackupCancelled(Exception):
+    """Raised inside the worker when the administrator abandons a backup."""
 
 
 def _require_admin(request: Request) -> dict[str, Any]:
@@ -104,10 +109,11 @@ def _set_schedule_run(schedule_id: str | None, *, run_at: str, status: str, mess
 def _launch_backup(destination: Path, schedule_id: str | None = None) -> str:
     global _JOB
     with _JOB_LOCK:
-        if _JOB.get("state") in {"running", "paused"}:
+        if _JOB.get("state") in {"running", "paused", "cancelling"}:
             raise RuntimeError("Une sauvegarde complète est déjà en cours.")
         job_id = uuid.uuid4().hex
         _PAUSE_EVENT.set()
+        _CANCEL_EVENT.clear()
         _JOB = {"id": job_id, "state": "running", "percent": 1,
                 "message": "Démarrage de la sauvegarde automatique…" if schedule_id else "Démarrage de la sauvegarde…",
                 "output": None, "schedule_id": schedule_id, "stage": "Préparation",
@@ -230,6 +236,8 @@ def _iter_tree_entries(root: Path):
     root_resolved = root.resolve()
 
     def walk(directory: Path, ancestors: frozenset[Path]):
+        if _CANCEL_EVENT.is_set():
+            raise BackupCancelled("Sauvegarde abandonnée par l’administrateur.")
         try:
             with os.scandir(directory) as scan:
                 entries = list(scan)
@@ -318,10 +326,47 @@ def _control_pg_dump_process(*, pause: bool) -> None:
 
 
 def _wait_if_paused() -> None:
-    while not _PAUSE_EVENT.wait(0.25):
+    while True:
+        if _CANCEL_EVENT.is_set():
+            raise BackupCancelled("Sauvegarde abandonnée par l’administrateur.")
+        if _PAUSE_EVENT.wait(0.25):
+            if _CANCEL_EVENT.is_set():
+                raise BackupCancelled("Sauvegarde abandonnée par l’administrateur.")
+            return
         with _JOB_LOCK:
             if _JOB.get("state") == "paused":
                 _JOB["speed_bps"] = 0
+
+
+def _terminate_pg_dump_process() -> None:
+    global _PG_PROCESS, _PG_PROCESS_SUSPENDED
+    with _PG_PROCESS_LOCK:
+        process = _PG_PROCESS
+        if process is None or process.poll() is not None:
+            _PG_PROCESS = None
+            _PG_PROCESS_SUSPENDED = False
+            return
+        if _PG_PROCESS_SUSPENDED:
+            _control_pg_dump_process(pause=False)
+        try:
+            process.terminate()
+        except OSError:
+            if process.poll() is None:
+                raise
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+            process.wait(timeout=5)
+        except OSError:
+            if process.poll() is None:
+                raise
+    finally:
+        with _PG_PROCESS_LOCK:
+            if _PG_PROCESS is process and process.poll() is not None:
+                _PG_PROCESS = None
+                _PG_PROCESS_SUSPENDED = False
 
 
 def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str, Any], total_bytes: int,
@@ -633,16 +678,52 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
             "restore_requires_database_password": True,
         }
         (partial_dir / "MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        partial_dir.rename(final_dir)
+        backup_bytes = sum(p.stat().st_size for p in _iter_files(partial_dir))
         with _JOB_LOCK:
+            if _CANCEL_EVENT.is_set():
+                raise BackupCancelled("Sauvegarde abandonnée par l’administrateur.")
+            partial_dir.rename(final_dir)
             _JOB.update(state="completed", percent=100, stage="Terminée", speed_bps=0,
                         stage_bytes=0, stage_total_bytes=0, current_file="",
                         message="Sauvegarde complète terminée.",
-                        output=str(final_dir), bytes=sum(p.stat().st_size for p in _iter_files(final_dir)))
+                        output=str(final_dir), bytes=backup_bytes)
         _set_schedule_run(schedule_id, run_at=datetime.now().astimezone().isoformat(timespec="seconds"),
                           status="completed", message="Sauvegarde terminée")
         logger.info("Sauvegarde complète Cliniva terminée : %s", final_dir)
+    except BackupCancelled as exc:
+        termination_error = None
+        try:
+            _terminate_pg_dump_process()
+        except Exception as terminate_exc:
+            termination_error = str(terminate_exc)
+            logger.exception("Arrêt de pg_dump impossible après abandon")
+        cleanup_error = termination_error
+        if not termination_error and partial_dir.exists():
+            try:
+                shutil.rmtree(partial_dir)
+            except OSError as cleanup_exc:
+                cleanup_error = str(cleanup_exc)
+                logger.exception("Suppression du dossier temporaire de sauvegarde impossible : %s", partial_dir)
+        message = "Sauvegarde abandonnée. Les fichiers temporaires ont été supprimés."
+        output = None
+        if termination_error:
+            message = f"Abandon demandé, mais l’arrêt de pg_dump a échoué : {termination_error}. Le dossier temporaire est conservé."
+            output = str(partial_dir)
+        elif cleanup_error:
+            message = f"Sauvegarde abandonnée, mais le dossier temporaire n’a pas pu être supprimé : {cleanup_error}"
+            output = str(partial_dir)
+        with _JOB_LOCK:
+            _JOB.update(state="cancelled", stage="Abandonnée", speed_bps=0,
+                        stage_bytes=0, stage_total_bytes=0, current_file="",
+                        message=message, output=output)
+        _set_schedule_run(schedule_id, run_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+                          status="cancelled", message=message)
+        logger.info("Sauvegarde complète Cliniva abandonnée : %s", exc)
     except Exception as exc:
+        try:
+            _terminate_pg_dump_process()
+        except Exception:
+            logger.exception("Arrêt du processus pg_dump impossible après erreur de backup")
         logger.exception("Échec de la sauvegarde complète Cliniva")
         with _JOB_LOCK:
             _JOB.update(state="failed", stage="Échec", speed_bps=0, message=str(exc),
@@ -789,6 +870,23 @@ async def resume_full_backup(job_id: str, request: Request):
         return dict(_JOB)
 
 
+@backup_router.post("/cancel/{job_id}")
+async def cancel_full_backup(job_id: str, request: Request):
+    _require_admin(request)
+    with _JOB_LOCK:
+        if _JOB.get("id") != job_id or _JOB.get("state") not in {"running", "paused"}:
+            raise HTTPException(status_code=409, detail="Cette sauvegarde ne peut pas être abandonnée maintenant.")
+        _CANCEL_EVENT.set()
+        _PAUSE_EVENT.set()
+        _JOB.update(state="cancelling", message="Abandon de la sauvegarde en cours…", speed_bps=0)
+    try:
+        _terminate_pg_dump_process()
+    except Exception:
+        logger.exception("Arrêt immédiat de pg_dump impossible ; le worker termine l’abandon proprement")
+    with _JOB_LOCK:
+        return dict(_JOB)
+
+
 @backup_router.get("/history")
 async def full_backup_history(request: Request):
     _require_admin(request)
@@ -851,7 +949,7 @@ def render_html(user: dict[str, Any] | None = None) -> str:
      <div class="mt-5 grid gap-3 md:grid-cols-3"><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-code text-xl text-emerald-700"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Fichiers Cliniva</p><p class="mt-1 text-xs text-slate-500">Code, modèles, configuration, documents et uploads.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-database text-xl text-indigo-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Base PostgreSQL</p><p class="mt-1 text-xs text-slate-500">Export complet restaurable avec pg_restore.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-images text-xl text-amber-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Images DICOM</p><p class="mt-1 text-xs text-slate-500">Stockage PACS et réceptions DICOM Print configurés.</p></div></div>
      <div class="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs leading-relaxed text-emerald-900"><b>Kit de restauration inclus :</b> chaque nouveau backup contient un lanceur en un clic, le script de restauration, les versions Python installées et le guide pour remettre Cliniva en service sur un autre PC.</div>
     <div class="mt-5 flex flex-wrap items-center gap-3"><button id="backupStart" type="button" class="rounded-xl bg-emerald-700 px-5 py-3 text-sm font-extrabold text-white shadow-sm hover:bg-emerald-800"><i class="ph-bold ph-shield-check mr-2"></i>Lancer la sauvegarde complète</button><span class="text-xs text-slate-500">L’opération s’effectue en arrière-plan; les fichiers source ne sont pas modifiés.</span></div>
-    <div id="backupProgressWrap" class="mt-6 hidden rounded-2xl border border-slate-200 bg-slate-50 p-4"><div class="flex flex-wrap items-center justify-between gap-3"><p id="backupMessage" class="min-w-0 flex-1 truncate text-sm font-bold text-slate-700">Préparation…</p><div class="flex shrink-0 items-center gap-2"><button id="backupPause" type="button" class="hidden rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-100"><i class="ph-bold ph-pause mr-1"></i>Mettre en pause</button><button id="backupResume" type="button" class="hidden rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100"><i class="ph-bold ph-play mr-1"></i>Continuer</button><span id="backupPercent" class="text-sm font-extrabold text-emerald-700">0 %</span></div></div><div class="mt-3 h-2.5 overflow-hidden rounded-full bg-slate-200"><div id="backupProgressBar" class="h-full w-0 rounded-full bg-gradient-to-r from-lime-400 to-emerald-600 transition-all duration-300"></div></div><div class="mt-4 grid gap-3 sm:grid-cols-3"><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Étape</p><p id="backupStage" class="mt-1 truncate text-xs font-bold text-slate-700">En attente</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Débit instantané</p><p id="backupSpeed" class="mt-1 text-xs font-bold text-emerald-700">0 Ko/s</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Transféré dans l’étape</p><p id="backupTransferStats" class="mt-1 text-xs font-bold text-slate-700">0 octet</p></div></div><p id="backupCurrentFile" class="mt-3 truncate text-xs text-slate-500" title=""></p><p id="backupOutput" class="mt-2 break-all text-xs text-slate-500"></p></div>
+    <div id="backupProgressWrap" class="mt-6 hidden rounded-2xl border border-slate-200 bg-slate-50 p-4"><div class="flex flex-wrap items-center justify-between gap-3"><p id="backupMessage" class="min-w-0 flex-1 truncate text-sm font-bold text-slate-700">Préparation…</p><div class="flex shrink-0 items-center gap-2"><button id="backupCancel" type="button" class="hidden rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100"><i class="ph-bold ph-x-circle mr-1"></i>Abandonner</button><button id="backupPause" type="button" class="hidden rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-100"><i class="ph-bold ph-pause mr-1"></i>Mettre en pause</button><button id="backupResume" type="button" class="hidden rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100"><i class="ph-bold ph-play mr-1"></i>Continuer</button><span id="backupPercent" class="text-sm font-extrabold text-emerald-700">0 %</span></div></div><div class="mt-3 h-2.5 overflow-hidden rounded-full bg-slate-200"><div id="backupProgressBar" class="h-full w-0 rounded-full bg-gradient-to-r from-lime-400 to-emerald-600 transition-all duration-300"></div></div><div class="mt-4 grid gap-3 sm:grid-cols-3"><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Étape</p><p id="backupStage" class="mt-1 truncate text-xs font-bold text-slate-700">En attente</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Débit instantané</p><p id="backupSpeed" class="mt-1 text-xs font-bold text-emerald-700">0 Ko/s</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Transféré dans l’étape</p><p id="backupTransferStats" class="mt-1 text-xs font-bold text-slate-700">0 octet</p></div></div><p id="backupCurrentFile" class="mt-3 truncate text-xs text-slate-500" title=""></p><p id="backupOutput" class="mt-2 break-all text-xs text-slate-500"></p></div>
     <div class="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-relaxed text-amber-900"><b>À protéger :</b> la sauvegarde contient des données médicales et des images DICOM. Choisissez un disque ou un partage sécurisé avec suffisamment d’espace. Pour exporter la base, l’outil PostgreSQL <code>pg_dump</code> doit être installé sur le serveur.</div>
   </article>
   <article class="rounded-[1.75rem] border border-slate-200 bg-white p-6 shadow-sm">
@@ -885,17 +983,18 @@ def render_html(user: dict[str, Any] | None = None) -> str:
   function formatBytes(value){const bytes=Math.max(0,Number(value)||0);if(bytes<1024)return bytes+' octet';if(bytes<1024*1024)return (bytes/1024).toFixed(1)+' Ko';if(bytes<1024*1024*1024)return (bytes/1024/1024).toFixed(1)+' Mo';return (bytes/1024/1024/1024).toFixed(2)+' Go';}
   function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
   async function loadHistory(){const body=$('backupHistoryRows');body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs text-slate-400">Chargement de l’historique…</td></tr>';try{const result=await api('/api/backup/history');$('backupHistoryLocation').textContent='Répertoire : '+(result.destination||'');const items=Array.isArray(result.items)?result.items:[];if(!items.length){body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs text-slate-400">Aucune sauvegarde trouvée dans ce répertoire.</td></tr>';return;}body.innerHTML=items.map(item=>{const complete=item.status==='completed';const badge=complete?'<span class="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold text-emerald-800">Terminée</span>':'<span class="rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-bold text-amber-800">Incomplète</span>';let date=item.created_at||'';const parsed=new Date(date);if(!Number.isNaN(parsed.getTime()))date=parsed.toLocaleString('fr-FR');return '<tr class="hover:bg-slate-50"><td class="whitespace-nowrap px-4 py-3 text-xs font-semibold text-slate-700">'+escapeHtml(date)+'</td><td class="px-4 py-3">'+badge+'</td><td class="whitespace-nowrap px-4 py-3 text-xs font-bold text-slate-700">'+(item.size_bytes==null?'—':escapeHtml(formatBytes(item.size_bytes)))+'</td><td class="px-4 py-3 text-xs text-slate-600">'+escapeHtml(item.database||'—')+'</td><td class="max-w-[360px] px-4 py-3 text-[11px] text-slate-500"><span class="block truncate" title="'+escapeHtml(item.path||'')+'">'+escapeHtml(item.path||item.name||'')+'</span></td></tr>';}).join('');}catch(error){body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs font-semibold text-rose-600">'+escapeHtml(error.message)+'</td></tr>';}}
-  function renderProgress(state){const speed=Math.max(0,Number(state.speed_bps)||0);$('backupStage').textContent=state.stage||'Préparation';$('backupSpeed').textContent=formatBytes(speed)+'/s';const transferred=Number(state.stage_bytes)||0,total=Number(state.stage_total_bytes)||0;$('backupTransferStats').textContent=formatBytes(transferred)+(total?' / '+formatBytes(total):'');const file=state.current_file||'';$('backupCurrentFile').textContent=file?(state.stage==='Base PostgreSQL'?'Export de la base PostgreSQL en cours':'Fichier : '+file):'';$('backupCurrentFile').title=file;$('backupPause').classList.toggle('hidden',state.state!=='running');$('backupResume').classList.toggle('hidden',state.state!=='paused');}
+  function renderProgress(state){const speed=Math.max(0,Number(state.speed_bps)||0);$('backupStage').textContent=state.stage||'Préparation';$('backupSpeed').textContent=formatBytes(speed)+'/s';const transferred=Number(state.stage_bytes)||0,total=Number(state.stage_total_bytes)||0;$('backupTransferStats').textContent=formatBytes(transferred)+(total?' / '+formatBytes(total):'');const file=state.current_file||'';$('backupCurrentFile').textContent=file?(state.stage==='Base PostgreSQL'?'Export de la base PostgreSQL en cours':'Fichier : '+file):'';$('backupCurrentFile').title=file;$('backupPause').classList.toggle('hidden',state.state!=='running');$('backupResume').classList.toggle('hidden',state.state!=='paused');$('backupCancel').classList.toggle('hidden',!['running','paused','cancelling'].includes(state.state));$('backupCancel').disabled=state.state==='cancelling';$('backupCancel').innerHTML=state.state==='cancelling'?'<i class="ph-bold ph-spinner-gap mr-1 animate-spin"></i>Abandon…':'<i class="ph-bold ph-x-circle mr-1"></i>Abandonner';}
   function showError(message){$('backupProgressWrap').classList.remove('hidden');$('backupMessage').textContent=message;$('backupMessage').className='min-w-0 truncate text-sm font-bold text-rose-700';}
-  async function poll(){if(!currentJob||!document.getElementById('backupProgressWrap'))return;try{const state=await api('/api/backup/status/'+encodeURIComponent(currentJob));if(!document.getElementById('backupProgressWrap'))return;$('backupProgressWrap').classList.remove('hidden');$('backupMessage').textContent=state.message||state.state;$('backupMessage').className='min-w-0 truncate text-sm font-bold '+(state.state==='failed'?'text-rose-700':'text-slate-700');const percent=Number(state.percent)||0;$('backupPercent').textContent=percent+' %';$('backupProgressBar').style.width=percent+'%';$('backupOutput').textContent=state.output?'Destination : '+state.output:'';renderProgress(state);if(state.state==='running'||state.state==='paused'){pollTimer=setTimeout(poll,1000);}else{$('backupStart').disabled=false;$('backupStart').classList.remove('opacity-60','cursor-not-allowed');currentJob=null;loadHistory();}}catch(error){if(document.getElementById('backupProgressWrap'))showError(error.message);$('backupStart')?.removeAttribute('disabled');currentJob=null;}}
-  async function controlBackup(action){if(!currentJob)return;const button=action==='pause'?$('backupPause'):$('backupResume');button.disabled=true;try{await api('/api/backup/'+action+'/'+encodeURIComponent(currentJob),{method:'POST',body:'{}'});await poll();}catch(error){showError(error.message);}finally{button.disabled=false;}}
+  async function poll(){if(!currentJob||!document.getElementById('backupProgressWrap'))return;try{const state=await api('/api/backup/status/'+encodeURIComponent(currentJob));if(!document.getElementById('backupProgressWrap'))return;$('backupProgressWrap').classList.remove('hidden');$('backupMessage').textContent=state.message||state.state;$('backupMessage').className='min-w-0 truncate text-sm font-bold '+(['failed','cancelled'].includes(state.state)?'text-rose-700':'text-slate-700');const percent=Number(state.percent)||0;$('backupPercent').textContent=percent+' %';$('backupProgressBar').style.width=percent+'%';$('backupOutput').textContent=state.output?'Destination : '+state.output:'';renderProgress(state);if(['running','paused','cancelling'].includes(state.state)){pollTimer=setTimeout(poll,1000);}else{$('backupStart').disabled=false;$('backupStart').classList.remove('opacity-60','cursor-not-allowed');currentJob=null;loadHistory();}}catch(error){if(document.getElementById('backupProgressWrap'))showError(error.message);$('backupStart')?.removeAttribute('disabled');currentJob=null;}}
+  async function controlBackup(action){if(!currentJob)return;if(action==='cancel'&&!window.confirm('Abandonner cette sauvegarde ? Le dossier temporaire incomplet sera supprimé.'))return;const button=action==='pause'?'backupPause':action==='resume'?'backupResume':'backupCancel';$(button).disabled=true;try{await api('/api/backup/'+action+'/'+encodeURIComponent(currentJob),{method:'POST',body:'{}'});await poll();}catch(error){showError(error.message);}finally{$(button).disabled=false;}}
   $('backupPause').addEventListener('click',()=>controlBackup('pause'));
   $('backupResume').addEventListener('click',()=>controlBackup('resume'));
+  $('backupCancel').addEventListener('click',()=>controlBackup('cancel'));
   $('backupSavePath').addEventListener('click',async()=>{try{const result=await api('/api/backup/settings',{method:'POST',body:JSON.stringify({destination:$('backupDestination').value})});$('backupDestination').value=result.destination;$('backupMessage').textContent='Répertoire de sauvegarde enregistré.';$('backupMessage').className='min-w-0 truncate text-sm font-bold text-emerald-700';$('backupProgressWrap').classList.remove('hidden');loadHistory();}catch(error){showError(error.message);}});
   $('backupHistoryRefresh').addEventListener('click',loadHistory);
   function timePeriod(value){if(!/^\d{2}:\d{2}$/.test(value||''))return 'Format 24 h';const hour=Number(value.slice(0,2));if(hour>=5&&hour<12)return 'Matin';if(hour>=12&&hour<18)return 'Après-midi';if(hour>=18&&hour<22)return 'Soir';return 'Nuit';}
   function updateSchedulePeriod(){const period=$('backupSchedulePeriod');if(period)period.textContent=timePeriod($('backupScheduleTime').value);}
-  function renderSchedules(){const body=$('backupScheduleRows');if(!schedules.length){body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs text-slate-400">Aucun horaire configuré.</td></tr>';return;}body.innerHTML=schedules.map((item,index)=>{const state=item.last_run_status==='completed'?'Terminée':item.last_run_status==='running'?'En cours':item.last_run_status==='failed'?'Échec':item.last_run_status==='skipped'?'Ignorée':'Jamais exécutée';const tone=item.last_run_status==='completed'?'text-emerald-700':item.last_run_status==='failed'?'text-rose-700':'text-slate-500';const last=item.last_run_at?new Date(item.last_run_at).toLocaleString('fr-FR')+' · '+state:state;return '<tr class="hover:bg-slate-50"><td class="px-4 py-3"><span class="font-mono font-bold text-slate-800">'+item.time+'</span><span class="ml-2 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">'+timePeriod(item.time)+'</span></td><td class="px-4 py-3 text-slate-600">Tous les jours</td><td class="px-4 py-3"><button type="button" data-schedule-toggle="'+index+'" class="rounded-full px-3 py-1 text-[10px] font-bold '+(item.enabled?'bg-emerald-100 text-emerald-800':'bg-slate-100 text-slate-500')+'">'+(item.enabled?'Activé':'Désactivé')+'</button></td><td class="px-4 py-3 text-xs '+tone+'">'+last+'</td><td class="px-4 py-3 text-right"><button type="button" data-schedule-delete="'+index+'" class="rounded-lg px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50"><i class="ph-bold ph-trash mr-1"></i>Supprimer</button></td></tr>';}).join('');body.querySelectorAll('[data-schedule-toggle]').forEach(button=>button.addEventListener('click',()=>{const item=schedules[Number(button.dataset.scheduleToggle)];item.enabled=!item.enabled;renderSchedules();}));body.querySelectorAll('[data-schedule-delete]').forEach(button=>button.addEventListener('click',()=>{schedules.splice(Number(button.dataset.scheduleDelete),1);renderSchedules();}));}
+  function renderSchedules(){const body=$('backupScheduleRows');if(!schedules.length){body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs text-slate-400">Aucun horaire configuré.</td></tr>';return;}body.innerHTML=schedules.map((item,index)=>{const state=item.last_run_status==='completed'?'Terminée':item.last_run_status==='running'?'En cours':item.last_run_status==='failed'?'Échec':item.last_run_status==='cancelled'?'Abandonnée':item.last_run_status==='skipped'?'Ignorée':'Jamais exécutée';const tone=item.last_run_status==='completed'?'text-emerald-700':item.last_run_status==='failed'?'text-rose-700':item.last_run_status==='cancelled'?'text-amber-700':'text-slate-500';const last=item.last_run_at?new Date(item.last_run_at).toLocaleString('fr-FR')+' · '+state:state;return '<tr class="hover:bg-slate-50"><td class="px-4 py-3"><span class="font-mono font-bold text-slate-800">'+item.time+'</span><span class="ml-2 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">'+timePeriod(item.time)+'</span></td><td class="px-4 py-3 text-slate-600">Tous les jours</td><td class="px-4 py-3"><button type="button" data-schedule-toggle="'+index+'" class="rounded-full px-3 py-1 text-[10px] font-bold '+(item.enabled?'bg-emerald-100 text-emerald-800':'bg-slate-100 text-slate-500')+'">'+(item.enabled?'Activé':'Désactivé')+'</button></td><td class="px-4 py-3 text-xs '+tone+'">'+last+'</td><td class="px-4 py-3 text-right"><button type="button" data-schedule-delete="'+index+'" class="rounded-lg px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50"><i class="ph-bold ph-trash mr-1"></i>Supprimer</button></td></tr>';}).join('');body.querySelectorAll('[data-schedule-toggle]').forEach(button=>button.addEventListener('click',()=>{const item=schedules[Number(button.dataset.scheduleToggle)];item.enabled=!item.enabled;renderSchedules();}));body.querySelectorAll('[data-schedule-delete]').forEach(button=>button.addEventListener('click',()=>{schedules.splice(Number(button.dataset.scheduleDelete),1);renderSchedules();}));}
   async function saveSchedule(){const result=await api('/api/backup/schedule',{method:'POST',body:JSON.stringify({enabled:$('backupScheduleEnabled').checked,schedules})});schedules=result.schedules||[];renderSchedules();$('backupScheduleNotice').textContent=result.schedule_enabled?'Planification enregistrée et active.':'Planification enregistrée et suspendue.';$('backupScheduleNotice').className='text-xs text-emerald-700';}
   $('backupScheduleAdd').addEventListener('click',()=>{const time=$('backupScheduleTime').value;if(!time){$('backupScheduleNotice').textContent='Choisis une heure avant de l’ajouter.';$('backupScheduleNotice').className='text-xs font-semibold text-rose-600';return;}if(schedules.some(item=>item.time===time)){$('backupScheduleNotice').textContent='Cette heure existe déjà dans le tableau.';$('backupScheduleNotice').className='text-xs font-semibold text-rose-600';return;}schedules.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,8),time,enabled:true});schedules.sort((a,b)=>a.time.localeCompare(b.time));$('backupScheduleTime').value='';renderSchedules();});
   $('backupScheduleTime').addEventListener('input',updateSchedulePeriod);
@@ -903,7 +1002,7 @@ def render_html(user: dict[str, Any] | None = None) -> str:
   $('backupScheduleEnabled').addEventListener('change',()=>saveSchedule().catch(error=>{$('backupScheduleNotice').textContent=error.message;$('backupScheduleNotice').className='text-xs font-semibold text-rose-600';}));
   $('backupStart').addEventListener('click',async()=>{try{await api('/api/backup/settings',{method:'POST',body:JSON.stringify({destination:$('backupDestination').value})});const result=await api('/api/backup/start',{method:'POST',body:'{}'});currentJob=result.job_id;$('backupStart').disabled=true;$('backupStart').classList.add('opacity-60','cursor-not-allowed');$('backupProgressBar').style.width='1%';$('backupPercent').textContent='1 %';$('backupOutput').textContent='';$('backupMessage').textContent='Démarrage de la sauvegarde…';$('backupMessage').className='min-w-0 truncate text-sm font-bold text-slate-700';$('backupProgressWrap').classList.remove('hidden');renderProgress({state:'running',stage:'Préparation',speed_bps:0,stage_bytes:0});poll();}catch(error){showError(error.message);}});
   api('/api/backup/settings').then(settings=>{$('backupDestination').value=settings.destination||'';$('backupScheduleEnabled').checked=settings.schedule_enabled===true;schedules=Array.isArray(settings.schedules)?settings.schedules:[];renderSchedules();loadHistory();}).catch(error=>showError(error.message));
-  api('/api/backup/current').then(state=>{if(state.id&&state.state!=='idle'){$('backupProgressWrap').classList.remove('hidden');$('backupMessage').textContent=state.message||state.state;$('backupPercent').textContent=(Number(state.percent)||0)+' %';$('backupProgressBar').style.width=(Number(state.percent)||0)+'%';$('backupOutput').textContent=state.output?'Destination : '+state.output:'';renderProgress(state);if(state.state==='running'||state.state==='paused'){currentJob=state.id;$('backupStart').disabled=true;poll();}}}).catch(()=>{});
+  api('/api/backup/current').then(state=>{if(state.id&&state.state!=='idle'){$('backupProgressWrap').classList.remove('hidden');$('backupMessage').textContent=state.message||state.state;$('backupPercent').textContent=(Number(state.percent)||0)+' %';$('backupProgressBar').style.width=(Number(state.percent)||0)+'%';$('backupOutput').textContent=state.output?'Destination : '+state.output:'';renderProgress(state);if(['running','paused','cancelling'].includes(state.state)){currentJob=state.id;$('backupStart').disabled=true;poll();}}}).catch(()=>{});
 })();
 </script>
 """
