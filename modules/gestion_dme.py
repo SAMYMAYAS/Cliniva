@@ -4248,7 +4248,7 @@ def _render_html() -> str:
                     </div>
                     <div id="livretCoverEditorPanel" class="flex flex-col items-center gap-3">
                         <button type="button" onclick="openLivretCoverEditor()" class="inline-flex items-center gap-2 self-stretch justify-center rounded-xl bg-slate-800 px-4 py-2.5 text-xs font-extrabold text-white hover:bg-slate-900 dark:bg-emerald-700 dark:hover:bg-emerald-600"><i class="ph-bold ph-arrows-out text-base"></i>Afficher la page de garde en grand</button>
-                        <div id="livretCoverCanvas" ondblclick="openLivretCoverEditor()" title="Double-cliquer pour ouvrir la page de garde en grand" class="relative mx-auto hidden w-full max-w-[300px] cursor-zoom-in overflow-hidden rounded-xl border border-slate-300 bg-white shadow-lg dark:border-white/10" style="aspect-ratio:210 / 297;">
+                        <div id="livretCoverCanvas" ondblclick="openLivretCoverEditor()" title="Double-cliquer pour ouvrir la page de garde en grand" class="relative mx-auto hidden cursor-zoom-in overflow-hidden rounded-xl border border-slate-300 bg-white shadow-lg dark:border-white/10" style="aspect-ratio:210 / 297; width:3.54cm; height:5cm;">
                             <img id="livretPageGardePreview" class="absolute inset-0 h-full w-full object-fill" alt="Aperçu de la page de garde">
                             <div id="livretCoverPatient" data-cover-field="patient" onpointerdown="livretCoverPointerDown(event, 'patient')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Patient : —</div>
                             <div id="livretCoverDate" data-cover-field="date" onpointerdown="livretCoverPointerDown(event, 'date')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Date : —</div>
@@ -4893,7 +4893,6 @@ def _render_html() -> str:
                 livretCoverEditorOriginalNextSibling = panel.nextSibling;
                 host.appendChild(panel);
                 panel.classList.add('w-full', 'h-full', 'md:flex-row', 'md:justify-center', 'md:items-center');
-                canvas.classList.remove('w-full', 'max-w-[300px]');
                 const maxHeight = Math.min(window.innerHeight * 0.78, 1100);
                 const maxWidth = Math.max(200, window.innerWidth - 390);
                 const editorHeight = Math.min(maxHeight, maxWidth * 297 / 210);
@@ -4914,9 +4913,8 @@ def _render_html() -> str:
                 }
                 panel?.classList.remove('w-full', 'h-full', 'md:flex-row', 'md:justify-center', 'md:items-center');
                 if (canvas) {
-                    canvas.classList.add('w-full', 'max-w-[300px]');
-                    canvas.style.width = '';
-                    canvas.style.height = '';
+                    canvas.style.width = '3.54cm';
+                    canvas.style.height = '5cm';
                 }
                 modal?.classList.add('hidden');
                 modal?.classList.remove('flex');
