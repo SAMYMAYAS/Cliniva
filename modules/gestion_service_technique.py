@@ -188,7 +188,7 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
         raise HTTPException(status_code=403, detail="Accès au module Service Technique refusé.")
     can_manage = _allowed(user, "service_tech_manage")
     manage_controls = """
-      <div class="flex flex-wrap gap-2"><button onclick="techOpenEquipment()" class="flex items-center gap-2 rounded-2xl bg-brand-neon px-4 py-2.5 text-xs font-bold text-black shadow-md shadow-brand-neon/20 transition hover:bg-brand-neonDark"><i class="ph-bold ph-plus-circle text-base"></i>Ajouter un équipement</button>
+      <div class="ml-auto flex flex-wrap justify-end gap-2"><button onclick="techOpenEquipment()" class="flex items-center gap-2 rounded-2xl bg-brand-neon px-4 py-2.5 text-xs font-bold text-black shadow-md shadow-brand-neon/20 transition hover:bg-brand-neonDark"><i class="ph-bold ph-plus-circle text-base"></i>Ajouter un équipement</button>
       <button onclick="techOpenTicket()" class="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/10 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-white/15"><i class="ph-bold ph-wrench text-base"></i>Nouvelle intervention</button></div>
     """ if can_manage else ""
     page = r'''
