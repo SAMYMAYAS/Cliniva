@@ -1,7 +1,9 @@
 """Inventaire, maintenance et demandes d'intervention du service technique."""
 
 from datetime import date
+import base64
 from html import escape
+import sys
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -44,12 +46,27 @@ def _date_value(data: Dict[str, Any], key: str, label: str) -> Optional[str]:
         raise HTTPException(status_code=400, detail=f"La date {label} est invalide.") from exc
 
 
+def _protect_equipment_password(password: str) -> str:
+    """Chiffre le mot de passe avec DPAPI Windows avant son stockage."""
+    if sys.platform != "win32":
+        raise HTTPException(status_code=500, detail="Le chiffrement sécurisé du mot de passe nécessite Windows.")
+    try:
+        import win32crypt
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="pywin32 est nécessaire pour chiffrer le mot de passe de l'équipement.") from exc
+    encrypted = win32crypt.CryptProtectData(
+        password.encode("utf-8"), "Cliniva Service Technique", None, None, None, 0
+    )
+    return base64.b64encode(encrypted).decode("ascii")
+
+
 @service_tech_router.get("/data")
 def service_tech_data(request: Request):
     user = get_current_user(request)
     _require(user, "service_tech_view")
     with get_db_cursor() as cursor:
         cursor.execute("""SELECT id, code, designation, categorie, marque_modele, numero_serie,
+            adresse_ip, utilisateur, (mot_de_passe_ciphertext <> '') AS password_configured, aet, port,
             localisation, fournisseur, date_acquisition, statut, derniere_maintenance,
             prochaine_maintenance, notes FROM service_tech_equipment
             ORDER BY designation, id""")
@@ -79,8 +96,19 @@ async def service_tech_equipment_save(request: Request):
     if status not in EQUIPMENT_STATUSES:
         raise HTTPException(status_code=400, detail="Le statut de l'équipement est invalide.")
     equipment_id = data.get("id")
+    raw_port = _text(data, "port", "port")
+    try:
+        port = int(raw_port) if raw_port else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Le port doit être un nombre entre 1 et 65535.") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise HTTPException(status_code=400, detail="Le port doit être compris entre 1 et 65535.")
+    password = _text(data, "mot_de_passe", "mot de passe")
+    password_ciphertext = _protect_equipment_password(password) if password else None
     values = (_text(data, "code", "code"), designation, _text(data, "categorie", "catégorie"),
               _text(data, "marque_modele", "marque et modèle"), _text(data, "numero_serie", "numéro de série"),
+              _text(data, "adresse_ip", "adresse IP"), _text(data, "utilisateur", "utilisateur"),
+              _text(data, "aet", "AET"), port,
               _text(data, "localisation", "localisation"), _text(data, "fournisseur", "fournisseur"),
               _date_value(data, "date_acquisition", "d'acquisition"), status,
               _date_value(data, "derniere_maintenance", "de dernière maintenance"),
@@ -89,18 +117,23 @@ async def service_tech_equipment_save(request: Request):
     with get_db_cursor() as cursor:
         if equipment_id:
             cursor.execute("""UPDATE service_tech_equipment SET code=%s, designation=%s, categorie=%s,
-                marque_modele=%s, numero_serie=%s, localisation=%s, fournisseur=%s, date_acquisition=%s,
+                marque_modele=%s, numero_serie=%s, adresse_ip=%s, utilisateur=%s,
+                aet=%s, port=%s, localisation=%s, fournisseur=%s, date_acquisition=%s,
                 statut=%s, derniere_maintenance=%s, prochaine_maintenance=%s, notes=%s,
-                updated_at=CURRENT_TIMESTAMP WHERE id=%s RETURNING id""", (*values, int(equipment_id)))
+                mot_de_passe_ciphertext=COALESCE(%s,mot_de_passe_ciphertext),
+                updated_at=CURRENT_TIMESTAMP WHERE id=%s RETURNING id""",
+                           (*values, password_ciphertext, int(equipment_id)))
             row = cursor.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Équipement introuvable.")
             saved_id = row["id"]
         else:
             cursor.execute("""INSERT INTO service_tech_equipment
-                (code, designation, categorie, marque_modele, numero_serie, localisation, fournisseur,
-                 date_acquisition, statut, derniere_maintenance, prochaine_maintenance, notes, created_by)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""", (*values, user["id"]))
+                (code, designation, categorie, marque_modele, numero_serie, adresse_ip, utilisateur,
+                 mot_de_passe_ciphertext, aet, port, localisation, fournisseur, date_acquisition,
+                 statut, derniere_maintenance, prochaine_maintenance, notes, created_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                           (*values[:7], password_ciphertext or "", *values[7:], user["id"]))
             saved_id = cursor.fetchone()["id"]
     track_action(request, "SERVICE_TECH_EQUIPMENT_SAVE", f"Équipement {designation} enregistré")
     return {"success": True, "id": saved_id}
@@ -207,7 +240,7 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
  window.techRenderEquipment=()=>{const search=($('techEquipmentSearch')?.value||'').trim().toLowerCase();const rows=state.equipment.filter(x=>[x.code,x.designation,x.categorie,x.localisation,x.numero_serie].join(' ').toLowerCase().includes(search));$('techEquipmentRows').innerHTML=rows.length?rows.map(x=>`<tr class="border-b border-slate-100 text-slate-700 transition hover:bg-lime-50/50 dark:border-white/5 dark:text-slate-200 dark:hover:bg-white/5"><td class="px-3 py-3"><div class="font-bold">${esc(x.designation)}</div><div class="text-xs text-slate-500">${esc(x.code||x.numero_serie||'Sans référence')} · ${esc(x.marque_modele||'')}</div></td><td class="px-3 py-3">${esc(x.categorie||'—')}</td><td class="px-3 py-3">${esc(x.localisation||'—')}</td><td class="px-3 py-3"><span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700 dark:bg-white/10 dark:text-slate-200">${esc(x.statut)}</span></td><td class="px-3 py-3">${esc(x.prochaine_maintenance||'—')}</td><td class="px-3 py-3 text-right">${canManage?`<button onclick="techOpenEquipment(${x.id})" class="rounded-lg p-2 text-sky-700 hover:bg-sky-50 dark:text-sky-300 dark:hover:bg-white/5" title="Modifier"><i class="ph-bold ph-pencil-simple"></i></button><button onclick="techDelete('equipment',${x.id})" class="rounded-lg p-2 text-rose-700 hover:bg-rose-50 dark:text-rose-300 dark:hover:bg-white/5" title="Supprimer"><i class="ph-bold ph-trash"></i></button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="6" class="p-8 text-center text-slate-400">Aucun équipement trouvé.</td></tr>'};
  window.techRenderTickets=()=>{const filter=$('techTicketFilter')?.value||'';const rows=state.tickets.filter(x=>!filter||x.statut===filter);$('techTicketRows').innerHTML=rows.length?rows.map(x=>`<tr class="border-b border-slate-100 text-slate-700 transition hover:bg-lime-50/50 dark:border-white/5 dark:text-slate-200 dark:hover:bg-white/5"><td class="px-3 py-3"><div class="font-bold">${esc(x.titre)}</div><div class="text-xs text-slate-500">${esc(x.type)} · ${esc(x.demandeur||'Demandeur non renseigné')}</div></td><td class="px-3 py-3">${esc(x.equipment_name||'—')}</td><td class="px-3 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-bold ${x.priorite==='Urgente'?'bg-rose-100 text-rose-800 dark:bg-rose-400/10 dark:text-rose-300':x.priorite==='Haute'?'bg-amber-100 text-amber-800 dark:bg-amber-400/10 dark:text-amber-300':'bg-slate-100 text-slate-700 dark:bg-white/10 dark:text-slate-300'}">${esc(x.priorite)}</span></td><td class="px-3 py-3">${esc(x.responsable||'—')}</td><td class="px-3 py-3">${esc(x.date_echeance||'—')}</td><td class="px-3 py-3"><span class="rounded-full bg-sky-50 px-2.5 py-1 text-xs font-bold text-sky-800 dark:bg-sky-400/10 dark:text-sky-300">${esc(x.statut)}</span></td><td class="px-3 py-3 text-right">${canManage?`<button onclick="techOpenTicket(${x.id})" class="rounded-lg p-2 text-sky-700 hover:bg-sky-50 dark:text-sky-300 dark:hover:bg-white/5" title="Modifier"><i class="ph-bold ph-pencil-simple"></i></button><button onclick="techDelete('ticket',${x.id})" class="rounded-lg p-2 text-rose-700 hover:bg-rose-50 dark:text-rose-300 dark:hover:bg-white/5" title="Supprimer"><i class="ph-bold ph-trash"></i></button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="7" class="p-8 text-center text-slate-400">Aucune intervention pour ce filtre.</td></tr>'};
  const field=(name,label,type='text',value='',extra='')=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<input name="${name}" type="${type}" value="${esc(value)}" ${extra} class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium text-slate-800 outline-none focus:border-brand-neon focus:bg-white dark:border-white/10 dark:bg-black/30 dark:text-white"></label>`;const select=(name,label,items,value)=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<select name="${name}" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium text-slate-800 outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white">${items.map(x=>`<option ${x===value?'selected':''}>${esc(x)}</option>`).join('')}</select></label>`;
- window.techOpenEquipment=(id)=>{if(!canManage)return;const x=state.equipment.find(row=>row.id===id)||{};$('techEntityType').value='equipment';$('techEntityId').value=x.id||'';$('techModalEyebrow').textContent='Parc technique';$('techModalTitle').textContent=x.id?'Modifier un équipement':'Ajouter un équipement';$('techFormFields').innerHTML=field('designation','Désignation *','text',x.designation||'','required')+field('code','Code inventaire','text',x.code||'')+field('categorie','Catégorie','text',x.categorie||'')+field('marque_modele','Marque / modèle','text',x.marque_modele||'')+field('numero_serie','Numéro de série','text',x.numero_serie||'')+field('localisation','Localisation / service','text',x.localisation||'')+field('fournisseur','Fournisseur','text',x.fournisseur||'')+field('date_acquisition','Date d’acquisition','date',x.date_acquisition||'')+select('statut','État',['En service','En maintenance','Hors service','Réformé'],x.statut||'En service')+field('derniere_maintenance','Dernière maintenance','date',x.derniere_maintenance||'')+field('prochaine_maintenance','Prochaine maintenance','date',x.prochaine_maintenance||'')+`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300 sm:col-span-2">Notes<textarea name="notes" rows="2" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white">${esc(x.notes||'')}</textarea></label>`;techShowModal()};
+ window.techOpenEquipment=(id)=>{if(!canManage)return;const x=state.equipment.find(row=>row.id===id)||{};$('techEntityType').value='equipment';$('techEntityId').value=x.id||'';$('techModalEyebrow').textContent='Parc technique';$('techModalTitle').textContent=x.id?'Modifier un équipement':'Ajouter un équipement';const passwordHint=x.password_configured?'Mot de passe enregistré · laisser vide pour le conserver':'Mot de passe de connexion';$('techFormFields').innerHTML=field('designation','Désignation *','text',x.designation||'','required')+field('code','Code inventaire','text',x.code||'')+field('categorie','Catégorie','text',x.categorie||'')+field('marque_modele','Marque / modèle','text',x.marque_modele||'')+field('numero_serie','Numéro de série','text',x.numero_serie||'')+field('adresse_ip','Adresse IP','text',x.adresse_ip||'','placeholder="192.168.1.10"')+field('utilisateur','Utilisateur','text',x.utilisateur||'')+field('mot_de_passe','Mot de passe','password','',`autocomplete="new-password" placeholder="${passwordHint}"`)+field('aet','AET','text',x.aet||'','placeholder="AE Title"')+field('port','Port','number',x.port||'','min="1" max="65535"')+field('localisation','Localisation / service','text',x.localisation||'')+field('fournisseur','Fournisseur','text',x.fournisseur||'')+field('date_acquisition','Date d’acquisition','date',x.date_acquisition||'')+select('statut','État',['En service','En maintenance','Hors service','Réformé'],x.statut||'En service')+field('derniere_maintenance','Dernière maintenance','date',x.derniere_maintenance||'')+field('prochaine_maintenance','Prochaine maintenance','date',x.prochaine_maintenance||'')+`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300 sm:col-span-2">Notes<textarea name="notes" rows="2" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white">${esc(x.notes||'')}</textarea></label>`;techShowModal()};
  window.techOpenTicket=(id)=>{if(!canManage)return;const x=state.tickets.find(row=>row.id===id)||{};const equipmentOptions=['<option value="">Aucun équipement associé</option>',...state.equipment.map(e=>`<option value="${e.id}" ${Number(x.equipment_id)===Number(e.id)?'selected':''}>${esc(e.designation)}</option>`)].join('');$('techEntityType').value='ticket';$('techEntityId').value=x.id||'';$('techModalEyebrow').textContent='Incidents et maintenance';$('techModalTitle').textContent=x.id?'Modifier une demande':'Nouvelle intervention';$('techFormFields').innerHTML=select('type','Type de demande',['Incident','Maintenance préventive','Maintenance corrective','Demande'],x.type||'Incident')+select('priorite','Priorité',['Basse','Normale','Haute','Urgente'],x.priorite||'Normale')+field('titre','Titre *','text',x.titre||'','required')+`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">Équipement<select name="equipment_id" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-white/10 dark:bg-black/30 dark:text-white">${equipmentOptions}</select></label>`+field('demandeur','Demandeur','text',x.demandeur||'')+field('responsable','Responsable / technicien','text',x.responsable||'')+field('date_echeance','Date prévue','date',x.date_echeance||'')+select('statut','Statut',['Nouveau','Planifié','En cours','En attente','Terminé','Annulé'],x.statut||'Nouveau')+`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300 sm:col-span-2">Description<textarea name="description" rows="3" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white">${esc(x.description||'')}</textarea></label>`;techShowModal()};
  function techShowModal(){$('techModal').classList.remove('hidden');$('techModal').classList.add('flex');document.body.style.overflow='hidden'}window.techCloseModal=()=>{$('techModal').classList.add('hidden');$('techModal').classList.remove('flex');document.body.style.overflow=''};
  window.techSave=async event=>{event.preventDefault();const form=event.currentTarget,type=$('techEntityType').value,id=$('techEntityId').value,payload=Object.fromEntries(new FormData(form).entries());if(id)payload.id=Number(id);try{await api(type==='equipment'?'/equipment/save':'/tickets/save',{method:'POST',body:JSON.stringify(payload)});techCloseModal();notify(type==='equipment'?'Équipement enregistré.':'Intervention enregistrée.');await techRefresh()}catch(e){notify(e.message,true)}};

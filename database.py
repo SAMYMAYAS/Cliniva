@@ -613,6 +613,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         categorie TEXT NOT NULL DEFAULT '',
         marque_modele TEXT NOT NULL DEFAULT '',
         numero_serie TEXT NOT NULL DEFAULT '',
+        adresse_ip TEXT NOT NULL DEFAULT '',
+        utilisateur TEXT NOT NULL DEFAULT '',
+        mot_de_passe_ciphertext TEXT NOT NULL DEFAULT '',
+        aet TEXT NOT NULL DEFAULT '',
+        port INT,
         localisation TEXT NOT NULL DEFAULT '',
         fournisseur TEXT NOT NULL DEFAULT '',
         date_acquisition DATE,
@@ -624,6 +629,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE service_tech_equipment ADD COLUMN IF NOT EXISTS adresse_ip TEXT NOT NULL DEFAULT '';
+    ALTER TABLE service_tech_equipment ADD COLUMN IF NOT EXISTS utilisateur TEXT NOT NULL DEFAULT '';
+    ALTER TABLE service_tech_equipment ADD COLUMN IF NOT EXISTS mot_de_passe_ciphertext TEXT NOT NULL DEFAULT '';
+    ALTER TABLE service_tech_equipment ADD COLUMN IF NOT EXISTS aet TEXT NOT NULL DEFAULT '';
+    ALTER TABLE service_tech_equipment ADD COLUMN IF NOT EXISTS port INT;
     CREATE INDEX IF NOT EXISTS idx_service_tech_equipment_status
         ON service_tech_equipment (statut, prochaine_maintenance);
     CREATE TABLE IF NOT EXISTS service_tech_tickets (
