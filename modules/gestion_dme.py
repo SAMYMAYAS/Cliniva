@@ -4255,7 +4255,7 @@ def _render_html() -> str:
                             <div id="livretCoverExam" data-cover-field="exam" onpointerdown="livretCoverPointerDown(event, 'exam')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Type Examen : —</div>
                         </div>
                         <div id="livretPageGardePlaceholder" class="min-h-56 w-full rounded-2xl border border-slate-200 bg-slate-100 p-5 flex items-center justify-center text-center text-[10px] text-slate-400 dark:border-white/10 dark:bg-black/30">Aperçu de la page sélectionnée</div>
-                        <div class="w-full rounded-xl border border-slate-200 p-3 dark:border-white/10">
+                        <div id="livretCoverEditorControls" class="w-full rounded-xl border border-slate-200 p-3 dark:border-white/10">
                             <label class="flex items-center justify-between gap-3 text-[10px] font-bold text-slate-600 dark:text-slate-300"><span>Taille de police <span id="livretCoverFontSizeLabel" class="text-emerald-700 dark:text-emerald-300">12,5 pt</span></span><input id="livretCoverFontSize" type="range" min="8" max="24" step="0.5" value="12.5" oninput="updateLivretCoverStyle()" class="w-28 accent-emerald-600"></label>
                             <label class="mt-3 inline-flex cursor-pointer items-center gap-2 text-[10px] font-bold text-slate-600 dark:text-slate-300"><input id="livretCoverBold" type="checkbox" checked onchange="updateLivretCoverStyle()" class="h-4 w-4 accent-emerald-600"><span>Mettre les informations en gras</span></label>
                             <div class="mt-3 flex flex-wrap gap-2"><button type="button" onclick="resetLivretCoverPositions()" class="rounded-lg border border-slate-200 px-3 py-2 text-[10px] font-bold text-slate-600 hover:bg-slate-50 dark:border-white/10 dark:text-slate-300"><i class="ph-bold ph-arrow-counter-clockwise mr-1"></i>Réinitialiser</button><button id="livretCoverSaveLayout" type="button" onclick="saveLivretCoverLayout()" class="rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-extrabold text-white hover:bg-emerald-800"><i class="ph-bold ph-floppy-disk mr-1"></i>Enregistrer la disposition</button></div>
@@ -4306,8 +4306,9 @@ def _render_html() -> str:
     </div>
 
     <div id="livretCoverEditorModal" class="fixed inset-0 z-[2147483647] hidden flex-col bg-slate-950/95 p-3 sm:p-5" style="z-index:2147483647" role="dialog" aria-modal="true" aria-labelledby="livretCoverEditorTitle">
-        <div class="flex shrink-0 items-center justify-between gap-3 rounded-2xl border border-white/10 bg-[#111b15] px-4 py-3 text-white shadow-xl"><div class="min-w-0"><h3 id="livretCoverEditorTitle" class="truncate text-sm font-extrabold"><i class="ph-bold ph-frame-corners mr-2 text-emerald-300"></i>Disposition de la page de garde</h3><p class="mt-1 text-[10px] text-slate-300">Déplace les textes, règle la taille et le gras, puis enregistre.</p></div><button type="button" onclick="closeLivretCoverEditor()" class="shrink-0 rounded-xl border border-white/15 px-3 py-2 text-xs font-bold text-white hover:bg-white/10"><i class="ph-bold ph-arrows-in mr-1"></i>Réduire</button></div>
-        <div id="livretCoverEditorHost" class="flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 sm:p-4"></div>
+        <div class="flex shrink-0 items-center justify-between gap-3 rounded-2xl border border-white/10 bg-[#111b15] px-4 py-3 text-white shadow-xl"><div class="min-w-0"><h3 id="livretCoverEditorTitle" class="truncate text-sm font-extrabold"><i class="ph-bold ph-frame-corners mr-2 text-emerald-300"></i>Disposition de la page de garde</h3><p class="mt-1 text-[10px] text-slate-300">La page reste centrée et proportionnelle. Déplace les textes, règle le style et enregistre.</p></div><button type="button" onclick="closeLivretCoverEditor()" class="shrink-0 rounded-xl border border-white/15 px-3 py-2 text-xs font-bold text-white hover:bg-white/10"><i class="ph-bold ph-arrows-in mr-1"></i>Réduire</button></div>
+        <div id="livretCoverEditorToolbar" class="flex max-h-[24vh] shrink-0 items-center justify-center overflow-y-auto py-2"></div>
+        <div id="livretCoverEditorHost" class="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-2 sm:p-4"></div>
     </div>
 
     <!-- MODALE INTERNE VISIONNEUR ORDONNANCE -->
@@ -4789,8 +4790,10 @@ def _render_html() -> str:
             };
             let livretCoverLayouts = Object.create(null);
             let activeLivretCoverDrag = null;
-            let livretCoverEditorOriginalParent = null;
-            let livretCoverEditorOriginalNextSibling = null;
+            let livretCoverCanvasOriginalParent = null;
+            let livretCoverCanvasOriginalNextSibling = null;
+            let livretCoverControlsOriginalParent = null;
+            let livretCoverControlsOriginalNextSibling = null;
 
             function getLivretCoverLayout() {
                 const filename = document.getElementById('livretPageGardeSelect')?.value || '';
@@ -4886,32 +4889,48 @@ def _render_html() -> str:
             window.openLivretCoverEditor = function() {
                 const modal = portalDmeModal('livretCoverEditorModal');
                 const panel = document.getElementById('livretCoverEditorPanel');
+                const expandButton = panel?.querySelector('button[onclick="openLivretCoverEditor()"]');
                 const canvas = document.getElementById('livretCoverCanvas');
                 const host = document.getElementById('livretCoverEditorHost');
-                if (!modal || !panel || !canvas || canvas.classList.contains('hidden')) return;
-                livretCoverEditorOriginalParent = panel.parentElement;
-                livretCoverEditorOriginalNextSibling = panel.nextSibling;
-                host.appendChild(panel);
-                panel.classList.add('w-full', 'h-full', 'md:flex-row', 'md:justify-center', 'md:items-center');
-                const maxHeight = Math.min(window.innerHeight * 0.78, 1100);
-                const maxWidth = Math.max(200, window.innerWidth - 390);
-                const editorHeight = Math.min(maxHeight, maxWidth * 297 / 210);
-                canvas.style.width = `${editorHeight * 210 / 297}px`;
-                canvas.style.height = `${editorHeight}px`;
+                const controls = document.getElementById('livretCoverEditorControls');
+                const toolbar = document.getElementById('livretCoverEditorToolbar');
+                if (!modal || !panel || !canvas || !controls || !host || canvas.classList.contains('hidden')) return;
+                livretCoverCanvasOriginalParent = canvas.parentElement;
+                livretCoverCanvasOriginalNextSibling = canvas.nextSibling;
+                livretCoverControlsOriginalParent = controls.parentElement;
+                livretCoverControlsOriginalNextSibling = controls.nextSibling;
+                host.appendChild(canvas);
+                toolbar.appendChild(controls);
+                panel.style.display = 'none';
+                expandButton?.classList.add('hidden');
+                controls.style.width = 'min(100%, 900px)';
                 modal.classList.remove('hidden');
                 modal.classList.add('flex');
                 document.body.style.overflow = 'hidden';
+                const maxHeight = Math.max(100, Math.min(host.clientHeight - 16, 1100));
+                const maxWidth = Math.max(100, host.clientWidth - 16);
+                const editorHeight = Math.min(maxHeight, maxWidth * 297 / 210);
+                canvas.style.width = `${editorHeight * 210 / 297}px`;
+                canvas.style.height = `${editorHeight}px`;
             };
 
             window.closeLivretCoverEditor = function() {
                 const modal = document.getElementById('livretCoverEditorModal');
                 const panel = document.getElementById('livretCoverEditorPanel');
+                const expandButton = panel?.querySelector('button[onclick="openLivretCoverEditor()"]');
                 const canvas = document.getElementById('livretCoverCanvas');
-                if (livretCoverEditorOriginalParent && panel) {
-                    if (livretCoverEditorOriginalNextSibling?.parentNode === livretCoverEditorOriginalParent) livretCoverEditorOriginalParent.insertBefore(panel, livretCoverEditorOriginalNextSibling);
-                    else livretCoverEditorOriginalParent.appendChild(panel);
+                const controls = document.getElementById('livretCoverEditorControls');
+                if (livretCoverCanvasOriginalParent && canvas) {
+                    if (livretCoverCanvasOriginalNextSibling?.parentNode === livretCoverCanvasOriginalParent) livretCoverCanvasOriginalParent.insertBefore(canvas, livretCoverCanvasOriginalNextSibling);
+                    else livretCoverCanvasOriginalParent.appendChild(canvas);
                 }
-                panel?.classList.remove('w-full', 'h-full', 'md:flex-row', 'md:justify-center', 'md:items-center');
+                if (livretCoverControlsOriginalParent && controls) {
+                    if (livretCoverControlsOriginalNextSibling?.parentNode === livretCoverControlsOriginalParent) livretCoverControlsOriginalParent.insertBefore(controls, livretCoverControlsOriginalNextSibling);
+                    else livretCoverControlsOriginalParent.appendChild(controls);
+                }
+                if (controls) controls.style.width = '';
+                if (panel) panel.style.display = '';
+                expandButton?.classList.remove('hidden');
                 if (canvas) {
                     canvas.style.width = '3.54cm';
                     canvas.style.height = '5cm';
@@ -4919,8 +4938,10 @@ def _render_html() -> str:
                 modal?.classList.add('hidden');
                 modal?.classList.remove('flex');
                 if (document.getElementById('livretCreationModal')?.classList.contains('hidden')) document.body.style.overflow = '';
-                livretCoverEditorOriginalParent = null;
-                livretCoverEditorOriginalNextSibling = null;
+                livretCoverCanvasOriginalParent = null;
+                livretCoverCanvasOriginalNextSibling = null;
+                livretCoverControlsOriginalParent = null;
+                livretCoverControlsOriginalNextSibling = null;
             };
 
             window.updateLivretCoverText = function() {
