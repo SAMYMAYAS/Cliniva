@@ -529,6 +529,7 @@ def generate_livret_pdf_file(
     cover_page_path: Optional[str] = None,
     images_title: str = "IMAGES ÉCHOGRAPHIQUES",
     image_layout: str = "echographique",
+    cover_positions: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Assemble le livret A4 en insérant le compte rendu original exact via pypdf."""
     import tempfile
@@ -571,11 +572,24 @@ def generate_livret_pdf_file(
     c_cover.setFillColor(colors.HexColor("#0c1a10"))
     c_cover.setFont("Helvetica-Bold", 12.5)
 
-    # Coordonnées calées dans le rectangle noir du modèle 1.png
-    rect_x = 65
-    c_cover.drawString(rect_x, 165, f"Patient : {patient_info.get('nom_prenom', '')}")
-    c_cover.drawString(rect_x, 135, f"Date : {patient_info.get('date_examen', '')}")
-    c_cover.drawString(rect_x, 105, f"Type Examen : {patient_info.get('type_examen', '')}")
+    default_cover_positions = {
+        "patient": {"x": 11.0, "y": 80.4},
+        "date": {"x": 11.0, "y": 83.9},
+        "exam": {"x": 11.0, "y": 87.5},
+    }
+    positions = cover_positions if isinstance(cover_positions, dict) else {}
+    cover_fields = (
+        ("patient", f"Patient : {patient_info.get('nom_prenom', '')}"),
+        ("date", f"Date : {patient_info.get('date_examen', '')}"),
+        ("exam", f"Type Examen : {patient_info.get('type_examen', '')}"),
+    )
+    for field, text in cover_fields:
+        position = positions.get(field) if isinstance(positions.get(field), dict) else {}
+        x_percent = min(100.0, max(0.0, float(position.get("x", default_cover_positions[field]["x"]))))
+        y_percent = min(100.0, max(0.0, float(position.get("y", default_cover_positions[field]["y"]))))
+        x = width * x_percent / 100.0
+        y = height * (1.0 - y_percent / 100.0) - 12.5
+        c_cover.drawString(x, y, text)
     c_cover.showPage()
 
     # PAGE 2 : 2.png
@@ -931,7 +945,23 @@ async def api_create_livret(payload: Dict[str, Any], request: Request):
         "type_examen": type_examen,
     }
 
-    success = generate_livret_pdf_file(output_pdf, patient_info, cr, echo_images, str(cover_path), "IMAGES DU GROUPE", "echographique")
+    raw_cover_positions = payload.get("cover_positions")
+    cover_positions: dict[str, dict[str, float]] = {}
+    if isinstance(raw_cover_positions, dict):
+        for field in ("patient", "date", "exam"):
+            value = raw_cover_positions.get(field)
+            if not isinstance(value, dict):
+                continue
+            try:
+                x = float(value.get("x"))
+                y = float(value.get("y"))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="La position d’une information de couverture est invalide.")
+            if not (0 <= x <= 100 and 0 <= y <= 100):
+                raise HTTPException(status_code=400, detail="Les informations doivent rester dans les limites de la page de garde.")
+            cover_positions[field] = {"x": x, "y": y}
+
+    success = generate_livret_pdf_file(output_pdf, patient_info, cr, echo_images, str(cover_path), "IMAGES DU GROUPE", "echographique", cover_positions)
     if not success:
         raise HTTPException(status_code=500, detail="Échec lors de l'assemblage du livret PDF.")
 
@@ -4116,23 +4146,23 @@ def _render_html() -> str:
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div class="sm:col-span-2">
                         <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">Nom & Prénom du Patient *</label>
-                        <input type="text" id="livretNomPrenom" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-bold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
+                        <input type="text" id="livretNomPrenom" oninput="updateLivretCoverText()" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-bold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
                     </div>
                     <div>
                         <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">Date d'Examen *</label>
-                        <input type="text" id="livretDateExamen" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-semibold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
+                        <input type="text" id="livretDateExamen" oninput="updateLivretCoverText()" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-semibold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
                     </div>
                 </div>
 
                 <!-- 2. Type d'examen -->
                 <div>
                     <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">Prestation de la consultation courante *</label>
-                    <input type="text" id="livretTypeExamen" list="livretTypeOptions" required autocomplete="off" oninput="syncLivretPrestationSelection()" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-bold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
+                    <input type="text" id="livretTypeExamen" list="livretTypeOptions" required autocomplete="off" oninput="syncLivretPrestationSelection(); updateLivretCoverText()" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-bold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
                     <datalist id="livretTypeOptions"></datalist>
                     <input type="hidden" id="livretPrestationId">
                 </div>
 
-                <div class="grid grid-cols-1 sm:grid-cols-[1fr_150px] gap-3 items-start pt-2 border-t border-slate-100 dark:border-white/5">
+                <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(240px,300px)] gap-4 items-start pt-2 border-t border-slate-100 dark:border-white/5">
                     <div>
                         <label for="livretPageGardeSelect" class="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">Page de garde *</label>
                         <select id="livretPageGardeSelect" required onchange="previewLivretPageGarde(); saveLivretDefaultCoverPreference()" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-semibold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
@@ -4143,11 +4173,19 @@ def _render_html() -> str:
                             <span>Utiliser cette page de garde par défaut pour mon compte</span>
                         </label>
                         <p id="livretPageGardeHint" class="mt-1 text-[10px] text-slate-400">Choisissez une page enregistrée dans model_templates/Page_De_Garde.</p>
+                        <div class="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900/50 dark:bg-emerald-950/20">
+                            <p class="text-xs font-extrabold text-emerald-900 dark:text-emerald-200"><i class="ph-bold ph-arrows-out-cardinal mr-1"></i>Positionner les informations</p>
+                            <p class="mt-1 text-[10px] leading-relaxed text-emerald-800 dark:text-emerald-300">Fais glisser le nom du patient, la date et l’examen sur l’aperçu. Chaque page de garde conserve sa disposition pendant cette création.</p>
+                            <button type="button" onclick="resetLivretCoverPositions()" class="mt-2 rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-black/20 dark:text-emerald-200"><i class="ph-bold ph-arrow-counter-clockwise mr-1"></i>Réinitialiser les positions</button>
+                        </div>
                     </div>
-                    <div class="h-56 sm:h-64 rounded-2xl overflow-hidden border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-black/30 flex items-center justify-center shadow-inner">
-                        <img id="livretPageGardePreview" class="hidden w-full h-full object-contain" alt="Aperçu de la page de garde">
-                        <span id="livretPageGardePlaceholder" class="px-3 text-center text-[10px] text-slate-400">Aperçu de la page sélectionnée</span>
+                    <div id="livretCoverCanvas" class="relative mx-auto hidden w-full max-w-[300px] overflow-hidden rounded-xl border border-slate-300 bg-white shadow-lg dark:border-white/10" style="aspect-ratio:210 / 297;">
+                        <img id="livretPageGardePreview" class="absolute inset-0 h-full w-full object-fill" alt="Aperçu de la page de garde">
+                        <div id="livretCoverPatient" data-cover-field="patient" onpointerdown="livretCoverPointerDown(event, 'patient')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Patient : —</div>
+                        <div id="livretCoverDate" data-cover-field="date" onpointerdown="livretCoverPointerDown(event, 'date')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Date : —</div>
+                        <div id="livretCoverExam" data-cover-field="exam" onpointerdown="livretCoverPointerDown(event, 'exam')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Type Examen : —</div>
                     </div>
+                    <div id="livretPageGardePlaceholder" class="min-h-56 rounded-2xl border border-slate-200 bg-slate-100 p-5 flex items-center justify-center text-center text-[10px] text-slate-400 dark:border-white/10 dark:bg-black/30">Aperçu de la page sélectionnée</div>
                 </div>
 
               <!-- 3. Sélection des images du groupe cible -->
@@ -4663,6 +4701,85 @@ def _render_html() -> str:
                     bar.appendChild(btn);
                 });
             }
+            const livretCoverDefaultPositions = {
+                patient: { x: 11.0, y: 80.4 },
+                date: { x: 11.0, y: 83.9 },
+                exam: { x: 11.0, y: 87.5 }
+            };
+            let livretCoverLayouts = Object.create(null);
+            let activeLivretCoverDrag = null;
+
+            function getLivretCoverLayout() {
+                const filename = document.getElementById('livretPageGardeSelect')?.value || '';
+                if (!livretCoverLayouts[filename]) {
+                    livretCoverLayouts[filename] = JSON.parse(JSON.stringify(livretCoverDefaultPositions));
+                }
+                return livretCoverLayouts[filename];
+            }
+
+            function renderLivretCoverPositions() {
+                const layout = getLivretCoverLayout();
+                for (const field of ['patient', 'date', 'exam']) {
+                    const element = document.querySelector(`[data-cover-field="${field}"]`);
+                    if (!element) continue;
+                    element.style.left = `${layout[field].x}%`;
+                    element.style.top = `${layout[field].y}%`;
+                }
+            }
+
+            window.getLivretCoverPositions = function() {
+                return JSON.parse(JSON.stringify(getLivretCoverLayout()));
+            };
+
+            window.updateLivretCoverText = function() {
+                const values = {
+                    patient: `Patient : ${document.getElementById('livretNomPrenom')?.value || '—'}`,
+                    date: `Date : ${document.getElementById('livretDateExamen')?.value || '—'}`,
+                    exam: `Type Examen : ${document.getElementById('livretTypeExamen')?.value || '—'}`
+                };
+                for (const [field, text] of Object.entries(values)) {
+                    const element = document.querySelector(`[data-cover-field="${field}"]`);
+                    if (element) element.textContent = text;
+                }
+            };
+
+            window.livretCoverPointerDown = function(event, field) {
+                event.preventDefault();
+                const labelRect = event.currentTarget.getBoundingClientRect();
+                activeLivretCoverDrag = {
+                    field,
+                    offsetX: event.clientX - labelRect.left,
+                    offsetY: event.clientY - labelRect.top
+                };
+                event.currentTarget.setPointerCapture?.(event.pointerId);
+            };
+
+            window.addEventListener('pointermove', event => {
+                if (!activeLivretCoverDrag) return;
+                const canvas = document.getElementById('livretCoverCanvas');
+                const rect = canvas?.getBoundingClientRect();
+                if (!rect || !rect.width || !rect.height) return;
+                const label = document.querySelector(`[data-cover-field="${activeLivretCoverDrag.field}"]`);
+                const labelRect = label?.getBoundingClientRect();
+                if (!labelRect) return;
+                const layout = getLivretCoverLayout();
+                layout[activeLivretCoverDrag.field] = {
+                    x: Math.max(0, Math.min(100 * (rect.width - labelRect.width) / rect.width,
+                        ((event.clientX - rect.left - activeLivretCoverDrag.offsetX) / rect.width) * 100)),
+                    y: Math.max(0, Math.min(100 * (rect.height - labelRect.height) / rect.height,
+                        ((event.clientY - rect.top - activeLivretCoverDrag.offsetY) / rect.height) * 100))
+                };
+                renderLivretCoverPositions();
+            });
+            window.addEventListener('pointerup', () => { activeLivretCoverDrag = null; });
+            window.addEventListener('pointercancel', () => { activeLivretCoverDrag = null; });
+
+            window.resetLivretCoverPositions = function() {
+                const filename = document.getElementById('livretPageGardeSelect')?.value || '';
+                livretCoverLayouts[filename] = JSON.parse(JSON.stringify(livretCoverDefaultPositions));
+                renderLivretCoverPositions();
+            };
+
             window.loadLivretPageGardeOptions = async function() {
             const select = document.getElementById('livretPageGardeSelect');
             const hint = document.getElementById('livretPageGardeHint');
@@ -4717,16 +4834,19 @@ def _render_html() -> str:
             const select = document.getElementById('livretPageGardeSelect');
             const preview = document.getElementById('livretPageGardePreview');
             const placeholder = document.getElementById('livretPageGardePlaceholder');
-            if (!select || !preview) return;
+            const canvas = document.getElementById('livretCoverCanvas');
+            if (!select || !preview || !canvas) return;
             if (!select.value) {
-                preview.classList.add('hidden');
+                canvas.classList.add('hidden');
                 if (placeholder) placeholder.classList.remove('hidden');
                 preview.removeAttribute('src');
                 return;
             }
             preview.src = '/api/dme/livret/covers/' + encodeURIComponent(select.value);
-            preview.classList.remove('hidden');
+            canvas.classList.remove('hidden');
             if (placeholder) placeholder.classList.add('hidden');
+            renderLivretCoverPositions();
+            updateLivretCoverText();
         };
 
         window.saveLivretDefaultCoverPreference = async function() {
@@ -4760,6 +4880,8 @@ def _render_html() -> str:
             const pass = currentTab.data.passage || {};
             const cr = (currentTab.data.archived_crs || []).find(c => c.id === crId);
             const echos = currentTab.data.echographies || [];
+
+            livretCoverLayouts = Object.create(null);
 
             document.getElementById('livretCrId').value = crId;
             document.getElementById('livretNomPrenom').value = `${p.nom || ''} ${p.prenom || ''}`.trim().toUpperCase();
@@ -4904,6 +5026,7 @@ def _render_html() -> str:
                 prestation_id: parseInt(document.getElementById('livretPrestationId').value || '0'),
                 type_examen: document.getElementById('livretTypeExamen').value,
                 page_de_garde: document.getElementById('livretPageGardeSelect').value,
+                cover_positions: window.getLivretCoverPositions(),
                 groupe_id: document.getElementById('livretImageGroup').value,
                 selected_echo_ids: selectedEchoIds
             };
