@@ -4272,7 +4272,13 @@ def _render_html() -> str:
                     <input type="hidden" id="livretPrestationId">
                 </div>
 
-                <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(240px,300px)] gap-4 items-start pt-2 border-t border-slate-100 dark:border-white/5">
+                <details id="livretCoverSettingsAccordion" class="rounded-2xl border border-slate-200 bg-slate-50/70 p-3 dark:border-white/10 dark:bg-black/10">
+                    <summary class="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-2 py-2 text-xs font-extrabold text-slate-700 hover:bg-white dark:text-slate-200 dark:hover:bg-white/5">
+                        <span class="flex items-center gap-2"><i class="ph-bold ph-image text-base text-emerald-600 dark:text-emerald-300"></i>Page de garde et mise en page<span class="hidden sm:inline text-[10px] font-medium text-slate-400">· Couverture, position et police</span></span>
+                        <i class="ph-bold ph-caret-down text-slate-400 transition-transform"></i>
+                    </summary>
+                    <div class="border-t border-slate-200 pt-4 dark:border-white/10">
+                <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(240px,300px)] gap-4 items-start">
                     <div>
                         <label for="livretPageGardeSelect" class="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">Page de garde *</label>
                         <select id="livretPageGardeSelect" required onchange="previewLivretPageGarde(); loadLivretCoverLayout(); saveLivretDefaultCoverPreference()" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-semibold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
@@ -4311,6 +4317,8 @@ def _render_html() -> str:
                         </div>
                     </div>
                 </div>
+                    </div>
+                </details>
 
               <!-- 3. Sélection des images du groupe cible -->
                 <div class="space-y-2 pt-2 border-t border-slate-100 dark:border-white/5">
