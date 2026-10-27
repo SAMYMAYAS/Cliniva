@@ -6,15 +6,15 @@ Le dossier de backup contient :
 - database : l’export PostgreSQL restaurable ;
 - dicom : les répertoires PACS et DICOM Print configurés, s’ils étaient accessibles ;
 - RESTORE_CLINIVA.ps1 : copie les fichiers, restaure PostgreSQL et rétablit les chemins DICOM ;
-- requirements-installed.txt et ENVIRONMENT.json : versions Python et bibliothèques présentes lors du backup ;
+- requirements-installed.txt et ENVIRONMENT.json : versions Python, client PostgreSQL et bibliothèques du backup ;
 - MANIFEST.json : date, base et inventaire des fichiers/dossiers.
 
 RESTAURATION SUR UN NOUVEAU PC SERVEUR
 --------------------------------------
 1. Copiez le dossier Cliniva_FullBackup_... depuis le support de sauvegarde vers un disque local.
    Ne lancez pas Cliniva directement depuis le NAS.
-2. Installez Python pour Windows, PostgreSQL (avec les outils de ligne de commande), et
-   Microsoft Edge WebView2. La version Python de référence est indiquée dans ENVIRONMENT.json.
+2. Installez Python pour Windows, une version de PostgreSQL compatible avec le dump (avec les outils
+   de ligne de commande), et Microsoft Edge WebView2. Les versions sources sont dans ENVIRONMENT.json.
 3. Ouvrez PowerShell. Choisissez un dossier d’installation vide, par exemple C:\Clinical_Build_Codex.
 4. Lancez le script du backup (adaptez les chemins) :
 

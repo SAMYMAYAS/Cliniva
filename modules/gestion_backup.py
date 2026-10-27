@@ -364,6 +364,11 @@ def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str,
                         stage_total_bytes=stage_total_bytes, current_file=str(relative),
                     )
         shutil.copystat(source, destination)
+        if destination.stat().st_size != file_size:
+            raise OSError(
+                f"Taille incorrecte après copie de {relative} : "
+                f"{destination.stat().st_size} octets écrits, {file_size} attendus."
+            )
         file_count += 1
         copied_bytes += file_size
     return {"files": file_count, "directories": directory_count, "bytes": copied_bytes}
@@ -393,6 +398,14 @@ def _write_recovery_bundle(backup_root: Path) -> dict[str, Any]:
             package_lines.add(f"{name}=={version}")
     requirements_text = "\n".join(sorted(package_lines, key=str.casefold)) + "\n"
     (backup_root / "requirements-installed.txt").write_text(requirements_text, encoding="utf-8")
+    postgres_client_version = "indisponible"
+    pg_dump = _pg_dump_executable()
+    if pg_dump:
+        version_result = subprocess.run(
+            [pg_dump, "--version"], capture_output=True, text=True, timeout=10, check=False
+        )
+        if version_result.returncode == 0:
+            postgres_client_version = version_result.stdout.strip()
     (backup_root / "ENVIRONMENT.json").write_text(
         json.dumps({
             "python_version": platform.python_version(),
@@ -400,6 +413,7 @@ def _write_recovery_bundle(backup_root: Path) -> dict[str, Any]:
             "architecture": platform.machine(),
             "operating_system": platform.platform(),
             "python_executable_name": Path(sys.executable).name,
+            "postgres_client_version": postgres_client_version,
             "package_count": len(package_lines),
             "package_inventory": "requirements-installed.txt",
         }, ensure_ascii=False, indent=2),
@@ -408,6 +422,7 @@ def _write_recovery_bundle(backup_root: Path) -> dict[str, Any]:
     return {
         "python_version": platform.python_version(),
         "architecture": platform.machine(),
+        "postgres_client_version": postgres_client_version,
         "package_count": len(package_lines),
     }
 
