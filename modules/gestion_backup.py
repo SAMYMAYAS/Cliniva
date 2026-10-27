@@ -325,15 +325,15 @@ def _wait_if_paused() -> None:
 
 
 def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str, Any], total_bytes: int,
-               stage: str, stage_start_bytes: int, stage_total_bytes: int) -> dict[str, int]:
+               stage: str, stage_start_bytes: int, stage_total_bytes: int) -> dict[str, Any]:
     target.mkdir(parents=True, exist_ok=True)
-    directory_count = 0
+    copied_directories: set[Path] = set()
     for source_directory in _iter_directories(root):
         relative = source_directory.relative_to(root)
         (target / relative).mkdir(parents=True, exist_ok=True)
-        directory_count += 1
+        copied_directories.add(relative)
 
-    file_count = 0
+    copied_files: set[Path] = set()
     copied_bytes = 0
     for source in _iter_files(root, project_root=project_root):
         relative = source.relative_to(root)
@@ -369,9 +369,26 @@ def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str,
                 f"Taille incorrecte après copie de {relative} : "
                 f"{destination.stat().st_size} octets écrits, {file_size} attendus."
             )
-        file_count += 1
+        copied_files.add(relative)
         copied_bytes += file_size
-    return {"files": file_count, "directories": directory_count, "bytes": copied_bytes}
+        for parent in relative.parents:
+            if parent == Path("."):
+                break
+            copied_directories.add(parent)
+
+    # Catch empty folders created while files were being copied.
+    for source_directory in _iter_directories(root):
+        relative = source_directory.relative_to(root)
+        (target / relative).mkdir(parents=True, exist_ok=True)
+        copied_directories.add(relative)
+
+    return {
+        "files": len(copied_files),
+        "directories": len(copied_directories),
+        "bytes": copied_bytes,
+        "file_paths": copied_files,
+        "directory_paths": copied_directories,
+    }
 
 
 def _write_recovery_bundle(backup_root: Path) -> dict[str, Any]:
@@ -467,12 +484,19 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
             raise OSError("Le répertoire de destination n’est pas accessible.")
         planned_files: list[tuple[str, Path, bool]] = []
         planned_inventory: dict[str, dict[str, int]] = {}
+        planned_file_paths: dict[str, set[Path]] = {}
+        planned_directory_paths: dict[str, set[Path]] = {}
         for label, root, project in source_roots:
-            files = list(_iter_files(root, project_root=project))
+            files: list[Path] = []
+            directories: list[Path] = []
+            for path, is_directory in _iter_tree_entries(root):
+                (directories if is_directory else files).append(path)
             planned_files.extend((label, source, project) for source in files)
+            planned_file_paths[label] = {path.relative_to(root) for path in files}
+            planned_directory_paths[label] = {path.relative_to(root) for path in directories}
             planned_inventory[label] = {
                 "files": len(files),
-                "directories": sum(1 for _ in _iter_directories(root)),
+                "directories": len(directories),
                 "bytes": sum(path.stat().st_size for path in files),
             }
         total_bytes = sum(path.stat().st_size for _, path, _ in planned_files)
@@ -486,6 +510,7 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
 
         copied = {"copied_bytes": 0, "speed_bps": 0,
                   "speed_sample_at": time.monotonic(), "speed_sample_bytes": 0}
+        inventory_changes: dict[str, dict[str, int]] = {}
         for label, source, project in source_roots:
             target = partial_dir / ("application" if project else f"dicom/{label}")
             stage = "Fichiers Cliniva" if project else ("Données PACS" if label == "pacs_data" else "Images DICOM Print")
@@ -494,13 +519,24 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
                 source, target, project, copied, total_bytes, stage,
                 copied["copied_bytes"], expected["bytes"],
             )
-            if copy_result != expected:
+            missing_files = planned_file_paths[label] - copy_result["file_paths"]
+            missing_directories = planned_directory_paths[label] - copy_result["directory_paths"]
+            if missing_files or missing_directories:
+                missing_path = next(iter(missing_files or missing_directories))
                 raise RuntimeError(
                     f"Vérification de la copie échouée pour « {label} » : "
-                    f"{copy_result['files']} fichiers/{copy_result['directories']} dossiers copiés, "
-                    f"contre {expected['files']} fichiers/{expected['directories']} dossiers attendus. "
+                    f"l’élément présent dans l’inventaire initial n’a pas été copié : {missing_path}. "
                     "La sauvegarde est interrompue pour éviter un backup incomplet."
                 )
+            inventory_changes[label] = {
+                "files_added_during_copy": len(copy_result["file_paths"] - planned_file_paths[label]),
+                "directories_added_during_copy": len(copy_result["directory_paths"] - planned_directory_paths[label]),
+            }
+            planned_inventory[label] = {
+                "files": copy_result["files"],
+                "directories": copy_result["directories"],
+                "bytes": copy_result["bytes"],
+            }
             if project:
                 _sanitize_backup_database_password(target)
                 planned_inventory[label]["bytes"] = sum(
@@ -586,6 +622,7 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
                 "Inventaire des versions Python installées",
             ],
             "source_inventory": planned_inventory,
+            "inventory_changes_during_copy": inventory_changes,
             "external_data_roots": [{"label": label, "source": str(path)} for label, path in external_roots],
             "excluded_generated_directories": sorted(_EXCLUDED_DIRS),
             "restore_script": "RESTORE_CLINIVA.ps1",
