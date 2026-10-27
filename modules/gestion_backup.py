@@ -220,7 +220,16 @@ def _configured_external_roots() -> list[tuple[str, Path]]:
 
 
 def _iter_files(root: Path, project_root: bool = False):
-    for current, directories, filenames in os.walk(root, followlinks=False):
+    root = Path(root)
+    if not root.is_dir():
+        raise OSError(f"Le dossier source de sauvegarde est introuvable ou inaccessible : {root}")
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for current, directories, filenames in os.walk(
+        root, followlinks=False, onerror=raise_walk_error
+    ):
         current_path = Path(current)
         directories[:] = [name for name in directories
                           if name not in _EXCLUDED_DIRS
@@ -230,6 +239,27 @@ def _iter_files(root: Path, project_root: bool = False):
             if path.is_symlink():
                 continue
             yield path
+
+
+def _iter_directories(root: Path):
+    """Yield every included directory so empty folders are preserved in backups."""
+    root = Path(root)
+    if not root.is_dir():
+        raise OSError(f"Le dossier source de sauvegarde est introuvable ou inaccessible : {root}")
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for current, directories, _ in os.walk(
+        root, followlinks=False, onerror=raise_walk_error
+    ):
+        current_path = Path(current)
+        included = [name for name in directories
+                    if name not in _EXCLUDED_DIRS
+                    and not (current_path / name).is_symlink()]
+        directories[:] = included
+        for name in included:
+            yield current_path / name
 
 
 def _control_pg_dump_process(*, pause: bool) -> None:
@@ -274,8 +304,16 @@ def _wait_if_paused() -> None:
 
 
 def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str, Any], total_bytes: int,
-               stage: str, stage_start_bytes: int, stage_total_bytes: int) -> None:
+               stage: str, stage_start_bytes: int, stage_total_bytes: int) -> dict[str, int]:
     target.mkdir(parents=True, exist_ok=True)
+    directory_count = 0
+    for source_directory in _iter_directories(root):
+        relative = source_directory.relative_to(root)
+        (target / relative).mkdir(parents=True, exist_ok=True)
+        directory_count += 1
+
+    file_count = 0
+    copied_bytes = 0
     for source in _iter_files(root, project_root=project_root):
         relative = source.relative_to(root)
         destination = target / relative
@@ -305,6 +343,9 @@ def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str,
                         stage_total_bytes=stage_total_bytes, current_file=str(relative),
                     )
         shutil.copystat(source, destination)
+        file_count += 1
+        copied_bytes += file_size
+    return {"files": file_count, "directories": directory_count, "bytes": copied_bytes}
 
 
 def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) -> None:
@@ -322,8 +363,16 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
         destination.mkdir(parents=True, exist_ok=True)
         if not destination.is_dir():
             raise OSError("Le répertoire de destination n’est pas accessible.")
-        planned_files = [(label, source, project) for label, root, project in source_roots
-                         for source in _iter_files(root, project_root=project)]
+        planned_files: list[tuple[str, Path, bool]] = []
+        planned_inventory: dict[str, dict[str, int]] = {}
+        for label, root, project in source_roots:
+            files = list(_iter_files(root, project_root=project))
+            planned_files.extend((label, source, project) for source in files)
+            planned_inventory[label] = {
+                "files": len(files),
+                "directories": sum(1 for _ in _iter_directories(root)),
+                "bytes": sum(path.stat().st_size for path in files),
+            }
         total_bytes = sum(path.stat().st_size for _, path, _ in planned_files)
         if partial_dir.exists() or final_dir.exists():
             raise FileExistsError("Un dossier de sauvegarde portant ce nom existe déjà.")
@@ -338,8 +387,18 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
         for label, source, project in source_roots:
             target = partial_dir / ("application" if project else f"dicom/{label}")
             stage = "Fichiers Cliniva" if project else ("Données PACS" if label == "pacs_data" else "Images DICOM Print")
-            stage_total = sum(path.stat().st_size for path in _iter_files(source, project_root=project))
-            _copy_tree(source, target, project, copied, total_bytes, stage, copied["copied_bytes"], stage_total)
+            expected = planned_inventory[label]
+            copy_result = _copy_tree(
+                source, target, project, copied, total_bytes, stage,
+                copied["copied_bytes"], expected["bytes"],
+            )
+            if copy_result != expected:
+                raise RuntimeError(
+                    f"Vérification de la copie échouée pour « {label} » : "
+                    f"{copy_result['files']} fichiers/{copy_result['directories']} dossiers copiés, "
+                    f"contre {expected['files']} fichiers/{expected['directories']} dossiers attendus. "
+                    "La sauvegarde est interrompue pour éviter un backup incomplet."
+                )
 
         with _JOB_LOCK:
             _JOB.update(percent=72, stage="Base PostgreSQL", stage_bytes=0,
@@ -409,7 +468,8 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
             "database": {"engine": "PostgreSQL", "name": DB_CONFIG["database"],
                          "host": DB_CONFIG.get("host"), "port": DB_CONFIG.get("port"),
                          "dump": f"database/{dump_path.name}"},
-            "included": ["Fichiers de l’application et uploads", "Base PostgreSQL", "Données PACS/DICOM Print configurées"],
+            "included": ["Fichiers et dossiers de l’application, y compris les dossiers vides", "Base PostgreSQL", "Données PACS/DICOM Print configurées"],
+            "source_inventory": planned_inventory,
             "external_data_roots": [{"label": label, "source": str(path)} for label, path in external_roots],
             "excluded_generated_directories": sorted(_EXCLUDED_DIRS),
             "database_credentials_included": False,
