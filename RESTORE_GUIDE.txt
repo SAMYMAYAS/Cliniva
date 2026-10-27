@@ -5,6 +5,7 @@ Le dossier de backup contient :
 - application : le projet Cliniva et ses uploads ;
 - database : l’export PostgreSQL restaurable ;
 - dicom : les répertoires PACS et DICOM Print configurés, s’ils étaient accessibles ;
+- RESTAURER_CLINIVA.bat : lance l’assistant de restauration en un double-clic ;
 - RESTORE_CLINIVA.ps1 : copie les fichiers, restaure PostgreSQL et rétablit les chemins DICOM ;
 - requirements-installed.txt et ENVIRONMENT.json : versions Python, client PostgreSQL et bibliothèques du backup ;
 - MANIFEST.json : date, base et inventaire des fichiers/dossiers.
@@ -16,16 +17,10 @@ RESTAURATION SUR UN NOUVEAU PC SERVEUR
 2. Installez Python pour Windows, une version de PostgreSQL compatible avec le dump (avec les outils
    de ligne de commande), et Microsoft Edge WebView2. Les versions sources sont dans ENVIRONMENT.json.
 3. Ouvrez PowerShell. Choisissez un dossier d’installation vide, par exemple C:\Clinical_Build_Codex.
-4. Lancez le script du backup (adaptez les chemins) :
-
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-     "D:\Cliniva_FullBackup_20261027_020000\RESTORE_CLINIVA.ps1" `
-     -BackupPath "D:\Cliniva_FullBackup_20261027_020000" `
-     -InstallPath "C:\Clinical_Build_Codex" `
-     -DbHost "localhost" -DbPort 5432 -DbUser "postgres"
-
-   Le script demande le mot de passe PostgreSQL sans l’afficher. Si la base cible existe,
-   il demande une confirmation explicite avant de remplacer son contenu.
+4. Double-cliquez sur RESTAURER_CLINIVA.bat à la racine du backup et acceptez la demande UAC.
+   Il installe Cliniva dans C:\Clinical_Build_Codex. Le script demande le mot de passe PostgreSQL
+   sans l’afficher. Si la base cible existe, il demande une confirmation avant de la remplacer.
+   Pour choisir un autre chemin, lancez RESTORE_CLINIVA.ps1 avec les paramètres indiqués dans ce fichier.
 5. Dans PowerShell, installez les paquets Python enregistrés dans le backup :
 
    cd C:\Clinical_Build_Codex

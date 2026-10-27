@@ -378,13 +378,22 @@ def _write_recovery_bundle(backup_root: Path) -> dict[str, Any]:
     """Attach portable recovery instructions and the current Python package inventory."""
     guide = PROJECT_ROOT / "RESTORE_GUIDE.txt"
     restore_script = PROJECT_ROOT / "scripts" / "restore_cliniva_backup.ps1"
+    one_click_script = PROJECT_ROOT / "scripts" / "restore_cliniva_one_click.ps1"
     launcher = PROJECT_ROOT / "scripts" / "start_cliniva.ps1"
-    for required in (guide, restore_script, launcher):
+    for required in (guide, restore_script, one_click_script, launcher):
         if not required.is_file():
             raise FileNotFoundError(f"Fichier de restauration requis introuvable : {required}")
 
     shutil.copy2(guide, backup_root / "RESTORE_GUIDE.txt")
     shutil.copy2(restore_script, backup_root / "RESTORE_CLINIVA.ps1")
+    shutil.copy2(one_click_script, backup_root / "RESTORER_CLINIVA_1_CLIC.ps1")
+    (backup_root / "RESTAURER_CLINIVA.bat").write_text(
+        '@echo off\r\n'
+        'setlocal\r\n'
+        'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0RESTORER_CLINIVA_1_CLIC.ps1"\r\n'
+        'if errorlevel 1 pause\r\n',
+        encoding="utf-8",
+    )
     application_launcher = backup_root / "application" / "scripts" / "start_cliniva.ps1"
     if not application_launcher.parent.is_dir():
         application_launcher.parent.mkdir(parents=True, exist_ok=True)
@@ -573,12 +582,14 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
             "included": [
                 "Fichiers et dossiers de l’application, y compris les dossiers vides",
                 "Base PostgreSQL", "Données PACS/DICOM Print configurées",
-                "Script et guide de restauration", "Inventaire des versions Python installées",
+                "Lanceur en un clic, script et guide de restauration",
+                "Inventaire des versions Python installées",
             ],
             "source_inventory": planned_inventory,
             "external_data_roots": [{"label": label, "source": str(path)} for label, path in external_roots],
             "excluded_generated_directories": sorted(_EXCLUDED_DIRS),
             "restore_script": "RESTORE_CLINIVA.ps1",
+            "one_click_launcher": "RESTAURER_CLINIVA.bat",
             "restore_guide": "RESTORE_GUIDE.txt",
             "python_environment": environment,
             "database_password_in_config_json": False,
@@ -801,7 +812,7 @@ def render_html(user: dict[str, Any] | None = None) -> str:
     <label for="backupDestination" class="block text-xs font-bold text-slate-600">Chemin absolu de destination</label>
     <div class="mt-2 flex flex-col gap-3 sm:flex-row"><input id="backupDestination" type="text" spellcheck="false" placeholder="Ex. D:\Cliniva_Backups ou \\NAS\Cliniva_Backups" class="min-w-0 flex-1 rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-lime-200"><button id="backupSavePath" type="button" class="rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50"><i class="ph-bold ph-floppy-disk mr-1"></i>Enregistrer le chemin</button></div>
      <div class="mt-5 grid gap-3 md:grid-cols-3"><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-code text-xl text-emerald-700"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Fichiers Cliniva</p><p class="mt-1 text-xs text-slate-500">Code, modèles, configuration, documents et uploads.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-database text-xl text-indigo-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Base PostgreSQL</p><p class="mt-1 text-xs text-slate-500">Export complet restaurable avec pg_restore.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-images text-xl text-amber-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Images DICOM</p><p class="mt-1 text-xs text-slate-500">Stockage PACS et réceptions DICOM Print configurés.</p></div></div>
-     <div class="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs leading-relaxed text-emerald-900"><b>Restauration prête :</b> chaque nouveau backup inclut le guide et le script RESTORE_CLINIVA.ps1, les versions Python installées et les instructions pour remettre Cliniva en service sur un autre PC.</div>
+     <div class="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs leading-relaxed text-emerald-900"><b>Kit de restauration inclus :</b> chaque nouveau backup contient un lanceur en un clic, le script de restauration, les versions Python installées et le guide pour remettre Cliniva en service sur un autre PC.</div>
     <div class="mt-5 flex flex-wrap items-center gap-3"><button id="backupStart" type="button" class="rounded-xl bg-emerald-700 px-5 py-3 text-sm font-extrabold text-white shadow-sm hover:bg-emerald-800"><i class="ph-bold ph-shield-check mr-2"></i>Lancer la sauvegarde complète</button><span class="text-xs text-slate-500">L’opération s’effectue en arrière-plan; les fichiers source ne sont pas modifiés.</span></div>
     <div id="backupProgressWrap" class="mt-6 hidden rounded-2xl border border-slate-200 bg-slate-50 p-4"><div class="flex flex-wrap items-center justify-between gap-3"><p id="backupMessage" class="min-w-0 flex-1 truncate text-sm font-bold text-slate-700">Préparation…</p><div class="flex shrink-0 items-center gap-2"><button id="backupPause" type="button" class="hidden rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-100"><i class="ph-bold ph-pause mr-1"></i>Mettre en pause</button><button id="backupResume" type="button" class="hidden rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100"><i class="ph-bold ph-play mr-1"></i>Continuer</button><span id="backupPercent" class="text-sm font-extrabold text-emerald-700">0 %</span></div></div><div class="mt-3 h-2.5 overflow-hidden rounded-full bg-slate-200"><div id="backupProgressBar" class="h-full w-0 rounded-full bg-gradient-to-r from-lime-400 to-emerald-600 transition-all duration-300"></div></div><div class="mt-4 grid gap-3 sm:grid-cols-3"><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Étape</p><p id="backupStage" class="mt-1 truncate text-xs font-bold text-slate-700">En attente</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Débit instantané</p><p id="backupSpeed" class="mt-1 text-xs font-bold text-emerald-700">0 Ko/s</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Transféré dans l’étape</p><p id="backupTransferStats" class="mt-1 text-xs font-bold text-slate-700">0 octet</p></div></div><p id="backupCurrentFile" class="mt-3 truncate text-xs text-slate-500" title=""></p><p id="backupOutput" class="mt-2 break-all text-xs text-slate-500"></p></div>
     <div class="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-relaxed text-amber-900"><b>À protéger :</b> la sauvegarde contient des données médicales et des images DICOM. Choisissez un disque ou un partage sécurisé avec suffisamment d’espace. Pour exporter la base, l’outil PostgreSQL <code>pg_dump</code> doit être installé sur le serveur.</div>
