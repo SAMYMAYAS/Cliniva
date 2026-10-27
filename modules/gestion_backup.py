@@ -7,6 +7,7 @@ import importlib.metadata
 import logging
 import os
 import platform
+import re
 import signal
 import shutil
 import subprocess
@@ -738,6 +739,77 @@ async def get_backup_settings(request: Request):
     return _read_settings()
 
 
+def _server_directory_roots() -> list[str]:
+    """Return browseable filesystem roots from the machine running Cliniva."""
+    if os.name == "nt":
+        import ctypes
+
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        return [f"{chr(65 + index)}:\\" for index in range(26) if mask & (1 << index)]
+    return ["/"]
+
+
+@backup_router.get("/directories")
+async def browse_backup_directories(request: Request, path: str | None = None):
+    """Browse folders on the Cliniva server, never on the remote browser PC."""
+    _require_admin(request)
+    if not path:
+        return {"current": "", "parent": None, "directories": [], "roots": _server_directory_roots()}
+    directory = Path(path).expanduser()
+    if not directory.is_absolute():
+        raise HTTPException(status_code=400, detail="Le chemin doit être absolu sur le serveur.")
+    try:
+        directory = directory.resolve(strict=True)
+        if not directory.is_dir():
+            raise HTTPException(status_code=400, detail="Le chemin indiqué n’est pas un dossier du serveur.")
+        children = []
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        children.append({"name": entry.name, "path": str(Path(entry.path))})
+                except OSError:
+                    continue
+        children.sort(key=lambda item: item["name"].casefold())
+        parent = str(directory.parent) if directory.parent != directory else None
+        return {"current": str(directory), "parent": parent, "directories": children, "roots": []}
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Dossier serveur inaccessible : {exc}") from exc
+
+
+@backup_router.post("/directories")
+async def create_backup_directory(request: Request):
+    """Create a child folder on the server from the client-side backup UI."""
+    _require_admin(request)
+    payload = await request.json()
+    parent_raw = str(payload.get("parent") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not parent_raw or not name or name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Choisissez un dossier parent et saisissez un nom de dossier.")
+    if name[-1:] in {".", " "} or re.search(r'[<>:"/\\|?*\x00-\x1f]', name):
+        raise HTTPException(status_code=400, detail="Le nom contient un caractère interdit pour un dossier Windows.")
+    if re.fullmatch(r"(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?", name):
+        raise HTTPException(status_code=400, detail="Ce nom est réservé par Windows.")
+    parent = Path(parent_raw).expanduser()
+    if not parent.is_absolute():
+        raise HTTPException(status_code=400, detail="Le dossier parent doit être un chemin absolu sur le serveur.")
+    try:
+        parent = parent.resolve(strict=True)
+        if not parent.is_dir():
+            raise HTTPException(status_code=400, detail="Le dossier parent n’est pas accessible sur le serveur.")
+        created = parent / name
+        created.mkdir()
+        return {"ok": True, "path": str(created.resolve(strict=True))}
+    except HTTPException:
+        raise
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail="Un dossier portant ce nom existe déjà.") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Création du dossier serveur impossible : {exc}") from exc
+
+
 @backup_router.post("/settings")
 async def save_backup_settings(request: Request):
     _require_admin(request)
@@ -753,8 +825,17 @@ async def save_backup_settings(request: Request):
         for source in [PROJECT_ROOT, *[path for _, path in _configured_external_roots()]]:
             if destination == source or source in destination.parents:
                 raise HTTPException(status_code=400, detail="Le dossier de sauvegarde doit être hors des répertoires source.")
+        destination.mkdir(parents=True, exist_ok=True)
+        if not destination.is_dir():
+            raise HTTPException(status_code=400, detail="La destination n’est pas un dossier accessible sur le serveur.")
+        probe = destination / f".cliniva_write_check_{uuid.uuid4().hex}.tmp"
+        try:
+            with probe.open("xb") as handle:
+                handle.write(b"Cliniva backup destination check")
+        finally:
+            probe.unlink(missing_ok=True)
     except OSError as exc:
-        raise HTTPException(status_code=400, detail=f"Chemin invalide : {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"Chemin serveur invalide ou non accessible en écriture : {exc}") from exc
     settings = _read_settings()
     settings["destination"] = str(destination)
     _write_settings(settings)
@@ -944,8 +1025,9 @@ def render_html(user: dict[str, Any] | None = None) -> str:
   </header>
   <article class="rounded-[1.75rem] border border-slate-200 bg-white p-6 shadow-sm">
     <div class="mb-5 flex items-center gap-3"><span class="grid h-11 w-11 place-items-center rounded-xl bg-emerald-50 text-emerald-700"><i class="ph-bold ph-hard-drive text-xl"></i></span><div><h2 class="text-lg font-extrabold text-slate-800">Répertoire de sauvegarde</h2><p class="text-xs text-slate-500">Le chemin doit être accessible depuis le serveur qui exécute Cliniva et PostgreSQL.</p></div></div>
-    <label for="backupDestination" class="block text-xs font-bold text-slate-600">Chemin absolu de destination</label>
-    <div class="mt-2 flex flex-col gap-3 sm:flex-row"><input id="backupDestination" type="text" spellcheck="false" placeholder="Ex. D:\Cliniva_Backups ou \\NAS\Cliniva_Backups" class="min-w-0 flex-1 rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-lime-200"><button id="backupSavePath" type="button" class="rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50"><i class="ph-bold ph-floppy-disk mr-1"></i>Enregistrer le chemin</button></div>
+    <label for="backupDestination" class="block text-xs font-bold text-slate-600">Chemin de destination sur le serveur Cliniva</label>
+    <div class="mt-2 flex flex-col gap-3 lg:flex-row"><input id="backupDestination" type="text" spellcheck="false" placeholder="Ex. D:\Cliniva_Backups ou \\NAS\Cliniva_Backups" class="min-w-0 flex-1 rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-lime-200"><button id="backupBrowseOpen" type="button" class="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-800 hover:bg-emerald-100"><i class="ph-bold ph-folder-open text-lg"></i>Parcourir le serveur</button><button id="backupSavePath" type="button" class="rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50"><i class="ph-bold ph-floppy-disk mr-1"></i>Enregistrer le chemin</button></div>
+    <p class="mt-2 text-xs text-slate-500">Le navigateur affiche les disques et dossiers du serveur. Tu peux y créer le dossier de sauvegarde depuis ce poste client.</p>
      <div class="mt-5 grid gap-3 md:grid-cols-3"><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-code text-xl text-emerald-700"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Fichiers Cliniva</p><p class="mt-1 text-xs text-slate-500">Code, modèles, configuration, documents et uploads.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-database text-xl text-indigo-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Base PostgreSQL</p><p class="mt-1 text-xs text-slate-500">Export complet restaurable avec pg_restore.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-images text-xl text-amber-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Images DICOM</p><p class="mt-1 text-xs text-slate-500">Stockage PACS et réceptions DICOM Print configurés.</p></div></div>
      <div class="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs leading-relaxed text-emerald-900"><b>Kit de restauration inclus :</b> chaque nouveau backup contient un lanceur en un clic, le script de restauration, les versions Python installées et le guide pour remettre Cliniva en service sur un autre PC.</div>
     <div class="mt-5 flex flex-wrap items-center gap-3"><button id="backupStart" type="button" class="rounded-xl bg-emerald-700 px-5 py-3 text-sm font-extrabold text-white shadow-sm hover:bg-emerald-800"><i class="ph-bold ph-shield-check mr-2"></i>Lancer la sauvegarde complète</button><span class="text-xs text-slate-500">L’opération s’effectue en arrière-plan; les fichiers source ne sont pas modifiés.</span></div>
@@ -976,9 +1058,16 @@ def render_html(user: dict[str, Any] | None = None) -> str:
     <div class="mt-4 flex flex-wrap items-center justify-between gap-3"><p class="text-xs text-slate-500">Les sauvegardes manuelles restent disponibles à tout moment.</p><button id="backupScheduleSave" type="button" class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm font-bold text-emerald-800 hover:bg-emerald-100"><i class="ph-bold ph-floppy-disk mr-1"></i>Enregistrer la planification</button></div>
   </article>
 </section>
+<div id="backupDirectoryModal" class="fixed inset-0 z-[10000] hidden items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="backupDirectoryTitle">
+  <div class="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+    <div class="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4"><div><h2 id="backupDirectoryTitle" class="text-lg font-extrabold text-slate-800">Choisir un dossier sur le serveur</h2><p class="mt-1 text-xs text-slate-500">Ces dossiers appartiennent au PC serveur où Cliniva est lancé.</p></div><button id="backupDirectoryClose" type="button" class="grid h-9 w-9 place-items-center rounded-lg text-slate-500 hover:bg-slate-100" aria-label="Fermer"><i class="ph-bold ph-x text-lg"></i></button></div>
+    <div class="flex min-h-0 flex-1 flex-col p-5"><div class="flex gap-2"><button id="backupDirectoryUp" type="button" class="shrink-0 rounded-lg border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50" disabled><i class="ph-bold ph-arrow-up mr-1"></i>Parent</button><div id="backupDirectoryCurrent" class="min-w-0 flex-1 truncate rounded-lg bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600" title="">Disques du serveur</div></div><div id="backupDirectoryList" class="mt-3 min-h-[180px] flex-1 space-y-1 overflow-y-auto rounded-xl border border-slate-200 p-2"><p class="p-4 text-center text-sm text-slate-400">Chargement des dossiers du serveur…</p></div><div class="mt-3 flex flex-col gap-2 sm:flex-row"><input id="backupDirectoryNewName" type="text" maxlength="100" placeholder="Nom du nouveau dossier" class="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-200"><button id="backupDirectoryCreate" type="button" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white hover:bg-indigo-700"><i class="ph-bold ph-folder-plus mr-1"></i>Créer ici</button></div><p id="backupDirectoryNotice" class="mt-2 min-h-4 text-xs text-slate-500"></p></div>
+    <div class="flex justify-end gap-2 border-t border-slate-200 px-5 py-4"><button id="backupDirectoryCancel" type="button" class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50">Annuler</button><button id="backupDirectoryChoose" type="button" class="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-800" disabled><i class="ph-bold ph-check mr-1"></i>Utiliser ce dossier</button></div>
+  </div>
+</div>
 <script>
 (()=>{
-  const $=id=>document.getElementById(id);let currentJob=null,pollTimer=null,schedules=[];
+  const $=id=>document.getElementById(id);let currentJob=null,pollTimer=null,schedules=[],browsePath=null;
   async function api(url,options={}){const response=await fetch(url,{headers:{'Content-Type':'application/json'},...options});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.detail||'Erreur de communication avec le serveur.');return data;}
   function formatBytes(value){const bytes=Math.max(0,Number(value)||0);if(bytes<1024)return bytes+' octet';if(bytes<1024*1024)return (bytes/1024).toFixed(1)+' Ko';if(bytes<1024*1024*1024)return (bytes/1024/1024).toFixed(1)+' Mo';return (bytes/1024/1024/1024).toFixed(2)+' Go';}
   function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
@@ -990,7 +1079,15 @@ def render_html(user: dict[str, Any] | None = None) -> str:
   $('backupPause').addEventListener('click',()=>controlBackup('pause'));
   $('backupResume').addEventListener('click',()=>controlBackup('resume'));
   $('backupCancel').addEventListener('click',()=>controlBackup('cancel'));
-  $('backupSavePath').addEventListener('click',async()=>{try{const result=await api('/api/backup/settings',{method:'POST',body:JSON.stringify({destination:$('backupDestination').value})});$('backupDestination').value=result.destination;$('backupMessage').textContent='Répertoire de sauvegarde enregistré.';$('backupMessage').className='min-w-0 truncate text-sm font-bold text-emerald-700';$('backupProgressWrap').classList.remove('hidden');loadHistory();}catch(error){showError(error.message);}});
+  async function loadServerDirectories(path=null){const list=$('backupDirectoryList');list.innerHTML='<p class="p-4 text-center text-sm text-slate-400"><i class="ph-bold ph-spinner-gap mr-2 animate-spin"></i>Lecture des dossiers du serveur…</p>';try{const url='/api/backup/directories'+(path?'?path='+encodeURIComponent(path):'');const result=await api(url);browsePath=result.current||null;$('backupDirectoryCurrent').textContent=result.current||'Disques du serveur';$('backupDirectoryCurrent').title=result.current||'Racines du serveur';$('backupDirectoryUp').disabled=!result.parent;$('backupDirectoryUp').dataset.parent=result.parent||'';$('backupDirectoryChoose').disabled=!result.current;const entries=result.current?(result.directories||[]):(result.roots||[]).map(root=>({name:root,path:root}));if(!entries.length){list.innerHTML='<p class="p-5 text-center text-sm text-slate-400">Aucun sous-dossier accessible dans cet emplacement.</p>';return;}list.innerHTML=entries.map(entry=>'<button type="button" data-server-path="'+escapeHtml(entry.path)+'" class="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-slate-700 hover:bg-emerald-50"><i class="ph-fill ph-folder text-xl text-amber-500"></i><span class="min-w-0 flex-1 truncate">'+escapeHtml(entry.name)+'</span><i class="ph-bold ph-caret-right text-slate-400"></i></button>').join('');list.querySelectorAll('[data-server-path]').forEach(button=>button.addEventListener('click',()=>loadServerDirectories(button.dataset.serverPath)));}catch(error){list.innerHTML='<p class="p-4 text-sm font-semibold text-rose-600">'+escapeHtml(error.message)+'</p>';}}
+  function closeDirectoryModal(){$('backupDirectoryModal').classList.add('hidden');$('backupDirectoryModal').classList.remove('flex');}
+  $('backupBrowseOpen').addEventListener('click',()=>{$('backupDirectoryModal').classList.remove('hidden');$('backupDirectoryModal').classList.add('flex');$('backupDirectoryNotice').textContent='';loadServerDirectories(null);});
+  $('backupDirectoryClose').addEventListener('click',closeDirectoryModal);$('backupDirectoryCancel').addEventListener('click',closeDirectoryModal);
+  $('backupDirectoryModal').addEventListener('click',event=>{if(event.target===$('backupDirectoryModal'))closeDirectoryModal();});
+  $('backupDirectoryUp').addEventListener('click',()=>{if($('backupDirectoryUp').dataset.parent)loadServerDirectories($('backupDirectoryUp').dataset.parent);});
+  $('backupDirectoryCreate').addEventListener('click',async()=>{const name=$('backupDirectoryNewName').value.trim();if(!browsePath){$('backupDirectoryNotice').textContent='Ouvre d’abord un disque ou un dossier parent.';$('backupDirectoryNotice').className='mt-2 min-h-4 text-xs font-semibold text-rose-600';return;}try{const result=await api('/api/backup/directories',{method:'POST',body:JSON.stringify({parent:browsePath,name})});$('backupDirectoryNewName').value='';$('backupDirectoryNotice').textContent='Dossier créé sur le serveur.';$('backupDirectoryNotice').className='mt-2 min-h-4 text-xs font-semibold text-emerald-700';await loadServerDirectories(result.path);}catch(error){$('backupDirectoryNotice').textContent=error.message;$('backupDirectoryNotice').className='mt-2 min-h-4 text-xs font-semibold text-rose-600';}});
+  $('backupDirectoryChoose').addEventListener('click',()=>{if(!browsePath)return;$('backupDestination').value=browsePath;closeDirectoryModal();});
+  $('backupSavePath').addEventListener('click',async()=>{try{const result=await api('/api/backup/settings',{method:'POST',body:JSON.stringify({destination:$('backupDestination').value})});$('backupDestination').value=result.destination;$('backupMessage').textContent='Dossier serveur créé/vérifié et chemin de sauvegarde enregistré.';$('backupMessage').className='min-w-0 truncate text-sm font-bold text-emerald-700';$('backupProgressWrap').classList.remove('hidden');loadHistory();}catch(error){showError(error.message);}});
   $('backupHistoryRefresh').addEventListener('click',loadHistory);
   function timePeriod(value){if(!/^\d{2}:\d{2}$/.test(value||''))return 'Format 24 h';const hour=Number(value.slice(0,2));if(hour>=5&&hour<12)return 'Matin';if(hour>=12&&hour<18)return 'Après-midi';if(hour>=18&&hour<22)return 'Soir';return 'Nuit';}
   function updateSchedulePeriod(){const period=$('backupSchedulePeriod');if(period)period.textContent=timePeriod($('backupScheduleTime').value);}
