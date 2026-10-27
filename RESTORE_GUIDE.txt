@@ -1,0 +1,67 @@
+CLINIVA — KIT DE RESTAURATION APRÈS PANNE
+========================================
+
+Le dossier de backup contient :
+- application : le projet Cliniva et ses uploads ;
+- database : l’export PostgreSQL restaurable ;
+- dicom : les répertoires PACS et DICOM Print configurés, s’ils étaient accessibles ;
+- RESTORE_CLINIVA.ps1 : copie les fichiers, restaure PostgreSQL et rétablit les chemins DICOM ;
+- requirements-installed.txt et ENVIRONMENT.json : versions Python et bibliothèques présentes lors du backup ;
+- MANIFEST.json : date, base et inventaire des fichiers/dossiers.
+
+RESTAURATION SUR UN NOUVEAU PC SERVEUR
+--------------------------------------
+1. Copiez le dossier Cliniva_FullBackup_... depuis le support de sauvegarde vers un disque local.
+   Ne lancez pas Cliniva directement depuis le NAS.
+2. Installez Python pour Windows, PostgreSQL (avec les outils de ligne de commande), et
+   Microsoft Edge WebView2. La version Python de référence est indiquée dans ENVIRONMENT.json.
+3. Ouvrez PowerShell. Choisissez un dossier d’installation vide, par exemple C:\Clinical_Build_Codex.
+4. Lancez le script du backup (adaptez les chemins) :
+
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+     "D:\Cliniva_FullBackup_20261027_020000\RESTORE_CLINIVA.ps1" `
+     -BackupPath "D:\Cliniva_FullBackup_20261027_020000" `
+     -InstallPath "C:\Clinical_Build_Codex" `
+     -DbHost "localhost" -DbPort 5432 -DbUser "postgres"
+
+   Le script demande le mot de passe PostgreSQL sans l’afficher. Si la base cible existe,
+   il demande une confirmation explicite avant de remplacer son contenu.
+5. Dans PowerShell, installez les paquets Python enregistrés dans le backup :
+
+   cd C:\Clinical_Build_Codex
+   py -3.14 -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install --upgrade pip
+   .\.venv\Scripts\python.exe -m pip install -r .\requirements-installed.txt
+
+   Remplacez 3.14 par la version Python indiquée dans ENVIRONMENT.json si nécessaire.
+6. Démarrez Cliniva avec .\Lancer_Cliniva.ps1. Il demande le mot de passe PostgreSQL à chaque
+   démarrage et le transmet uniquement au processus Cliniva ; il ne l’enregistre pas dans le fichier.
+7. Vérifiez la connexion PostgreSQL, les images PACS/DICOM Print, les impressions, puis ouvrez
+   quelques fiches et comptes rendus avant de remettre le serveur en production.
+
+LOGICIELS WINDOWS COMPLÉMENTAIRES
+--------------------------------
+- PostgreSQL est obligatoire. pg_restore, psql et createdb doivent être présents dans le PATH
+  ou dans le dossier bin de PostgreSQL.
+- Microsoft Word est nécessaire pour la conversion des documents Word en PDF ; Word dans le
+  navigateur ne suffit pas.
+- Tesseract est requis pour l’OCR des images DICOM Print (pytesseract seul ne suffit pas).
+- Yate est requis uniquement si le serveur SIP est utilisé.
+- Les imprimantes, leurs pilotes, les scanners, WebView2 et les droits Windows ne sont pas
+  transportés par une copie de dossier ; ils doivent être configurés sur le nouveau PC.
+  Reconfigurez les imprimantes dans Cliniva après la restauration.
+
+À SAVOIR
+--------
+- Les répertoires DICOM sont restaurés vers les chemins configurés dans le script. Ils peuvent
+  être personnalisés avec -PacsDataPath et -DicomPrintDataPath.
+- Les caches __pycache__, .pytest_cache, .mypy_cache et .ruff_cache sont exclus ; ils sont
+  régénérés automatiquement et ne contiennent pas les données métier.
+- Les liens symboliques internes sont copiés comme des fichiers/dossiers normaux ; un lien hors
+  du dossier source ou une boucle interrompt le backup avec le chemin concerné.
+- Les mots de passe des extensions SIP protégés par DPAPI Windows peuvent être liés à l’ancien
+  compte ou à l’ancien PC. Après une migration, il peut être nécessaire de les redéfinir.
+- Conservez une copie du backup sur un support séparé et protégez son accès : il contient des
+  données médicales, des documents patients et des fichiers de configuration.
+- Cette procédure restaure les fichiers et PostgreSQL. Une restauration n’est considérée prête
+  qu’après un démarrage et une vérification fonctionnelle sur le nouveau PC.

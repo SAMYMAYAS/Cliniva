@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import importlib.metadata
 import logging
 import os
+import platform
 import signal
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -219,47 +222,65 @@ def _configured_external_roots() -> list[tuple[str, Path]]:
     return unique
 
 
-def _iter_files(root: Path, project_root: bool = False):
+def _iter_tree_entries(root: Path):
+    """Walk the source tree, dereferencing safe internal links and rejecting escapes."""
     root = Path(root)
     if not root.is_dir():
         raise OSError(f"Le dossier source de sauvegarde est introuvable ou inaccessible : {root}")
+    root_resolved = root.resolve()
 
-    def raise_walk_error(error: OSError) -> None:
-        raise error
+    def walk(directory: Path, ancestors: frozenset[Path]):
+        try:
+            with os.scandir(directory) as scan:
+                entries = list(scan)
+        except OSError as exc:
+            raise OSError(f"Lecture du dossier impossible pendant le backup : {directory} ({exc})") from exc
 
-    for current, directories, filenames in os.walk(
-        root, followlinks=False, onerror=raise_walk_error
-    ):
-        current_path = Path(current)
-        directories[:] = [name for name in directories
-                          if name not in _EXCLUDED_DIRS
-                          and not (current_path / name).is_symlink()]
-        for filename in filenames:
-            path = current_path / filename
-            if path.is_symlink():
+        for entry in entries:
+            path = Path(entry.path)
+            if path.name in _EXCLUDED_DIRS and entry.is_dir(follow_symlinks=True):
                 continue
+            try:
+                if entry.is_symlink():
+                    resolved = path.resolve(strict=True)
+                    if resolved != root_resolved and root_resolved not in resolved.parents:
+                        raise OSError(
+                            f"Lien symbolique hors du dossier source, backup interrompu : {path} -> {resolved}"
+                        )
+                    if resolved.is_dir():
+                        if resolved in ancestors:
+                            raise OSError(f"Boucle de liens symboliques détectée : {path} -> {resolved}")
+                        yield path, True
+                        yield from walk(path, ancestors | {resolved})
+                    elif resolved.is_file():
+                        yield path, False
+                    else:
+                        raise OSError(f"Cible de lien symbolique non prise en charge : {path} -> {resolved}")
+                elif entry.is_dir(follow_symlinks=False):
+                    resolved = path.resolve()
+                    yield path, True
+                    yield from walk(path, ancestors | {resolved})
+                elif entry.is_file(follow_symlinks=False):
+                    yield path, False
+                else:
+                    raise OSError(f"Type de fichier non pris en charge par le backup : {path}")
+            except (OSError, RuntimeError) as exc:
+                raise OSError(f"Impossible de sauvegarder l’élément {path} : {exc}") from exc
+
+    yield from walk(root, frozenset({root_resolved}))
+
+
+def _iter_files(root: Path, project_root: bool = False):
+    for path, is_directory in _iter_tree_entries(root):
+        if not is_directory:
             yield path
 
 
 def _iter_directories(root: Path):
     """Yield every included directory so empty folders are preserved in backups."""
-    root = Path(root)
-    if not root.is_dir():
-        raise OSError(f"Le dossier source de sauvegarde est introuvable ou inaccessible : {root}")
-
-    def raise_walk_error(error: OSError) -> None:
-        raise error
-
-    for current, directories, _ in os.walk(
-        root, followlinks=False, onerror=raise_walk_error
-    ):
-        current_path = Path(current)
-        included = [name for name in directories
-                    if name not in _EXCLUDED_DIRS
-                    and not (current_path / name).is_symlink()]
-        directories[:] = included
-        for name in included:
-            yield current_path / name
+    for path, is_directory in _iter_tree_entries(root):
+        if is_directory:
+            yield path
 
 
 def _control_pg_dump_process(*, pause: bool) -> None:
@@ -348,6 +369,63 @@ def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str,
     return {"files": file_count, "directories": directory_count, "bytes": copied_bytes}
 
 
+def _write_recovery_bundle(backup_root: Path) -> dict[str, Any]:
+    """Attach portable recovery instructions and the current Python package inventory."""
+    guide = PROJECT_ROOT / "RESTORE_GUIDE.txt"
+    restore_script = PROJECT_ROOT / "scripts" / "restore_cliniva_backup.ps1"
+    launcher = PROJECT_ROOT / "scripts" / "start_cliniva.ps1"
+    for required in (guide, restore_script, launcher):
+        if not required.is_file():
+            raise FileNotFoundError(f"Fichier de restauration requis introuvable : {required}")
+
+    shutil.copy2(guide, backup_root / "RESTORE_GUIDE.txt")
+    shutil.copy2(restore_script, backup_root / "RESTORE_CLINIVA.ps1")
+    application_launcher = backup_root / "application" / "scripts" / "start_cliniva.ps1"
+    if not application_launcher.parent.is_dir():
+        application_launcher.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(launcher, application_launcher)
+
+    package_lines: set[str] = set()
+    for distribution in importlib.metadata.distributions():
+        name = distribution.metadata.get("Name")
+        version = distribution.version
+        if name and version and name.casefold() not in {"pip", "setuptools", "wheel"}:
+            package_lines.add(f"{name}=={version}")
+    requirements_text = "\n".join(sorted(package_lines, key=str.casefold)) + "\n"
+    (backup_root / "requirements-installed.txt").write_text(requirements_text, encoding="utf-8")
+    (backup_root / "ENVIRONMENT.json").write_text(
+        json.dumps({
+            "python_version": platform.python_version(),
+            "python_implementation": platform.python_implementation(),
+            "architecture": platform.machine(),
+            "operating_system": platform.platform(),
+            "python_executable_name": Path(sys.executable).name,
+            "package_count": len(package_lines),
+            "package_inventory": "requirements-installed.txt",
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {
+        "python_version": platform.python_version(),
+        "architecture": platform.machine(),
+        "package_count": len(package_lines),
+    }
+
+
+def _sanitize_backup_database_password(application_root: Path) -> None:
+    """Do not carry a plaintext PostgreSQL password in the portable app config."""
+    config_path = application_root / "config.json"
+    if not config_path.is_file():
+        return
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Impossible de préparer la configuration Cliniva pour restauration : {exc}") from exc
+    if isinstance(config, dict) and isinstance(config.get("postgres"), dict):
+        config["postgres"]["password"] = ""
+        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) -> None:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     final_dir = destination / f"Cliniva_FullBackup_{stamp}"
@@ -398,6 +476,12 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
                     f"{copy_result['files']} fichiers/{copy_result['directories']} dossiers copiés, "
                     f"contre {expected['files']} fichiers/{expected['directories']} dossiers attendus. "
                     "La sauvegarde est interrompue pour éviter un backup incomplet."
+                )
+            if project:
+                _sanitize_backup_database_password(target)
+                planned_inventory[label]["bytes"] = sum(
+                    path.stat().st_size
+                    for path in _iter_files(target, project_root=True)
                 )
 
         with _JOB_LOCK:
@@ -461,18 +545,29 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
             _JOB.update(percent=97, stage="Finalisation", speed_bps=0,
                         stage_bytes=0, stage_total_bytes=0, current_file="",
                         message="Finalisation et vérification des fichiers…")
+        environment = _write_recovery_bundle(partial_dir)
         manifest = {
             "application": "Cliniva",
             "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "backup_size_bytes": sum(path.stat().st_size for _, path, _ in planned_files) + dump_path.stat().st_size,
+            "backup_size_bytes": sum(
+                path.stat().st_size for path in _iter_files(partial_dir)
+            ),
             "database": {"engine": "PostgreSQL", "name": DB_CONFIG["database"],
                          "host": DB_CONFIG.get("host"), "port": DB_CONFIG.get("port"),
                          "dump": f"database/{dump_path.name}"},
-            "included": ["Fichiers et dossiers de l’application, y compris les dossiers vides", "Base PostgreSQL", "Données PACS/DICOM Print configurées"],
+            "included": [
+                "Fichiers et dossiers de l’application, y compris les dossiers vides",
+                "Base PostgreSQL", "Données PACS/DICOM Print configurées",
+                "Script et guide de restauration", "Inventaire des versions Python installées",
+            ],
             "source_inventory": planned_inventory,
             "external_data_roots": [{"label": label, "source": str(path)} for label, path in external_roots],
             "excluded_generated_directories": sorted(_EXCLUDED_DIRS),
-            "database_credentials_included": False,
+            "restore_script": "RESTORE_CLINIVA.ps1",
+            "restore_guide": "RESTORE_GUIDE.txt",
+            "python_environment": environment,
+            "database_password_in_config_json": False,
+            "restore_requires_database_password": True,
         }
         (partial_dir / "MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         partial_dir.rename(final_dir)
@@ -690,7 +785,8 @@ def render_html(user: dict[str, Any] | None = None) -> str:
     <div class="mb-5 flex items-center gap-3"><span class="grid h-11 w-11 place-items-center rounded-xl bg-emerald-50 text-emerald-700"><i class="ph-bold ph-hard-drive text-xl"></i></span><div><h2 class="text-lg font-extrabold text-slate-800">Répertoire de sauvegarde</h2><p class="text-xs text-slate-500">Le chemin doit être accessible depuis le serveur qui exécute Cliniva et PostgreSQL.</p></div></div>
     <label for="backupDestination" class="block text-xs font-bold text-slate-600">Chemin absolu de destination</label>
     <div class="mt-2 flex flex-col gap-3 sm:flex-row"><input id="backupDestination" type="text" spellcheck="false" placeholder="Ex. D:\Cliniva_Backups ou \\NAS\Cliniva_Backups" class="min-w-0 flex-1 rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-lime-200"><button id="backupSavePath" type="button" class="rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50"><i class="ph-bold ph-floppy-disk mr-1"></i>Enregistrer le chemin</button></div>
-    <div class="mt-5 grid gap-3 md:grid-cols-3"><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-code text-xl text-emerald-700"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Fichiers Cliniva</p><p class="mt-1 text-xs text-slate-500">Code, modèles, configuration, documents et uploads.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-database text-xl text-indigo-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Base PostgreSQL</p><p class="mt-1 text-xs text-slate-500">Export complet restaurable avec pg_restore.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-images text-xl text-amber-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Images DICOM</p><p class="mt-1 text-xs text-slate-500">Stockage PACS et réceptions DICOM Print configurés.</p></div></div>
+     <div class="mt-5 grid gap-3 md:grid-cols-3"><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-code text-xl text-emerald-700"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Fichiers Cliniva</p><p class="mt-1 text-xs text-slate-500">Code, modèles, configuration, documents et uploads.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-database text-xl text-indigo-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Base PostgreSQL</p><p class="mt-1 text-xs text-slate-500">Export complet restaurable avec pg_restore.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-images text-xl text-amber-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Images DICOM</p><p class="mt-1 text-xs text-slate-500">Stockage PACS et réceptions DICOM Print configurés.</p></div></div>
+     <div class="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs leading-relaxed text-emerald-900"><b>Restauration prête :</b> chaque nouveau backup inclut le guide et le script RESTORE_CLINIVA.ps1, les versions Python installées et les instructions pour remettre Cliniva en service sur un autre PC.</div>
     <div class="mt-5 flex flex-wrap items-center gap-3"><button id="backupStart" type="button" class="rounded-xl bg-emerald-700 px-5 py-3 text-sm font-extrabold text-white shadow-sm hover:bg-emerald-800"><i class="ph-bold ph-shield-check mr-2"></i>Lancer la sauvegarde complète</button><span class="text-xs text-slate-500">L’opération s’effectue en arrière-plan; les fichiers source ne sont pas modifiés.</span></div>
     <div id="backupProgressWrap" class="mt-6 hidden rounded-2xl border border-slate-200 bg-slate-50 p-4"><div class="flex flex-wrap items-center justify-between gap-3"><p id="backupMessage" class="min-w-0 flex-1 truncate text-sm font-bold text-slate-700">Préparation…</p><div class="flex shrink-0 items-center gap-2"><button id="backupPause" type="button" class="hidden rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-100"><i class="ph-bold ph-pause mr-1"></i>Mettre en pause</button><button id="backupResume" type="button" class="hidden rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100"><i class="ph-bold ph-play mr-1"></i>Continuer</button><span id="backupPercent" class="text-sm font-extrabold text-emerald-700">0 %</span></div></div><div class="mt-3 h-2.5 overflow-hidden rounded-full bg-slate-200"><div id="backupProgressBar" class="h-full w-0 rounded-full bg-gradient-to-r from-lime-400 to-emerald-600 transition-all duration-300"></div></div><div class="mt-4 grid gap-3 sm:grid-cols-3"><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Étape</p><p id="backupStage" class="mt-1 truncate text-xs font-bold text-slate-700">En attente</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Débit instantané</p><p id="backupSpeed" class="mt-1 text-xs font-bold text-emerald-700">0 Ko/s</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Transféré dans l’étape</p><p id="backupTransferStats" class="mt-1 text-xs font-bold text-slate-700">0 octet</p></div></div><p id="backupCurrentFile" class="mt-3 truncate text-xs text-slate-500" title=""></p><p id="backupOutput" class="mt-2 break-all text-xs text-slate-500"></p></div>
     <div class="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-relaxed text-amber-900"><b>À protéger :</b> la sauvegarde contient des données médicales et des images DICOM. Choisissez un disque ou un partage sécurisé avec suffisamment d’espace. Pour exporter la base, l’outil PostgreSQL <code>pg_dump</code> doit être installé sur le serveur.</div>
