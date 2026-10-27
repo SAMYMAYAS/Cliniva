@@ -570,7 +570,6 @@ def generate_livret_pdf_file(
         c_cover.drawImage(str(img_page1), 0, 0, width=width, height=height)
 
     c_cover.setFillColor(colors.HexColor("#0c1a10"))
-    c_cover.setFont("Helvetica-Bold", 12.5)
 
     default_cover_positions = {
         "patient": {"x": 11.0, "y": 80.4},
@@ -578,6 +577,8 @@ def generate_livret_pdf_file(
         "exam": {"x": 11.0, "y": 87.5},
     }
     positions = cover_positions if isinstance(cover_positions, dict) else {}
+    font_size = min(24.0, max(8.0, float(positions.get("font_size", 12.5))))
+    c_cover.setFont("Helvetica-Bold" if positions.get("bold", True) else "Helvetica", font_size)
     cover_fields = (
         ("patient", f"Patient : {patient_info.get('nom_prenom', '')}"),
         ("date", f"Date : {patient_info.get('date_examen', '')}"),
@@ -831,6 +832,76 @@ async def api_save_default_livret_cover(payload: Dict[str, Any], request: Reques
     return {"success": True, "default": cover_name}
 
 
+def _validate_livret_cover_layout(raw_layout: Any) -> dict[str, Any]:
+    if not isinstance(raw_layout, dict):
+        raise HTTPException(status_code=400, detail="La disposition de la page de garde est invalide.")
+    layout: dict[str, Any] = {}
+    for field in ("patient", "date", "exam"):
+        value = raw_layout.get(field)
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=400, detail="La position d’une information de couverture est invalide.")
+        try:
+            x, y = float(value.get("x")), float(value.get("y"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="La position d’une information de couverture est invalide.")
+        if not (0 <= x <= 100 and 0 <= y <= 100):
+            raise HTTPException(status_code=400, detail="Les informations doivent rester dans les limites de la page de garde.")
+        layout[field] = {"x": x, "y": y}
+    try:
+        font_size = float(raw_layout.get("font_size", 12.5))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="La taille de police est invalide.")
+    if not 8 <= font_size <= 24:
+        raise HTTPException(status_code=400, detail="La taille de police doit être comprise entre 8 et 24 points.")
+    layout["font_size"] = font_size
+    layout["bold"] = bool(raw_layout.get("bold", True))
+    return layout
+
+
+@dme_router.get("/livret/covers/{filename}/layout")
+async def api_get_livret_cover_layout(filename: str, request: Request):
+    user = get_current_user_optional(request)
+    if not user or user.get("status") != "Actif":
+        raise HTTPException(status_code=401, detail="Session expirée. Veuillez vous reconnecter.")
+    _resolve_livret_cover(filename)
+    dme_manager.ensure_dme_schema()
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT layout_json FROM user_livret_cover_layouts WHERE user_id = %s AND cover_filename = %s;",
+            (user["id"], filename),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return {"success": True, "layout": None}
+    layout = row.get("layout_json") if isinstance(row, dict) else None
+    if isinstance(layout, str):
+        try:
+            layout = json.loads(layout)
+        except ValueError:
+            layout = None
+    return {"success": True, "layout": layout if isinstance(layout, dict) else None}
+
+
+@dme_router.post("/livret/covers/layout")
+async def api_save_livret_cover_layout(payload: Dict[str, Any], request: Request):
+    user = get_current_user_optional(request)
+    if not user or user.get("status") != "Actif":
+        raise HTTPException(status_code=401, detail="Session expirée. Veuillez vous reconnecter.")
+    filename = str(payload.get("filename") or "").strip()
+    _resolve_livret_cover(filename)
+    layout = _validate_livret_cover_layout(payload.get("layout"))
+    dme_manager.ensure_dme_schema()
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            """INSERT INTO user_livret_cover_layouts (user_id, cover_filename, layout_json, updated_at)
+               VALUES (%s, %s, %s::jsonb, CURRENT_TIMESTAMP)
+               ON CONFLICT (user_id, cover_filename) DO UPDATE
+               SET layout_json = EXCLUDED.layout_json, updated_at = CURRENT_TIMESTAMP;""",
+            (user["id"], filename, json.dumps(layout, ensure_ascii=False)),
+        )
+    return {"success": True, "filename": filename, "layout": layout}
+
+
 @dme_router.get("/livret/covers/{filename}")
 async def api_get_livret_cover(filename: str, request: Request):
     user = get_current_user_optional(request)
@@ -946,20 +1017,7 @@ async def api_create_livret(payload: Dict[str, Any], request: Request):
     }
 
     raw_cover_positions = payload.get("cover_positions")
-    cover_positions: dict[str, dict[str, float]] = {}
-    if isinstance(raw_cover_positions, dict):
-        for field in ("patient", "date", "exam"):
-            value = raw_cover_positions.get(field)
-            if not isinstance(value, dict):
-                continue
-            try:
-                x = float(value.get("x"))
-                y = float(value.get("y"))
-            except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="La position d’une information de couverture est invalide.")
-            if not (0 <= x <= 100 and 0 <= y <= 100):
-                raise HTTPException(status_code=400, detail="Les informations doivent rester dans les limites de la page de garde.")
-            cover_positions[field] = {"x": x, "y": y}
+    cover_positions = _validate_livret_cover_layout(raw_cover_positions) if raw_cover_positions is not None else {}
 
     success = generate_livret_pdf_file(output_pdf, patient_info, cr, echo_images, str(cover_path), "IMAGES DU GROUPE", "echographique", cover_positions)
     if not success:
@@ -1381,6 +1439,15 @@ class DmeManager:
                         nom_fichier TEXT NOT NULL,
                         date_heure_str TEXT DEFAULT '',
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_livret_cover_layouts (
+                        user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        cover_filename TEXT NOT NULL,
+                        layout_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (user_id, cover_filename)
                     );
                 """)
         except Exception:
@@ -4165,7 +4232,7 @@ def _render_html() -> str:
                 <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(240px,300px)] gap-4 items-start pt-2 border-t border-slate-100 dark:border-white/5">
                     <div>
                         <label for="livretPageGardeSelect" class="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">Page de garde *</label>
-                        <select id="livretPageGardeSelect" required onchange="previewLivretPageGarde(); saveLivretDefaultCoverPreference()" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-semibold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
+                        <select id="livretPageGardeSelect" required onchange="previewLivretPageGarde(); loadLivretCoverLayout(); saveLivretDefaultCoverPreference()" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-semibold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
                             <option value="">Chargement des pages de garde…</option>
                         </select>
                         <label class="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
@@ -4179,13 +4246,22 @@ def _render_html() -> str:
                             <button type="button" onclick="resetLivretCoverPositions()" class="mt-2 rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-black/20 dark:text-emerald-200"><i class="ph-bold ph-arrow-counter-clockwise mr-1"></i>Réinitialiser les positions</button>
                         </div>
                     </div>
-                    <div id="livretCoverCanvas" class="relative mx-auto hidden w-full max-w-[300px] overflow-hidden rounded-xl border border-slate-300 bg-white shadow-lg dark:border-white/10" style="aspect-ratio:210 / 297;">
-                        <img id="livretPageGardePreview" class="absolute inset-0 h-full w-full object-fill" alt="Aperçu de la page de garde">
-                        <div id="livretCoverPatient" data-cover-field="patient" onpointerdown="livretCoverPointerDown(event, 'patient')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Patient : —</div>
-                        <div id="livretCoverDate" data-cover-field="date" onpointerdown="livretCoverPointerDown(event, 'date')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Date : —</div>
-                        <div id="livretCoverExam" data-cover-field="exam" onpointerdown="livretCoverPointerDown(event, 'exam')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Type Examen : —</div>
+                    <div id="livretCoverEditorPanel" class="flex flex-col items-center gap-3">
+                        <button type="button" onclick="openLivretCoverEditor()" class="inline-flex items-center gap-2 self-stretch justify-center rounded-xl bg-slate-800 px-4 py-2.5 text-xs font-extrabold text-white hover:bg-slate-900 dark:bg-emerald-700 dark:hover:bg-emerald-600"><i class="ph-bold ph-arrows-out text-base"></i>Afficher la page de garde en grand</button>
+                        <div id="livretCoverCanvas" class="relative mx-auto hidden w-full max-w-[300px] overflow-hidden rounded-xl border border-slate-300 bg-white shadow-lg dark:border-white/10" style="aspect-ratio:210 / 297;">
+                            <img id="livretPageGardePreview" class="absolute inset-0 h-full w-full object-fill" alt="Aperçu de la page de garde">
+                            <div id="livretCoverPatient" data-cover-field="patient" onpointerdown="livretCoverPointerDown(event, 'patient')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Patient : —</div>
+                            <div id="livretCoverDate" data-cover-field="date" onpointerdown="livretCoverPointerDown(event, 'date')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Date : —</div>
+                            <div id="livretCoverExam" data-cover-field="exam" onpointerdown="livretCoverPointerDown(event, 'exam')" class="absolute z-10 max-w-[94%] cursor-move select-none whitespace-nowrap rounded bg-white/75 px-1.5 py-1 text-[9px] font-extrabold text-slate-950 shadow ring-1 ring-black/20 touch-none">Type Examen : —</div>
+                        </div>
+                        <div id="livretPageGardePlaceholder" class="min-h-56 w-full rounded-2xl border border-slate-200 bg-slate-100 p-5 flex items-center justify-center text-center text-[10px] text-slate-400 dark:border-white/10 dark:bg-black/30">Aperçu de la page sélectionnée</div>
+                        <div class="w-full rounded-xl border border-slate-200 p-3 dark:border-white/10">
+                            <label class="flex items-center justify-between gap-3 text-[10px] font-bold text-slate-600 dark:text-slate-300"><span>Taille de police <span id="livretCoverFontSizeLabel" class="text-emerald-700 dark:text-emerald-300">12,5 pt</span></span><input id="livretCoverFontSize" type="range" min="8" max="24" step="0.5" value="12.5" oninput="updateLivretCoverStyle()" class="w-28 accent-emerald-600"></label>
+                            <label class="mt-3 inline-flex cursor-pointer items-center gap-2 text-[10px] font-bold text-slate-600 dark:text-slate-300"><input id="livretCoverBold" type="checkbox" checked onchange="updateLivretCoverStyle()" class="h-4 w-4 accent-emerald-600"><span>Mettre les informations en gras</span></label>
+                            <div class="mt-3 flex flex-wrap gap-2"><button type="button" onclick="resetLivretCoverPositions()" class="rounded-lg border border-slate-200 px-3 py-2 text-[10px] font-bold text-slate-600 hover:bg-slate-50 dark:border-white/10 dark:text-slate-300"><i class="ph-bold ph-arrow-counter-clockwise mr-1"></i>Réinitialiser</button><button id="livretCoverSaveLayout" type="button" onclick="saveLivretCoverLayout()" class="rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-extrabold text-white hover:bg-emerald-800"><i class="ph-bold ph-floppy-disk mr-1"></i>Enregistrer la disposition</button></div>
+                            <p id="livretCoverLayoutNotice" class="mt-2 hidden text-[10px]"></p>
+                        </div>
                     </div>
-                    <div id="livretPageGardePlaceholder" class="min-h-56 rounded-2xl border border-slate-200 bg-slate-100 p-5 flex items-center justify-center text-center text-[10px] text-slate-400 dark:border-white/10 dark:bg-black/30">Aperçu de la page sélectionnée</div>
                 </div>
 
               <!-- 3. Sélection des images du groupe cible -->
@@ -4227,6 +4303,11 @@ def _render_html() -> str:
                 </div>
             </form>
         </div>
+    </div>
+
+    <div id="livretCoverEditorModal" class="fixed inset-0 z-[2147483647] hidden flex-col bg-slate-950/95 p-3 sm:p-5" style="z-index:2147483647" role="dialog" aria-modal="true" aria-labelledby="livretCoverEditorTitle">
+        <div class="flex shrink-0 items-center justify-between gap-3 rounded-2xl border border-white/10 bg-[#111b15] px-4 py-3 text-white shadow-xl"><div class="min-w-0"><h3 id="livretCoverEditorTitle" class="truncate text-sm font-extrabold"><i class="ph-bold ph-frame-corners mr-2 text-emerald-300"></i>Disposition de la page de garde</h3><p class="mt-1 text-[10px] text-slate-300">Déplace les textes, règle la taille et le gras, puis enregistre.</p></div><button type="button" onclick="closeLivretCoverEditor()" class="shrink-0 rounded-xl border border-white/15 px-3 py-2 text-xs font-bold text-white hover:bg-white/10"><i class="ph-bold ph-arrows-in mr-1"></i>Réduire</button></div>
+        <div id="livretCoverEditorHost" class="flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 sm:p-4"></div>
     </div>
 
     <!-- MODALE INTERNE VISIONNEUR ORDONNANCE -->
@@ -4411,7 +4492,7 @@ def _render_html() -> str:
     <script>
         (function() {
             if (window._clinivaDprintKeyHandler) { document.removeEventListener('keydown', window._clinivaDprintKeyHandler); window._clinivaDprintKeyHandler = null; }
-            const staleDmeModals = document.querySelectorAll('body > #livretCreationModal, body > #dmeCrPreviewModal, body > #dmeDicomPrintModal, body > #dmeSpecialtyPickerModal, body > #dprintCarouselModal, body > #dprintManagerModal, body > #dprintManagerPositionMenu, body > #dprintRowActionMenu');
+            const staleDmeModals = document.querySelectorAll('body > #livretCreationModal, body > #livretCoverEditorModal, body > #dmeCrPreviewModal, body > #dmeDicomPrintModal, body > #dmeSpecialtyPickerModal, body > #dprintCarouselModal, body > #dprintManagerModal, body > #dprintManagerPositionMenu, body > #dprintRowActionMenu');
             if (staleDmeModals.length) { staleDmeModals.forEach(modal => modal.remove()); document.body.style.overflow = ''; }
             function portalDmeModal(id) {
                 const modal = document.getElementById(id);
@@ -4708,6 +4789,8 @@ def _render_html() -> str:
             };
             let livretCoverLayouts = Object.create(null);
             let activeLivretCoverDrag = null;
+            let livretCoverEditorOriginalParent = null;
+            let livretCoverEditorOriginalNextSibling = null;
 
             function getLivretCoverLayout() {
                 const filename = document.getElementById('livretPageGardeSelect')?.value || '';
@@ -4729,6 +4812,117 @@ def _render_html() -> str:
 
             window.getLivretCoverPositions = function() {
                 return JSON.parse(JSON.stringify(getLivretCoverLayout()));
+            };
+
+            window.updateLivretCoverStyle = function() {
+                const layout = getLivretCoverLayout();
+                const sizeInput = document.getElementById('livretCoverFontSize');
+                const boldInput = document.getElementById('livretCoverBold');
+                if (sizeInput) layout.font_size = Number(sizeInput.value) || 12.5;
+                if (boldInput) layout.bold = boldInput.checked;
+                const sizeLabel = document.getElementById('livretCoverFontSizeLabel');
+                if (sizeLabel) sizeLabel.textContent = `${String(layout.font_size).replace('.', ',')} pt`;
+                document.querySelectorAll('[data-cover-field]').forEach(element => {
+                    element.style.fontSize = `${layout.font_size * 0.52}px`;
+                    element.style.fontWeight = layout.bold ? '800' : '500';
+                });
+            };
+
+            window.loadLivretCoverLayout = async function() {
+                const filename = document.getElementById('livretPageGardeSelect')?.value || '';
+                if (!filename) return;
+                try {
+                    const response = await fetch('/api/dme/livret/covers/' + encodeURIComponent(filename) + '/layout');
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.detail || 'Chargement de la disposition impossible.');
+                    if (document.getElementById('livretPageGardeSelect')?.value !== filename) return;
+                    if (data.layout) {
+                        const validated = data.layout;
+                        const layout = JSON.parse(JSON.stringify(livretCoverDefaultPositions));
+                        for (const field of ['patient', 'date', 'exam']) {
+                            if (validated[field] && Number.isFinite(Number(validated[field].x)) && Number.isFinite(Number(validated[field].y))) {
+                                layout[field] = { x: Math.max(0, Math.min(100, Number(validated[field].x))), y: Math.max(0, Math.min(100, Number(validated[field].y))) };
+                            }
+                        }
+                        layout.font_size = Math.max(8, Math.min(24, Number(validated.font_size) || 12.5));
+                        layout.bold = validated.bold !== false;
+                        livretCoverLayouts[filename] = layout;
+                    }
+                    const layout = getLivretCoverLayout();
+                    document.getElementById('livretCoverFontSize').value = layout.font_size || 12.5;
+                    document.getElementById('livretCoverBold').checked = layout.bold !== false;
+                    renderLivretCoverPositions();
+                    updateLivretCoverStyle();
+                } catch (error) {
+                    console.warn('Disposition de couverture non chargée :', error);
+                }
+            };
+
+            window.saveLivretCoverLayout = async function() {
+                const filename = document.getElementById('livretPageGardeSelect')?.value || '';
+                const notice = document.getElementById('livretCoverLayoutNotice');
+                if (!filename) return;
+                const button = document.getElementById('livretCoverSaveLayout');
+                if (button) button.disabled = true;
+                if (notice) { notice.classList.remove('hidden'); notice.className = 'mt-2 text-[10px] text-slate-500'; notice.textContent = 'Enregistrement…'; }
+                try {
+                    const response = await fetch('/api/dme/livret/covers/layout', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filename, layout: window.getLivretCoverPositions() })
+                    });
+                    const data = await response.json();
+                    if (!response.ok || !data.success) throw new Error(data.detail || 'Enregistrement de la disposition impossible.');
+                    livretCoverLayouts[filename] = data.layout;
+                    if (notice) { notice.className = 'mt-2 text-[10px] font-bold text-emerald-700 dark:text-emerald-300'; notice.textContent = 'Disposition enregistrée pour cette page de garde.'; }
+                    if (!document.getElementById('livretCoverEditorModal').classList.contains('hidden')) window.closeLivretCoverEditor();
+                } catch (error) {
+                    if (notice) { notice.className = 'mt-2 text-[10px] font-bold text-rose-600'; notice.textContent = error.message; }
+                } finally {
+                    if (button) button.disabled = false;
+                }
+            };
+
+            window.openLivretCoverEditor = function() {
+                const modal = portalDmeModal('livretCoverEditorModal');
+                const panel = document.getElementById('livretCoverEditorPanel');
+                const canvas = document.getElementById('livretCoverCanvas');
+                const host = document.getElementById('livretCoverEditorHost');
+                if (!modal || !panel || !canvas || canvas.classList.contains('hidden')) return;
+                livretCoverEditorOriginalParent = panel.parentElement;
+                livretCoverEditorOriginalNextSibling = panel.nextSibling;
+                host.appendChild(panel);
+                panel.classList.add('w-full', 'h-full', 'md:flex-row', 'md:justify-center', 'md:items-center');
+                canvas.classList.remove('w-full', 'max-w-[300px]');
+                const maxHeight = Math.min(window.innerHeight * 0.78, 1100);
+                const maxWidth = Math.max(200, window.innerWidth - 390);
+                const editorHeight = Math.min(maxHeight, maxWidth * 297 / 210);
+                canvas.style.width = `${editorHeight * 210 / 297}px`;
+                canvas.style.height = `${editorHeight}px`;
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+                document.body.style.overflow = 'hidden';
+            };
+
+            window.closeLivretCoverEditor = function() {
+                const modal = document.getElementById('livretCoverEditorModal');
+                const panel = document.getElementById('livretCoverEditorPanel');
+                const canvas = document.getElementById('livretCoverCanvas');
+                if (livretCoverEditorOriginalParent && panel) {
+                    if (livretCoverEditorOriginalNextSibling?.parentNode === livretCoverEditorOriginalParent) livretCoverEditorOriginalParent.insertBefore(panel, livretCoverEditorOriginalNextSibling);
+                    else livretCoverEditorOriginalParent.appendChild(panel);
+                }
+                panel?.classList.remove('w-full', 'h-full', 'md:flex-row', 'md:justify-center', 'md:items-center');
+                if (canvas) {
+                    canvas.classList.add('w-full', 'max-w-[300px]');
+                    canvas.style.width = '';
+                    canvas.style.height = '';
+                }
+                modal?.classList.add('hidden');
+                modal?.classList.remove('flex');
+                if (document.getElementById('livretCreationModal')?.classList.contains('hidden')) document.body.style.overflow = '';
+                livretCoverEditorOriginalParent = null;
+                livretCoverEditorOriginalNextSibling = null;
             };
 
             window.updateLivretCoverText = function() {
@@ -4776,8 +4970,14 @@ def _render_html() -> str:
 
             window.resetLivretCoverPositions = function() {
                 const filename = document.getElementById('livretPageGardeSelect')?.value || '';
-                livretCoverLayouts[filename] = JSON.parse(JSON.stringify(livretCoverDefaultPositions));
+                const previous = getLivretCoverLayout();
+                livretCoverLayouts[filename] = {
+                    ...JSON.parse(JSON.stringify(livretCoverDefaultPositions)),
+                    font_size: previous.font_size || 12.5,
+                    bold: previous.bold !== false
+                };
                 renderLivretCoverPositions();
+                updateLivretCoverStyle();
             };
 
             window.loadLivretPageGardeOptions = async function() {
@@ -4819,6 +5019,7 @@ def _render_html() -> str:
                 select.value = data.default || covers[0].filename;
                 if (hint) hint.textContent = `${covers.length} page(s) de garde disponible(s).`;
                 previewLivretPageGarde();
+                await loadLivretCoverLayout();
             } catch (error) {
                 select.disabled = true;
                 const option = document.createElement('option');
@@ -4847,6 +5048,7 @@ def _render_html() -> str:
             if (placeholder) placeholder.classList.add('hidden');
             renderLivretCoverPositions();
             updateLivretCoverText();
+            updateLivretCoverStyle();
         };
 
         window.saveLivretDefaultCoverPreference = async function() {
@@ -4955,6 +5157,7 @@ def _render_html() -> str:
             }
         };
         window.closeLivretModal = function() {
+            if (!document.getElementById('livretCoverEditorModal')?.classList.contains('hidden')) window.closeLivretCoverEditor();
             const modal = document.getElementById('livretCreationModal');
             if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
             document.body.style.overflow = '';
