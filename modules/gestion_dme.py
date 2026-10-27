@@ -832,6 +832,49 @@ async def api_save_default_livret_cover(payload: Dict[str, Any], request: Reques
     return {"success": True, "default": cover_name}
 
 
+@dme_router.post("/livret/covers/upload")
+async def api_upload_livret_cover(request: Request, file: UploadFile = File(...)):
+    user = get_current_user_optional(request)
+    if not user or user.get("status") != "Actif":
+        raise HTTPException(status_code=401, detail="Session expirée. Veuillez vous reconnecter.")
+    original_name = Path(file.filename or "").name
+    extension = Path(original_name).suffix.lower()
+    if extension not in LIVRET_COVER_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="La couverture doit être une image PNG ou JPEG.")
+    content = await file.read(20 * 1024 * 1024 + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="Le fichier de couverture est vide.")
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="La couverture ne peut pas dépasser 20 Mo.")
+    try:
+        with Image.open(BytesIO(content)) as image:
+            expected_format = "PNG" if extension == ".png" else "JPEG"
+            if image.format != expected_format:
+                raise HTTPException(status_code=415, detail="Le contenu du fichier n’est pas une image PNG ou JPEG.")
+            image.verify()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="L’image de couverture est endommagée ou illisible.") from exc
+
+    stem = re.sub(r"[^\w.-]+", "_", Path(original_name).stem, flags=re.UNICODE).strip("._-")[:70] or "Couverture"
+    filename = f"{stem}_{uuid.uuid4().hex[:8]}{extension}"
+    try:
+        LIVRET_COVER_DIR.mkdir(parents=True, exist_ok=True)
+        destination = (LIVRET_COVER_DIR / filename).resolve()
+        if destination.parent != LIVRET_COVER_DIR.resolve():
+            raise HTTPException(status_code=400, detail="Nom de couverture invalide.")
+        destination.write_bytes(content)
+    except HTTPException:
+        raise
+    except OSError as exc:
+        logger.exception("Enregistrement de la page de garde impossible")
+        raise HTTPException(status_code=500, detail="Impossible d’enregistrer la couverture dans le dossier du serveur.") from exc
+    finally:
+        await file.close()
+    return {"success": True, "filename": filename, "message": "Couverture ajoutée au serveur."}
+
+
 def _validate_livret_cover_layout(raw_layout: Any) -> dict[str, Any]:
     if not isinstance(raw_layout, dict):
         raise HTTPException(status_code=400, detail="La disposition de la page de garde est invalide.")
@@ -4235,6 +4278,11 @@ def _render_html() -> str:
                         <select id="livretPageGardeSelect" required onchange="previewLivretPageGarde(); loadLivretCoverLayout(); saveLivretDefaultCoverPreference()" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 font-semibold text-slate-800 dark:text-white outline-none focus:border-brand-neon">
                             <option value="">Chargement des pages de garde…</option>
                         </select>
+                        <div class="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 p-2 dark:border-white/10 dark:bg-black/20">
+                            <input id="livretCoverUploadFile" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" class="min-w-0 flex-1 text-[10px] text-slate-600 file:mr-2 file:rounded-lg file:border-0 file:bg-emerald-100 file:px-3 file:py-2 file:text-[10px] file:font-bold file:text-emerald-800">
+                            <button id="livretCoverUploadButton" type="button" onclick="uploadLivretCover()" class="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-extrabold text-white hover:bg-emerald-800"><i class="ph-bold ph-upload-simple"></i>Ajouter une couverture</button>
+                            <p id="livretCoverUploadNotice" class="basis-full text-[10px] text-slate-500">PNG ou JPEG · 20 Mo maximum · fichier enregistré sur le serveur.</p>
+                        </div>
                         <label class="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
                             <input id="livretUseDefaultCover" type="checkbox" onchange="saveLivretDefaultCoverPreference()" class="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-brand-neon">
                             <span>Utiliser cette page de garde par défaut pour mon compte</span>
@@ -5047,6 +5095,38 @@ def _render_html() -> str:
                 select.appendChild(option);
                 if (hint) hint.textContent = error.message || 'Impossible de charger les pages de garde.';
                 document.getElementById('btnSubmitLivret').disabled = true;
+            }
+        };
+
+        window.uploadLivretCover = async function() {
+            const input = document.getElementById('livretCoverUploadFile');
+            const button = document.getElementById('livretCoverUploadButton');
+            const notice = document.getElementById('livretCoverUploadNotice');
+            const file = input?.files?.[0];
+            if (!file) {
+                if (notice) { notice.textContent = 'Choisis d’abord une image PNG ou JPEG.'; notice.className = 'basis-full text-[10px] font-semibold text-rose-600'; }
+                return;
+            }
+            if (button) { button.disabled = true; button.innerHTML = '<i class="ph-bold ph-spinner animate-spin"></i>Envoi…'; }
+            if (notice) { notice.textContent = 'Envoi de la couverture au serveur…'; notice.className = 'basis-full text-[10px] text-slate-500'; }
+            try {
+                const form = new FormData();
+                form.append('file', file);
+                const response = await fetch('/api/dme/livret/covers/upload', { method: 'POST', body: form });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.detail || 'Ajout de la couverture impossible.');
+                await window.loadLivretPageGardeOptions();
+                const select = document.getElementById('livretPageGardeSelect');
+                select.value = data.filename;
+                window.previewLivretPageGarde();
+                await window.loadLivretCoverLayout();
+                if (document.getElementById('livretUseDefaultCover')?.checked) await window.saveLivretDefaultCoverPreference();
+                if (notice) { notice.textContent = 'Couverture ajoutée au serveur et sélectionnée.'; notice.className = 'basis-full text-[10px] font-bold text-emerald-700 dark:text-emerald-300'; }
+                input.value = '';
+            } catch (error) {
+                if (notice) { notice.textContent = error.message || 'Ajout de la couverture impossible.'; notice.className = 'basis-full text-[10px] font-bold text-rose-600'; }
+            } finally {
+                if (button) { button.disabled = false; button.innerHTML = '<i class="ph-bold ph-upload-simple"></i>Ajouter une couverture'; }
             }
         };
 
