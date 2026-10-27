@@ -656,6 +656,29 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         ON service_tech_tickets (statut, priorite, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_service_tech_tickets_equipment
         ON service_tech_tickets (equipment_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS service_tech_maintenance (
+        id SERIAL PRIMARY KEY,
+        site_designation TEXT NOT NULL,
+        site TEXT NOT NULL DEFAULT '',
+        equipment_name TEXT NOT NULL DEFAULT '',
+        equipment_designation TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'Préventive',
+        maintenance_date DATE NOT NULL,
+        heure_debut TIME NOT NULL,
+        heure_fin TIME NOT NULL,
+        ingenieur_interne TEXT NOT NULL DEFAULT '',
+        ingenieur_externe TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        rapport_path TEXT NOT NULL DEFAULT '',
+        rapport_nom TEXT NOT NULL DEFAULT '',
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CHECK (type IN ('Préventive', 'Curative')),
+        CHECK (heure_fin > heure_debut)
+    );
+    CREATE INDEX IF NOT EXISTS idx_service_tech_maintenance_date
+        ON service_tech_maintenance (maintenance_date, heure_debut);
 
     """
     from modules.exam_requests_core import SCHEMA as EXAM_REQUESTS_SCHEMA

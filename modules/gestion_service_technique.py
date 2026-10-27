@@ -3,12 +3,15 @@
 from datetime import date
 import base64
 from html import escape
+from pathlib import Path
 import sys
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from app.auth import get_current_user, track_action
-from database import get_db_cursor
+from database import DOCS_DIR, get_db_cursor
 
 service_tech_router = APIRouter(prefix="/api/service-technique", tags=["Service technique"])
 
@@ -16,6 +19,9 @@ EQUIPMENT_STATUSES = {"En service", "En maintenance", "Hors service", "Réformé
 TICKET_TYPES = {"Incident", "Maintenance préventive", "Maintenance corrective", "Demande"}
 TICKET_STATUSES = {"Nouveau", "Planifié", "En cours", "En attente", "Terminé", "Annulé"}
 PRIORITIES = {"Basse", "Normale", "Haute", "Urgente"}
+MAINTENANCE_TYPES = {"Préventive", "Curative"}
+MAINTENANCE_REPORT_EXTENSIONS = {".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png"}
+MAX_MAINTENANCE_REPORT_BYTES = 25 * 1024 * 1024
 
 
 def _allowed(user: Dict[str, Any], permission: str) -> bool:
@@ -78,12 +84,116 @@ def service_tech_data(request: Request):
             ORDER BY CASE t.priorite WHEN 'Urgente' THEN 0 WHEN 'Haute' THEN 1 WHEN 'Normale' THEN 2 ELSE 3 END,
             t.created_at DESC LIMIT 500""")
         tickets = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("""SELECT id, site_designation, site, equipment_name, equipment_designation,
+            type, maintenance_date, heure_debut, heure_fin, ingenieur_interne, ingenieur_externe,
+            notes, rapport_nom, (rapport_path <> '') AS has_report
+            FROM service_tech_maintenance ORDER BY maintenance_date DESC, heure_debut DESC, id DESC""")
+        maintenances = [dict(row) for row in cursor.fetchall()]
     today = date.today()
     overdue = sum(1 for item in equipment if item.get("prochaine_maintenance") and item["prochaine_maintenance"] < today and item["statut"] != "Réformé")
-    return {"equipment": equipment, "tickets": tickets, "can_manage": _allowed(user, "service_tech_manage"),
+    return {"equipment": equipment, "tickets": tickets, "maintenances": maintenances,
+            "can_manage": _allowed(user, "service_tech_manage"),
             "kpi": {"equipment": len(equipment), "open": sum(1 for item in tickets if item["statut"] not in {"Terminé", "Annulé"}),
                     "urgent": sum(1 for item in tickets if item["priorite"] == "Urgente" and item["statut"] not in {"Terminé", "Annulé"}),
                     "overdue": overdue}}
+
+
+@service_tech_router.post("/maintenance/save")
+async def service_tech_maintenance_save(request: Request):
+    user = get_current_user(request)
+    _require(user, "service_tech_manage")
+    data = await request.json()
+    site_designation = _text(data, "site_designation", "désignation du site", True)
+    equipment_designation = _text(data, "equipment_designation", "désignation de l'équipement", True)
+    maintenance_type = _text(data, "type", "type de maintenance") or "Préventive"
+    if maintenance_type not in MAINTENANCE_TYPES:
+        raise HTTPException(status_code=400, detail="Le type doit être Préventive ou Curative.")
+    maintenance_date = _date_value(data, "maintenance_date", "de maintenance")
+    if not maintenance_date:
+        raise HTTPException(status_code=400, detail="La date de maintenance est obligatoire.")
+    start_time = _text(data, "heure_debut", "heure de début", True)
+    end_time = _text(data, "heure_fin", "heure de fin", True)
+    try:
+        if end_time <= start_time:
+            raise ValueError
+        # Validate HH:MM values before passing them to PostgreSQL.
+        from datetime import datetime
+        datetime.strptime(start_time, "%H:%M")
+        datetime.strptime(end_time, "%H:%M")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="L'heure de fin doit être postérieure à l'heure de début.") from exc
+    maintenance_id = data.get("id")
+    values = (site_designation, _text(data, "site", "site"), _text(data, "equipment_name", "nom de l'équipement"),
+              equipment_designation, maintenance_type, maintenance_date, start_time, end_time,
+              _text(data, "ingenieur_interne", "ingénieur interne"),
+              _text(data, "ingenieur_externe", "ingénieur externe"), _text(data, "notes", "notes"))
+    with get_db_cursor() as cursor:
+        if maintenance_id:
+            cursor.execute("""UPDATE service_tech_maintenance SET site_designation=%s, site=%s,
+                equipment_name=%s, equipment_designation=%s, type=%s, maintenance_date=%s,
+                heure_debut=%s, heure_fin=%s, ingenieur_interne=%s, ingenieur_externe=%s,
+                notes=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s RETURNING id""",
+                           (*values, int(maintenance_id)))
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Maintenance introuvable.")
+            saved_id = row["id"]
+        else:
+            cursor.execute("""INSERT INTO service_tech_maintenance
+                (site_designation, site, equipment_name, equipment_designation, type, maintenance_date,
+                 heure_debut, heure_fin, ingenieur_interne, ingenieur_externe, notes, created_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                           (*values, user["id"]))
+            saved_id = cursor.fetchone()["id"]
+    track_action(request, "SERVICE_TECH_MAINTENANCE_SAVE", f"Maintenance {equipment_designation} planifiée le {maintenance_date}")
+    return {"success": True, "id": saved_id}
+
+
+@service_tech_router.post("/maintenance/{maintenance_id}/report")
+async def service_tech_maintenance_upload_report(
+    maintenance_id: int, request: Request, file: UploadFile = File(...)
+):
+    user = get_current_user(request)
+    _require(user, "service_tech_manage")
+    original_name = Path(file.filename or "rapport").name
+    extension = Path(original_name).suffix.lower()
+    if extension not in MAINTENANCE_REPORT_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Formats autorisés : PDF, Word ou image JPG/PNG.")
+    content = await file.read(MAX_MAINTENANCE_REPORT_BYTES + 1)
+    if not content or len(content) > MAX_MAINTENANCE_REPORT_BYTES:
+        raise HTTPException(status_code=400, detail="Le rapport est vide ou dépasse 25 Mo.")
+    storage_dir = Path(DOCS_DIR) / "service_technique" / "rapports_maintenance"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f"maintenance_{maintenance_id}_{uuid4().hex}{extension}"
+    stored_path = storage_dir / stored_name
+    stored_path.write_bytes(content)
+    relative_path = str(Path("service_technique") / "rapports_maintenance" / stored_name)
+    with get_db_cursor() as cursor:
+        cursor.execute("""UPDATE service_tech_maintenance SET rapport_path=%s, rapport_nom=%s,
+            updated_at=CURRENT_TIMESTAMP WHERE id=%s RETURNING id""",
+                       (relative_path, original_name, maintenance_id))
+        row = cursor.fetchone()
+        if not row:
+            stored_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=404, detail="Maintenance introuvable.")
+    track_action(request, "SERVICE_TECH_MAINTENANCE_REPORT", f"Rapport ajouté à la maintenance #{maintenance_id}")
+    return {"success": True, "name": original_name}
+
+
+@service_tech_router.get("/maintenance/{maintenance_id}/report")
+def service_tech_maintenance_report(maintenance_id: int, request: Request):
+    user = get_current_user(request)
+    _require(user, "service_tech_view")
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT rapport_path, rapport_nom FROM service_tech_maintenance WHERE id=%s", (maintenance_id,))
+        row = cursor.fetchone()
+    if not row or not row["rapport_path"]:
+        raise HTTPException(status_code=404, detail="Aucun rapport n'est enregistré pour cette maintenance.")
+    root = Path(DOCS_DIR).resolve()
+    report_path = (root / row["rapport_path"]).resolve()
+    if root not in report_path.parents or not report_path.is_file():
+        raise HTTPException(status_code=404, detail="Le fichier du rapport est introuvable.")
+    return FileResponse(report_path, filename=row["rapport_nom"] or report_path.name)
 
 
 @service_tech_router.post("/equipment/save")
@@ -222,7 +332,8 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
     can_manage = _allowed(user, "service_tech_manage")
     manage_controls = """
       <div class="flex flex-wrap gap-2"><button onclick="techOpenEquipment()" class="flex items-center gap-2 rounded-2xl bg-brand-neon px-4 py-2.5 text-xs font-bold text-black shadow-md shadow-brand-neon/20 transition hover:bg-brand-neonDark"><i class="ph-bold ph-plus-circle text-base"></i>Ajouter un équipement</button>
-      <button onclick="techOpenTicket()" class="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/10 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-white/15"><i class="ph-bold ph-wrench text-base"></i>Nouvelle intervention</button></div>
+      <button onclick="techOpenTicket()" class="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/10 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-white/15"><i class="ph-bold ph-wrench text-base"></i>Nouvelle intervention</button>
+      <button onclick="techOpenMaintenance()" class="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/10 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-white/15"><i class="ph-bold ph-calendar-plus text-base"></i>Planifier une maintenance</button></div>
     """ if can_manage else ""
     page = r'''
 <div id="view-service-tech" class="space-y-5 text-slate-800">
@@ -232,19 +343,23 @@ def render_html(user: Optional[Dict[str, Any]] = None) -> str:
  </header>
  <section class="grid grid-cols-2 gap-3 xl:grid-cols-4"><article class="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><span class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Équipements</span><i class="ph-bold ph-wrench text-xl text-brand-neon"></i></div><div id="techKpiEquipment" class="mt-2 text-2xl font-extrabold text-slate-800 dark:text-white">—</div></article><article class="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><span class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Interventions ouvertes</span><i class="ph-bold ph-warning-circle text-xl text-amber-500"></i></div><div id="techKpiOpen" class="mt-2 text-2xl font-extrabold text-slate-800 dark:text-white">—</div></article><article class="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><span class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Urgentes</span><i class="ph-bold ph-siren text-xl text-rose-500"></i></div><div id="techKpiUrgent" class="mt-2 text-2xl font-extrabold text-slate-800 dark:text-white">—</div></article><article class="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/5 dark:bg-[#121c15]"><div class="flex items-center justify-between"><span class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Maintenances en retard</span><i class="ph-bold ph-calendar-x text-xl text-sky-500"></i></div><div id="techKpiOverdue" class="mt-2 text-2xl font-extrabold text-slate-800 dark:text-white">—</div></article></section>
  <section class="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/5 dark:bg-[#121c15] sm:p-5"><div class="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 class="font-extrabold text-slate-800 dark:text-white">Parc des équipements</h2><p class="text-xs text-slate-500">Suivi de l’état et des prochaines maintenances.</p></div><input id="techEquipmentSearch" oninput="techRenderEquipment()" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800 outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white" placeholder="Rechercher un équipement"></div><div class="overflow-x-auto"><table class="w-full min-w-[850px] text-left text-sm"><thead class="bg-slate-100 text-[10px] uppercase tracking-wide text-slate-600 dark:bg-black/20 dark:text-slate-400"><tr><th class="rounded-l-xl px-3 py-3">Équipement</th><th class="px-3 py-3">Catégorie</th><th class="px-3 py-3">Localisation</th><th class="px-3 py-3">État</th><th class="px-3 py-3">Prochaine maintenance</th><th class="rounded-r-xl px-3 py-3 text-right">Actions</th></tr></thead><tbody id="techEquipmentRows"><tr><td colspan="6" class="p-8 text-center text-slate-400">Chargement…</td></tr></tbody></table></div></section>
+ <section class="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/5 dark:bg-[#121c15] sm:p-5"><div class="mb-4"><h2 class="font-extrabold text-slate-800 dark:text-white">Planning des maintenances</h2><p class="text-xs text-slate-500">Créneaux, sites, ingénieurs affectés et rapports de maintenance.</p></div><div class="overflow-x-auto"><table class="w-full min-w-[1100px] text-left text-sm"><thead class="bg-slate-100 text-[10px] uppercase tracking-wide text-slate-600 dark:bg-black/20 dark:text-slate-400"><tr><th class="rounded-l-xl px-3 py-3">Date / horaire</th><th class="px-3 py-3">Site</th><th class="px-3 py-3">Équipement</th><th class="px-3 py-3">Type</th><th class="px-3 py-3">Ingénieurs affectés</th><th class="px-3 py-3">Rapport / notes</th><th class="rounded-r-xl px-3 py-3 text-right">Actions</th></tr></thead><tbody id="techMaintenanceRows"><tr><td colspan="7" class="p-8 text-center text-slate-400">Chargement…</td></tr></tbody></table></div></section>
  <section class="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/5 dark:bg-[#121c15] sm:p-5"><div class="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 class="font-extrabold text-slate-800 dark:text-white">Incidents et interventions</h2><p class="text-xs text-slate-500">Demandes correctives, préventives et incidents signalés.</p></div><select id="techTicketFilter" onchange="techRenderTickets()" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800 dark:border-white/10 dark:bg-black/30 dark:text-white"><option value="">Tous les statuts</option><option>Nouveau</option><option>Planifié</option><option>En cours</option><option>En attente</option><option>Terminé</option><option>Annulé</option></select></div><div class="overflow-x-auto"><table class="w-full min-w-[900px] text-left text-sm"><thead class="bg-slate-100 text-[10px] uppercase tracking-wide text-slate-600 dark:bg-black/20 dark:text-slate-400"><tr><th class="rounded-l-xl px-3 py-3">Demande</th><th class="px-3 py-3">Équipement</th><th class="px-3 py-3">Priorité</th><th class="px-3 py-3">Responsable</th><th class="px-3 py-3">Échéance</th><th class="px-3 py-3">Statut</th><th class="rounded-r-xl px-3 py-3 text-right">Actions</th></tr></thead><tbody id="techTicketRows"><tr><td colspan="7" class="p-8 text-center text-slate-400">Chargement…</td></tr></tbody></table></div></section>
  <div id="techModal" class="fixed inset-0 z-[100000] hidden items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm"><div class="max-h-[94vh] w-full max-w-2xl overflow-y-auto rounded-3xl bg-white shadow-2xl dark:bg-[#121c15]"><div class="sticky top-0 z-10 flex items-center justify-between bg-gradient-to-r from-[#101b13] to-[#183b20] px-5 py-4 text-white"><div><div id="techModalEyebrow" class="text-[10px] font-bold uppercase tracking-widest text-brand-neon">Service Technique</div><h3 id="techModalTitle" class="text-lg font-black">Formulaire</h3></div><button onclick="techCloseModal()" class="grid h-9 w-9 place-items-center rounded-xl bg-white/10 hover:bg-white/20" aria-label="Fermer"><i class="ph-bold ph-x"></i></button></div><form id="techForm" onsubmit="techSave(event)" class="space-y-4 p-5"><input id="techEntityType" type="hidden"><input id="techEntityId" type="hidden"><div id="techFormFields" class="grid gap-3 sm:grid-cols-2"></div><div class="flex justify-end gap-2 border-t border-slate-100 pt-4 dark:border-white/10"><button type="button" onclick="techCloseModal()" class="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold text-slate-700 dark:border-white/10 dark:text-slate-200">Annuler</button><button class="rounded-2xl bg-brand-neon px-5 py-2.5 text-xs font-bold text-black shadow-md shadow-brand-neon/20 transition hover:bg-brand-neonDark"><i class="ph-bold ph-floppy-disk mr-1"></i>Enregistrer</button></div></form></div></div>
  <div id="techToast" class="fixed bottom-5 right-5 z-[100001] hidden max-w-sm rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-xl"></div>
  <script>
- (()=>{const $=id=>document.getElementById(id);let state={equipment:[],tickets:[],can_manage:false};const canManage=__CAN_MANAGE__;const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const notify=(message,bad=false)=>{const el=$('techToast');el.textContent=message;el.className='fixed bottom-5 right-5 z-[100001] max-w-sm rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-xl '+(bad?'bg-rose-700':'bg-slate-900');el.classList.remove('hidden');setTimeout(()=>el.classList.add('hidden'),3500)};const api=async(path,options={})=>{const response=await fetch('/api/service-technique'+path,{credentials:'same-origin',headers:{'Content-Type':'application/json',...(options.headers||{})},...options});const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.detail||'Une erreur est survenue.');return body};
- window.techRefresh=async()=>{try{state=await api('/data');$('techKpiEquipment').textContent=state.kpi.equipment;$('techKpiOpen').textContent=state.kpi.open;$('techKpiUrgent').textContent=state.kpi.urgent;$('techKpiOverdue').textContent=state.kpi.overdue;techRenderEquipment();techRenderTickets()}catch(e){notify(e.message,true)}};
+ (()=>{const $=id=>document.getElementById(id);let state={equipment:[],tickets:[],maintenances:[],can_manage:false};const canManage=__CAN_MANAGE__;const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const notify=(message,bad=false)=>{const el=$('techToast');el.textContent=message;el.className='fixed bottom-5 right-5 z-[100001] max-w-sm rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-xl '+(bad?'bg-rose-700':'bg-slate-900');el.classList.remove('hidden');setTimeout(()=>el.classList.add('hidden'),3500)};const api=async(path,options={})=>{const response=await fetch('/api/service-technique'+path,{credentials:'same-origin',headers:{'Content-Type':'application/json',...(options.headers||{})},...options});const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.detail||'Une erreur est survenue.');return body};
+ window.techRefresh=async()=>{try{state=await api('/data');$('techKpiEquipment').textContent=state.kpi.equipment;$('techKpiOpen').textContent=state.kpi.open;$('techKpiUrgent').textContent=state.kpi.urgent;$('techKpiOverdue').textContent=state.kpi.overdue;techRenderEquipment();techRenderMaintenances();techRenderTickets()}catch(e){notify(e.message,true)}};
  window.techRenderEquipment=()=>{const search=($('techEquipmentSearch')?.value||'').trim().toLowerCase();const rows=state.equipment.filter(x=>[x.code,x.designation,x.categorie,x.localisation,x.numero_serie].join(' ').toLowerCase().includes(search));$('techEquipmentRows').innerHTML=rows.length?rows.map(x=>`<tr class="border-b border-slate-100 text-slate-700 transition hover:bg-lime-50/50 dark:border-white/5 dark:text-slate-200 dark:hover:bg-white/5"><td class="px-3 py-3"><div class="font-bold">${esc(x.designation)}</div><div class="text-xs text-slate-500">${esc(x.code||x.numero_serie||'Sans référence')} · ${esc(x.marque_modele||'')}</div></td><td class="px-3 py-3">${esc(x.categorie||'—')}</td><td class="px-3 py-3">${esc(x.localisation||'—')}</td><td class="px-3 py-3"><span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700 dark:bg-white/10 dark:text-slate-200">${esc(x.statut)}</span></td><td class="px-3 py-3">${esc(x.prochaine_maintenance||'—')}</td><td class="px-3 py-3 text-right">${canManage?`<button onclick="techOpenEquipment(${x.id})" class="rounded-lg p-2 text-sky-700 hover:bg-sky-50 dark:text-sky-300 dark:hover:bg-white/5" title="Modifier"><i class="ph-bold ph-pencil-simple"></i></button><button onclick="techDelete('equipment',${x.id})" class="rounded-lg p-2 text-rose-700 hover:bg-rose-50 dark:text-rose-300 dark:hover:bg-white/5" title="Supprimer"><i class="ph-bold ph-trash"></i></button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="6" class="p-8 text-center text-slate-400">Aucun équipement trouvé.</td></tr>'};
+ window.techRenderMaintenances=()=>{$('techMaintenanceRows').innerHTML=state.maintenances.length?state.maintenances.map(x=>`<tr class="border-b border-slate-100 text-slate-700 transition hover:bg-lime-50/50 dark:border-white/5 dark:text-slate-200 dark:hover:bg-white/5"><td class="px-3 py-3"><div class="font-bold">${esc(x.maintenance_date)}</div><div class="text-xs text-slate-500">${esc(String(x.heure_debut||'').slice(0,5))} – ${esc(String(x.heure_fin||'').slice(0,5))}</div></td><td class="px-3 py-3"><div class="font-semibold">${esc(x.site_designation)}</div><div class="text-xs text-slate-500">${esc(x.site||'')}</div></td><td class="px-3 py-3"><div class="font-semibold">${esc(x.equipment_name||'')}</div><div class="text-xs text-slate-500">${esc(x.equipment_designation)}</div></td><td class="px-3 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-bold ${x.type==='Préventive'?'bg-emerald-50 text-emerald-800 dark:bg-emerald-400/10 dark:text-emerald-300':'bg-amber-50 text-amber-800 dark:bg-amber-400/10 dark:text-amber-300'}">${esc(x.type)}</span></td><td class="px-3 py-3 text-xs"><div>${esc(x.ingenieur_interne||'Interne : —')}</div><div class="mt-1 text-slate-500">${esc(x.ingenieur_externe||'Externe : —')}</div></td><td class="px-3 py-3 text-xs"><div>${x.has_report?`<a class="font-bold text-sky-700 hover:underline dark:text-sky-300" href="/api/service-technique/maintenance/${x.id}/report" target="_blank">${esc(x.rapport_nom||'Rapport')}</a>`:'<span class="text-slate-400">Rapport non ajouté</span>'}</div><div class="mt-1 max-w-48 truncate text-slate-500" title="${esc(x.notes||'')}">${esc(x.notes||'')}</div></td><td class="px-3 py-3 text-right"><button onclick="techOpenMaintenance(${x.id})" class="rounded-lg p-2 text-sky-700 hover:bg-sky-50 dark:text-sky-300 dark:hover:bg-white/5" title="Modifier"><i class="ph-bold ph-pencil-simple"></i></button>${canManage?`<label class="inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-white/5" title="Ajouter ou remplacer le rapport"><i class="ph-bold ph-upload-simple"></i>Rapport<input type="file" class="hidden" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" onchange="techSubmitReport(event,${x.id})"></label>`:''}</td></tr>`).join(''):'<tr><td colspan="7" class="p-8 text-center text-slate-400">Aucune maintenance planifiée.</td></tr>'};
  window.techRenderTickets=()=>{const filter=$('techTicketFilter')?.value||'';const rows=state.tickets.filter(x=>!filter||x.statut===filter);$('techTicketRows').innerHTML=rows.length?rows.map(x=>`<tr class="border-b border-slate-100 text-slate-700 transition hover:bg-lime-50/50 dark:border-white/5 dark:text-slate-200 dark:hover:bg-white/5"><td class="px-3 py-3"><div class="font-bold">${esc(x.titre)}</div><div class="text-xs text-slate-500">${esc(x.type)} · ${esc(x.demandeur||'Demandeur non renseigné')}</div></td><td class="px-3 py-3">${esc(x.equipment_name||'—')}</td><td class="px-3 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-bold ${x.priorite==='Urgente'?'bg-rose-100 text-rose-800 dark:bg-rose-400/10 dark:text-rose-300':x.priorite==='Haute'?'bg-amber-100 text-amber-800 dark:bg-amber-400/10 dark:text-amber-300':'bg-slate-100 text-slate-700 dark:bg-white/10 dark:text-slate-300'}">${esc(x.priorite)}</span></td><td class="px-3 py-3">${esc(x.responsable||'—')}</td><td class="px-3 py-3">${esc(x.date_echeance||'—')}</td><td class="px-3 py-3"><span class="rounded-full bg-sky-50 px-2.5 py-1 text-xs font-bold text-sky-800 dark:bg-sky-400/10 dark:text-sky-300">${esc(x.statut)}</span></td><td class="px-3 py-3 text-right">${canManage?`<button onclick="techOpenTicket(${x.id})" class="rounded-lg p-2 text-sky-700 hover:bg-sky-50 dark:text-sky-300 dark:hover:bg-white/5" title="Modifier"><i class="ph-bold ph-pencil-simple"></i></button><button onclick="techDelete('ticket',${x.id})" class="rounded-lg p-2 text-rose-700 hover:bg-rose-50 dark:text-rose-300 dark:hover:bg-white/5" title="Supprimer"><i class="ph-bold ph-trash"></i></button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="7" class="p-8 text-center text-slate-400">Aucune intervention pour ce filtre.</td></tr>'};
  const field=(name,label,type='text',value='',extra='')=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<input name="${name}" type="${type}" value="${esc(value)}" ${extra} class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium text-slate-800 outline-none focus:border-brand-neon focus:bg-white dark:border-white/10 dark:bg-black/30 dark:text-white"></label>`;const select=(name,label,items,value)=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<select name="${name}" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium text-slate-800 outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white">${items.map(x=>`<option ${x===value?'selected':''}>${esc(x)}</option>`).join('')}</select></label>`;
  window.techOpenEquipment=(id)=>{if(!canManage)return;const x=state.equipment.find(row=>row.id===id)||{};$('techEntityType').value='equipment';$('techEntityId').value=x.id||'';$('techModalEyebrow').textContent='Parc technique';$('techModalTitle').textContent=x.id?'Modifier un équipement':'Ajouter un équipement';const passwordHint=x.password_configured?'Mot de passe enregistré · laisser vide pour le conserver':'Mot de passe de connexion';$('techFormFields').innerHTML=field('designation','Désignation *','text',x.designation||'','required')+field('code','Code inventaire','text',x.code||'')+field('categorie','Catégorie','text',x.categorie||'')+field('marque_modele','Marque / modèle','text',x.marque_modele||'')+field('numero_serie','Numéro de série','text',x.numero_serie||'')+field('adresse_ip','Adresse IP','text',x.adresse_ip||'','placeholder="192.168.1.10"')+field('utilisateur','Utilisateur','text',x.utilisateur||'')+field('mot_de_passe','Mot de passe','password','',`autocomplete="new-password" placeholder="${passwordHint}"`)+field('aet','AET','text',x.aet||'','placeholder="AE Title"')+field('port','Port','number',x.port||'','min="1" max="65535"')+field('localisation','Localisation / service','text',x.localisation||'')+field('fournisseur','Fournisseur','text',x.fournisseur||'')+field('date_acquisition','Date d’acquisition','date',x.date_acquisition||'')+select('statut','État',['En service','En maintenance','Hors service','Réformé'],x.statut||'En service')+field('derniere_maintenance','Dernière maintenance','date',x.derniere_maintenance||'')+field('prochaine_maintenance','Prochaine maintenance','date',x.prochaine_maintenance||'')+`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300 sm:col-span-2">Notes<textarea name="notes" rows="2" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white">${esc(x.notes||'')}</textarea></label>`;techShowModal()};
+ window.techOpenMaintenance=(id)=>{if(!canManage)return;const x=state.maintenances.find(row=>row.id===id)||{};$('techEntityType').value='maintenance';$('techEntityId').value=x.id||'';$('techModalEyebrow').textContent='Maintenance préventive et curative';$('techModalTitle').textContent=x.id?'Modifier la maintenance':'Planifier une maintenance';$('techFormFields').innerHTML=field('site_designation','Désignation du site *','text',x.site_designation||'','required')+field('site','DZ Site','text',x.site||'')+field('equipment_name','Nom de l’équipement','text',x.equipment_name||'')+field('equipment_designation','Désignation de l’équipement *','text',x.equipment_designation||'','required')+select('type','Type de maintenance',['Préventive','Curative'],x.type||'Préventive')+field('maintenance_date','Date de la maintenance *','date',x.maintenance_date||'','required')+field('heure_debut','Heure de début *','time',String(x.heure_debut||'').slice(0,5),'required')+field('heure_fin','Heure de fin *','time',String(x.heure_fin||'').slice(0,5),'required')+field('ingenieur_interne','Ingénieur interne affecté','text',x.ingenieur_interne||'')+field('ingenieur_externe','Ingénieur externe affecté','text',x.ingenieur_externe||'')+`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300 sm:col-span-2">Notes<textarea name="notes" rows="3" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white">${esc(x.notes||'')}</textarea></label>`;techShowModal()};
  window.techOpenTicket=(id)=>{if(!canManage)return;const x=state.tickets.find(row=>row.id===id)||{};const equipmentOptions=['<option value="">Aucun équipement associé</option>',...state.equipment.map(e=>`<option value="${e.id}" ${Number(x.equipment_id)===Number(e.id)?'selected':''}>${esc(e.designation)}</option>`)].join('');$('techEntityType').value='ticket';$('techEntityId').value=x.id||'';$('techModalEyebrow').textContent='Incidents et maintenance';$('techModalTitle').textContent=x.id?'Modifier une demande':'Nouvelle intervention';$('techFormFields').innerHTML=select('type','Type de demande',['Incident','Maintenance préventive','Maintenance corrective','Demande'],x.type||'Incident')+select('priorite','Priorité',['Basse','Normale','Haute','Urgente'],x.priorite||'Normale')+field('titre','Titre *','text',x.titre||'','required')+`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">Équipement<select name="equipment_id" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-white/10 dark:bg-black/30 dark:text-white">${equipmentOptions}</select></label>`+field('demandeur','Demandeur','text',x.demandeur||'')+field('responsable','Responsable / technicien','text',x.responsable||'')+field('date_echeance','Date prévue','date',x.date_echeance||'')+select('statut','Statut',['Nouveau','Planifié','En cours','En attente','Terminé','Annulé'],x.statut||'Nouveau')+`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300 sm:col-span-2">Description<textarea name="description" rows="3" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white">${esc(x.description||'')}</textarea></label>`;techShowModal()};
  function techShowModal(){$('techModal').classList.remove('hidden');$('techModal').classList.add('flex');document.body.style.overflow='hidden'}window.techCloseModal=()=>{$('techModal').classList.add('hidden');$('techModal').classList.remove('flex');document.body.style.overflow=''};
- window.techSave=async event=>{event.preventDefault();const form=event.currentTarget,type=$('techEntityType').value,id=$('techEntityId').value,payload=Object.fromEntries(new FormData(form).entries());if(id)payload.id=Number(id);try{await api(type==='equipment'?'/equipment/save':'/tickets/save',{method:'POST',body:JSON.stringify(payload)});techCloseModal();notify(type==='equipment'?'Équipement enregistré.':'Intervention enregistrée.');await techRefresh()}catch(e){notify(e.message,true)}};
+ window.techSave=async event=>{event.preventDefault();const form=event.currentTarget,type=$('techEntityType').value,id=$('techEntityId').value,payload=Object.fromEntries(new FormData(form).entries());if(id)payload.id=Number(id);const endpoint=type==='equipment'?'/equipment/save':type==='maintenance'?'/maintenance/save':'/tickets/save';try{await api(endpoint,{method:'POST',body:JSON.stringify(payload)});techCloseModal();notify(type==='equipment'?'Équipement enregistré.':type==='maintenance'?'Maintenance planifiée.':'Intervention enregistrée.');await techRefresh()}catch(e){notify(e.message,true)}};
+ window.techSubmitReport=async(event,id)=>{const file=event.target.files?.[0];if(!file)return;const body=new FormData();body.append('file',file);try{const response=await fetch(`/api/service-technique/maintenance/${id}/report`,{method:'POST',credentials:'same-origin',body});const result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.detail||'Le rapport n’a pas pu être envoyé.');notify(`Rapport « ${result.name} » enregistré.`);await techRefresh()}catch(e){notify(e.message,true)}finally{event.target.value=''}};
  window.techDelete=async(type,id)=>{if(!canManage||!confirm(type==='equipment'?'Supprimer cet équipement ? Les interventions associées resteront dans le registre.':'Supprimer cette demande d’intervention ?'))return;try{await api(type==='equipment'?'/equipment/delete':'/tickets/delete',{method:'POST',body:JSON.stringify({id})});notify('Suppression effectuée.');await techRefresh()}catch(e){notify(e.message,true)}};
  $('techModal').addEventListener('click',e=>{if(e.target===$('techModal'))techCloseModal()});window.techRefresh()})();
  </script>
