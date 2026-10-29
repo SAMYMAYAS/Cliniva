@@ -5,6 +5,7 @@ import base64
 from html import escape
 from pathlib import Path
 import sys
+import unicodedata
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
@@ -66,6 +67,20 @@ def _time_value(data: Dict[str, Any], key: str, label: str) -> Optional[str]:
         raise HTTPException(status_code=400, detail=f"L'heure {label} est invalide.") from exc
 
 
+def _is_technical_assignee(staff_type: str) -> bool:
+    normalized = " ".join(
+        "".join(char for char in unicodedata.normalize("NFKD", staff_type.casefold())
+                if not unicodedata.combining(char)).split()
+    )
+    return (
+        "ingenieur" in normalized
+        or "directeur technique" in normalized
+        or "responsable resultat" in normalized
+        or "responsable des resultats" in normalized
+        or "responsable de resultat" in normalized
+    )
+
+
 def _protect_equipment_password(password: str) -> str:
     """Chiffre le mot de passe avec DPAPI Windows avant son stockage."""
     if sys.platform != "win32":
@@ -122,8 +137,7 @@ def service_tech_data(request: Request):
             {"value": f"{row['prenom']} {row['nom']} — {row['type_personnel']}",
              "label": f"{row['prenom']} {row['nom']} — {row['type_personnel']}"}
             for row in staff
-            if "ingénieur" in (row.get("type_personnel") or "").casefold()
-            or "ingenieur" in (row.get("type_personnel") or "").casefold()
+            if _is_technical_assignee(row.get("type_personnel") or "")
         ]
     today = date.today()
     overdue = sum(1 for item in equipment if item.get("prochaine_maintenance") and item["prochaine_maintenance"] < today and item["statut"] != "Réformé")
