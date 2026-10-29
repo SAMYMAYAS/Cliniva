@@ -502,6 +502,39 @@ async def service_tech_ticket_save(request: Request):
     return {"success": True, "id": saved_id}
 
 
+@service_tech_router.post("/report-failure")
+async def service_tech_report_failure(request: Request):
+    """Permet à tout utilisateur connecté de signaler une panne au service technique."""
+    user = get_current_user(request)
+    data = await request.json()
+    subject = _text(data, "titre", "objet de la panne", True)
+    location = _text(data, "lieu", "lieu", True)
+    details = _text(data, "description", "description", True)
+    equipment = _text(data, "equipement", "équipement")
+    priority = _text(data, "priorite", "priorité") or "Normale"
+    if priority not in {"Normale", "Haute", "Urgente"}:
+        raise HTTPException(status_code=400, detail="Le niveau de priorité est invalide.")
+    if len(subject) > 180 or len(location) > 180 or len(equipment) > 180 or len(details) > 5000:
+        raise HTTPException(status_code=400, detail="La déclaration dépasse la longueur autorisée.")
+
+    description_parts = [f"Lieu : {location}"]
+    if equipment:
+        description_parts.append(f"Équipement : {equipment}")
+    description_parts.append(details)
+    requester = f"{user['prenom']} {user['nom']} (@{user['login']})".strip()
+    title = f"Panne — {subject}"
+    with get_db_cursor() as cursor:
+        cursor.execute("""INSERT INTO service_tech_tickets
+            (equipment_id, type, titre, description, priorite, statut, demandeur,
+             responsable, date_echeance, heure_echeance, created_by)
+            VALUES (NULL, 'Incident', %s, %s, %s, 'Nouveau', %s, '', NULL, NULL, %s)
+            RETURNING id""",
+            (title, "\n".join(description_parts), priority, requester, user["id"]))
+        ticket_id = cursor.fetchone()["id"]
+    track_action(request, "SERVICE_TECH_FAILURE_REPORTED", f"Panne signalée #{ticket_id} : {subject}")
+    return {"success": True, "id": ticket_id}
+
+
 @service_tech_router.post("/tickets/delete")
 async def service_tech_ticket_delete(request: Request):
     user = get_current_user(request)
