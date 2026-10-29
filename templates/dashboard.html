@@ -439,10 +439,12 @@
                         </button>
                     </div>
 
-                    <button class="w-10 h-10 rounded-full bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 flex items-center justify-center text-slate-600 dark:text-slate-300 shadow-sm relative">
+                    {% if user.role == 'Administrateur' or user.permissions.service_tech_view or user.permissions.service_tech_manage %}
+                    <button id="clinivaAlertBell" type="button" onclick="openClinivaAlerts()" aria-label="Ouvrir les alertes Cliniva" title="Alertes Cliniva" class="w-10 h-10 rounded-full bg-white dark:bg-[#121c15] border border-slate-200 dark:border-white/10 flex items-center justify-center text-slate-600 dark:text-slate-300 shadow-sm relative transition hover:border-emerald-400 hover:text-emerald-700">
                         <i class="ph ph-bell text-xl"></i>
-                        <span class="absolute top-2.5 right-2.5 w-2 h-2 bg-red-500 rounded-full"></span>
+                        <span id="clinivaAlertBadge" class="hidden absolute -top-1 -right-1 min-w-5 h-5 rounded-full bg-rose-600 px-1 text-[10px] font-black leading-5 text-white ring-2 ring-white dark:ring-[#121c15]"></span>
                     </button>
+                    {% endif %}
 
                     <div class="flex items-center gap-3 pl-2">
                         <img class="w-10 h-10 rounded-full object-cover ring-2 ring-brand-neon/30" src="{{ user.avatar }}" alt="{{ user.prenom }} {{ user.nom }}">
@@ -786,6 +788,16 @@
         </main>
     </div>
 
+    <div id="clinivaAlertsModal" class="fixed inset-0 z-[2147483644] hidden items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="clinivaAlertsTitle" onclick="if(event.target===this)closeClinivaAlerts()">
+        <div class="w-full max-w-xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-white/10 dark:bg-[#121c15]">
+            <div class="flex items-center justify-between gap-3 bg-gradient-to-r from-emerald-800 to-emerald-600 px-5 py-4 text-white">
+                <div class="flex items-center gap-3"><span class="grid h-10 w-10 place-items-center rounded-xl bg-white/15"><i class="ph-bold ph-bell-ringing text-xl"></i></span><div><p class="text-[10px] font-extrabold uppercase tracking-[.18em] text-emerald-100">Centre de notifications</p><h2 id="clinivaAlertsTitle" class="text-lg font-extrabold">Alertes Cliniva</h2></div></div>
+                <div class="flex items-center gap-2"><button type="button" onclick="markAllClinivaAlertsRead()" class="rounded-lg bg-white/15 px-3 py-2 text-xs font-bold transition hover:bg-white/25">Tout marquer lu</button><button type="button" onclick="closeClinivaAlerts()" class="grid h-9 w-9 place-items-center rounded-xl bg-white/10 hover:bg-white/20" aria-label="Fermer"><i class="ph-bold ph-x"></i></button></div>
+            </div>
+            <div id="clinivaAlertsList" class="max-h-[65vh] space-y-2 overflow-y-auto p-4"><p class="py-8 text-center text-sm text-slate-500">Chargement des alertes…</p></div>
+        </div>
+    </div>
+
     <div id="faultReportModal" class="fixed inset-0 z-[2147483645] hidden items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="faultReportTitle" onclick="if(event.target===this)closeFaultReportModal()">
         <div class="w-full max-w-2xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-white/10 dark:bg-[#121c15]">
             <div class="relative overflow-hidden bg-gradient-to-br from-[#101b13] via-[#183b20] to-[#24653a] px-6 py-5 text-white sm:px-8">
@@ -905,7 +917,16 @@
                 if (!response.ok) throw new Error(result.detail || 'La déclaration n’a pas pu être envoyée.');
                 form.reset();
                 window.closeFaultReportModal();
-                window.showToast?.(`Déclaration de panne enregistrée · dossier #${result.id}.`, 'success');
+                const emailMessage = result.courriels === 'envoye'
+                    ? ' Courriel envoyé aux ingénieurs.'
+                    : result.courriels === 'non_configure'
+                        ? ' Alerte Cliniva créée; le courriel attend la configuration SMTP du serveur.'
+                        : result.courriels === 'aucun_destinataire'
+                            ? ' Aucun courriel d’ingénieur n’est renseigné dans le staff.'
+                            : result.courriels === 'echec'
+                                ? ' Alerte Cliniva créée, mais l’envoi du courriel a échoué.' : '';
+                window.showToast?.(`Déclaration enregistrée · dossier #${result.id}. ${result.alertes || 0} alerte(s) Cliniva créée(s).${emailMessage}`, 'success', 6500);
+                window.refreshClinivaAlerts?.(true);
             } catch (error) {
                 window.showToast?.(error.message || 'Erreur pendant la déclaration de panne.', 'error');
             } finally {
@@ -918,6 +939,60 @@
             const modal = document.getElementById('faultReportModal');
             if (event.key === 'Escape' && modal && !modal.classList.contains('hidden')) window.closeFaultReportModal();
         });
+
+        let clinivaAlertIds = new Set();
+        let clinivaAlertInitialized = false;
+        const escapeClinivaAlert = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+        window.refreshClinivaAlerts = async function(notifyNew = false) {
+            if (!document.getElementById('clinivaAlertBell')) return;
+            try {
+                const response = await fetch('/api/service-technique/notifications', {credentials:'same-origin', cache:'no-store'});
+                if (!response.ok) return;
+                const data = await response.json();
+                const badge = document.getElementById('clinivaAlertBadge');
+                const count = Number(data.unread_count || 0);
+                if (badge) { badge.textContent = count > 99 ? '99+' : String(count); badge.classList.toggle('hidden', count < 1); }
+                const alerts = data.notifications || [];
+                if (notifyNew && clinivaAlertInitialized) {
+                    for (const alert of alerts) {
+                        if (!clinivaAlertIds.has(Number(alert.id)) && !alert.read_at) window.showToast?.(alert.titre || 'Nouvelle alerte Cliniva', 'warning', 6000);
+                    }
+                }
+                clinivaAlertIds = new Set(alerts.map(alert => Number(alert.id)));
+                clinivaAlertInitialized = true;
+                const list = document.getElementById('clinivaAlertsList');
+                if (list) list.innerHTML = alerts.length ? alerts.map(alert => {
+                    const unread = !alert.read_at;
+                    const created = alert.created_at ? new Date(alert.created_at).toLocaleString('fr-FR') : '';
+                    return `<button type="button" onclick="openClinivaAlertTicket(${Number(alert.id)},${Number(alert.ticket_id || 0)})" class="block w-full rounded-2xl border ${unread ? 'border-emerald-200 bg-emerald-50/80 dark:border-emerald-500/20 dark:bg-emerald-500/5' : 'border-slate-200 bg-white dark:border-white/10 dark:bg-white/[.02]'} p-4 text-left transition hover:border-emerald-400"><span class="flex items-start gap-3"><span class="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl ${unread ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500 dark:bg-white/10'}"><i class="ph-bold ph-warning-octagon"></i></span><span class="min-w-0 flex-1"><span class="flex items-center justify-between gap-2"><b class="text-sm text-slate-800 dark:text-white">${escapeClinivaAlert(alert.titre)}</b>${unread ? '<i class="h-2 w-2 shrink-0 rounded-full bg-emerald-500"></i>' : ''}</span><span class="mt-1 block text-xs text-slate-600 dark:text-slate-300">${escapeClinivaAlert(alert.message)}</span><small class="mt-2 block text-[10px] font-semibold text-slate-400">${escapeClinivaAlert(created)} · Incident #${Number(alert.ticket_id || 0)}</small></span></span></button>`;
+                }).join('') : '<div class="py-12 text-center"><i class="ph ph-bell-slash text-4xl text-slate-300"></i><p class="mt-3 text-sm font-semibold text-slate-500">Aucune alerte technique pour le moment.</p></div>';
+            } catch (error) { console.warn('Alertes Cliniva indisponibles.', error); }
+        };
+        window.openClinivaAlerts = async function() {
+            const modal = document.getElementById('clinivaAlertsModal');
+            if (!modal) return;
+            modal.classList.remove('hidden'); modal.classList.add('flex'); document.body.classList.add('overflow-hidden');
+            await window.refreshClinivaAlerts();
+        };
+        window.closeClinivaAlerts = function() {
+            const modal = document.getElementById('clinivaAlertsModal');
+            if (!modal) return;
+            modal.classList.add('hidden'); modal.classList.remove('flex'); document.body.classList.remove('overflow-hidden');
+        };
+        window.openClinivaAlertTicket = async function(notificationId, ticketId) {
+            await fetch('/api/service-technique/notifications/read', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:notificationId})});
+            await window.refreshClinivaAlerts();
+            window.closeClinivaAlerts();
+            if (typeof window.loadModule === 'function') window.loadModule('gestion_service_technique');
+        };
+        window.markAllClinivaAlertsRead = async function() {
+            await fetch('/api/service-technique/notifications/read', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:'all'})});
+            await window.refreshClinivaAlerts();
+        };
+        if (document.getElementById('clinivaAlertBell')) {
+            window.refreshClinivaAlerts();
+            window.setInterval(() => window.refreshClinivaAlerts(true), 10000);
+        }
 
         window.toggleSidebarCollapse = function(forceCollapsed) {
             const sidebar = document.getElementById('sidebar');

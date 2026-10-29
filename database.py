@@ -675,6 +675,18 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         ON service_tech_tickets (statut, priorite, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_service_tech_tickets_equipment
         ON service_tech_tickets (equipment_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS cliniva_notifications (
+        id SERIAL PRIMARY KEY,
+        user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        categorie TEXT NOT NULL DEFAULT 'service_technique',
+        titre TEXT NOT NULL,
+        message TEXT NOT NULL DEFAULT '',
+        ticket_id INT REFERENCES service_tech_tickets(id) ON DELETE CASCADE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        read_at TIMESTAMP WITH TIME ZONE
+    );
+    CREATE INDEX IF NOT EXISTS idx_cliniva_notifications_user_unread
+        ON cliniva_notifications (user_id, created_at DESC) WHERE read_at IS NULL;
     CREATE TABLE IF NOT EXISTS service_tech_maintenance (
         id SERIAL PRIMARY KEY,
         site_designation TEXT NOT NULL,

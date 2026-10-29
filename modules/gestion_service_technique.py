@@ -1,10 +1,16 @@
 """Inventaire, maintenance et demandes d'intervention du service technique."""
 
 from datetime import date
+import asyncio
 import base64
+from email.message import EmailMessage
 import json
 from html import escape
+import logging
+import os
 from pathlib import Path
+import smtplib
+import ssl
 import sys
 import unicodedata
 from typing import Any, Dict, Optional
@@ -16,6 +22,7 @@ from app.auth import get_current_user, track_action
 from database import DOCS_DIR, get_db_cursor
 
 service_tech_router = APIRouter(prefix="/api/service-technique", tags=["Service technique"])
+logger = logging.getLogger("ClinivaServiceTechnique")
 
 EQUIPMENT_STATUSES = {"En service", "En maintenance", "Hors service", "Réformé"}
 TICKET_TYPES = {
@@ -552,8 +559,119 @@ async def service_tech_report_failure(request: Request):
             RETURNING id""",
             (equipment_id, subject, details, priority, requester, user["id"], service, location, stopped_work))
         ticket_id = cursor.fetchone()["id"]
+        cursor.execute("""SELECT id, prenom, nom, role, permissions FROM users
+            WHERE status='Actif' ORDER BY id""")
+        technical_users = [
+            dict(row) for row in cursor.fetchall()
+            if row.get("role") == "Administrateur"
+            or bool((row.get("permissions") or {}).get("service_tech_view"))
+            or bool((row.get("permissions") or {}).get("service_tech_manage"))
+        ]
+        alert_title = f"Nouvelle panne · {subject}"
+        alert_message = f"{service} · {location} · priorité {priority}" + (" · arrêt du travail" if stopped_work else "")
+        for recipient in technical_users:
+            cursor.execute("""INSERT INTO cliniva_notifications
+                (user_id, categorie, titre, message, ticket_id)
+                VALUES (%s, 'service_technique', %s, %s, %s)""",
+                (recipient["id"], alert_title, alert_message, ticket_id))
+        cursor.execute("""SELECT email, type_personnel FROM clinic_staff
+            WHERE actif=TRUE AND COALESCE(email, '') <> ''""")
+        technical_emails = sorted({
+            str(row["email"]).strip() for row in cursor.fetchall()
+            if row.get("email") and _is_technical_assignee(str(row.get("type_personnel") or ""))
+        })
     track_action(request, "SERVICE_TECH_FAILURE_REPORTED", f"Panne signalée #{ticket_id} : {subject} — {service}")
-    return {"success": True, "id": ticket_id, "arret_travail": stopped_work}
+    email_status = "aucun_destinataire"
+    if technical_emails:
+        try:
+            email_status = await asyncio.to_thread(
+                _send_failure_email, technical_emails, ticket_id, subject, service,
+                location, priority, details, requester, stopped_work,
+            )
+        except Exception:
+            logger.exception("Échec de l'envoi du courriel pour la panne #%s", ticket_id)
+            email_status = "echec"
+    return {
+        "success": True, "id": ticket_id, "arret_travail": stopped_work,
+        "alertes": len(technical_users), "courriels": email_status,
+    }
+
+
+def _send_failure_email(recipients, ticket_id, subject, service, location, priority,
+                        details, requester, stopped_work):
+    """Envoie le courriel de panne si le serveur SMTP est configuré par variables d'environnement."""
+    host = os.getenv("CLINIVA_SMTP_HOST", "").strip()
+    sender = os.getenv("CLINIVA_SMTP_FROM", os.getenv("CLINIVA_SMTP_USER", "")).strip()
+    if not host or not sender:
+        logger.info("Courriel panne #%s non envoyé : configuration SMTP absente.", ticket_id)
+        return "non_configure"
+    try:
+        port = int(os.getenv("CLINIVA_SMTP_PORT", "587"))
+    except ValueError as exc:
+        raise RuntimeError("CLINIVA_SMTP_PORT doit être un numéro de port.") from exc
+    message = EmailMessage()
+    message["Subject"] = f"[Cliniva] Panne #{ticket_id} · {priority} · {subject}"
+    message["From"] = sender
+    message["To"] = ", ".join(recipients)
+    message.set_content(
+        f"Nouvelle déclaration de panne dans Cliniva\n\n"
+        f"Dossier : #{ticket_id}\nTitre : {subject}\nService : {service}\nLieu : {location}\n"
+        f"Priorité : {priority}\nArrêt du travail : {'Oui' if stopped_work else 'Non'}\n"
+        f"Déclaré par : {requester}\n\nDescription :\n{details}\n"
+    )
+    context = ssl.create_default_context()
+    if os.getenv("CLINIVA_SMTP_SSL", "").strip().lower() in {"1", "true", "oui"} or port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=12, context=context) as smtp:
+            user = os.getenv("CLINIVA_SMTP_USER", "").strip()
+            if user:
+                smtp.login(user, os.getenv("CLINIVA_SMTP_PASSWORD", ""))
+            smtp.send_message(message)
+    else:
+        with smtplib.SMTP(host, port, timeout=12) as smtp:
+            smtp.ehlo()
+            if os.getenv("CLINIVA_SMTP_STARTTLS", "true").strip().lower() not in {"0", "false", "non"}:
+                smtp.starttls(context=context)
+                smtp.ehlo()
+            user = os.getenv("CLINIVA_SMTP_USER", "").strip()
+            if user:
+                smtp.login(user, os.getenv("CLINIVA_SMTP_PASSWORD", ""))
+            smtp.send_message(message)
+    logger.info("Courriel de panne #%s envoyé à %d destinataire(s).", ticket_id, len(recipients))
+    return "envoye"
+
+
+@service_tech_router.get("/notifications")
+def service_tech_notifications(request: Request):
+    user = get_current_user(request)
+    if not (_allowed(user, "service_tech_view") or _allowed(user, "service_tech_manage")):
+        return {"unread_count": 0, "notifications": []}
+    with get_db_cursor() as cursor:
+        cursor.execute("""SELECT id, titre, message, ticket_id, created_at, read_at
+            FROM cliniva_notifications WHERE user_id=%s
+            ORDER BY created_at DESC LIMIT 30""", (user["id"],))
+        rows = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT COUNT(*) AS count FROM cliniva_notifications WHERE user_id=%s AND read_at IS NULL", (user["id"],))
+        unread_count = cursor.fetchone()["count"]
+    return {"unread_count": unread_count, "notifications": rows}
+
+
+@service_tech_router.post("/notifications/read")
+async def service_tech_notifications_read(request: Request):
+    user = get_current_user(request)
+    if not (_allowed(user, "service_tech_view") or _allowed(user, "service_tech_manage")):
+        raise HTTPException(status_code=403, detail="Vous n'avez pas l'autorisation nécessaire pour consulter ces alertes.")
+    data = await request.json()
+    notification_id = data.get("id")
+    with get_db_cursor() as cursor:
+        if notification_id in (None, "all"):
+            cursor.execute("UPDATE cliniva_notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=%s AND read_at IS NULL", (user["id"],))
+        else:
+            try:
+                notification_id = int(notification_id)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="Alerte invalide.") from exc
+            cursor.execute("UPDATE cliniva_notifications SET read_at=CURRENT_TIMESTAMP WHERE id=%s AND user_id=%s AND read_at IS NULL", (notification_id, user["id"]))
+    return {"success": True}
 
 
 @service_tech_router.post("/tickets/delete")
