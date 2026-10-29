@@ -144,8 +144,39 @@ class StaffManager:
             return [r["nom_service"] for r in rows]
 
     def get_available_specialites(self) -> List[str]:
-        """Retourne la liste exacte des spécialités médicales pour le staff."""
-        return SPECIALITES_MEDICALES
+        """Retourne les spécialités par défaut et celles ajoutées par le staff."""
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT nom FROM clinic_staff_specialties ORDER BY nom ASC")
+            custom = [row["nom"] for row in cursor.fetchall()]
+        return list(dict.fromkeys(SPECIALITES_MEDICALES + custom))
+
+    def get_available_types(self) -> List[str]:
+        """Retourne les fonctions par défaut et celles ajoutées par le staff."""
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT nom FROM clinic_staff_roles ORDER BY nom ASC")
+            custom = [row["nom"] for row in cursor.fetchall()]
+        return list(dict.fromkeys(TYPES_PERSONNEL + custom))
+
+    def add_option(self, kind: str, value: str) -> Dict[str, Any]:
+        """Ajoute une fonction ou une spécialité au catalogue persistant."""
+        value = str(value or "").strip()
+        if not value or len(value) > 100:
+            return {"success": False, "message": "Saisissez un intitulé de 1 à 100 caractères."}
+        catalogs = {
+            "role": ("clinic_staff_roles", TYPES_PERSONNEL),
+            "specialite": ("clinic_staff_specialties", SPECIALITES_MEDICALES),
+        }
+        if kind not in catalogs:
+            return {"success": False, "message": "Type d'option inconnu."}
+        table, defaults = catalogs[kind]
+        if any(value.casefold() == item.casefold() for item in defaults):
+            return {"success": False, "message": "Cette valeur existe déjà dans la liste."}
+        with get_db_cursor() as cursor:
+            cursor.execute(f"SELECT nom FROM {table} WHERE LOWER(nom)=LOWER(%s) LIMIT 1", (value,))
+            if cursor.fetchone():
+                return {"success": False, "message": "Cette valeur existe déjà dans la liste."}
+            cursor.execute(f"INSERT INTO {table} (nom) VALUES (%s) ON CONFLICT (nom) DO NOTHING", (value,))
+        return {"success": True, "value": value, "message": "Option ajoutée à la liste."}
 
     def save(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Crée ou met à jour un membre du staff."""
@@ -207,6 +238,7 @@ async def api_get_staff():
             "total_count": staff_manager.count(),
             "services": staff_manager.get_available_services(),
             "specialites": staff_manager.get_available_specialites(),
+            "types_personnel": staff_manager.get_available_types(),
         }
     except Exception as exc:
         logger.error("Erreur API Staff: %s", exc, exc_info=True)
@@ -216,6 +248,11 @@ async def api_get_staff():
 @staff_router.post("/save")
 async def api_save_staff(payload: Dict[str, Any]):
     return staff_manager.save(payload)
+
+
+@staff_router.post("/options")
+async def api_add_staff_option(payload: Dict[str, Any]):
+    return staff_manager.add_option(payload.get("kind", ""), payload.get("value", ""))
 
 
 @staff_router.post("/delete")
@@ -349,7 +386,7 @@ def render_html() -> str:
                 <!-- 3. RÔLE & SERVICE RATTACHÉ -->
                 <div class="grid grid-cols-2 gap-3">
                     <div>
-                        <label class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">Fonction / Rôle *</label>
+                        <div class="mb-1 flex items-center justify-between gap-2"><label for="staffType" class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">Fonction / Rôle *</label><button type="button" onclick="openStaffOption('role')" class="inline-flex items-center gap-1 rounded-lg border border-brand-neon/30 bg-brand-neon/10 px-2 py-1 text-[10px] font-bold text-emerald-800 transition hover:bg-brand-neon/20 dark:text-brand-neon"><i class="ph-bold ph-plus"></i>Ajouter</button></div>
                         <select id="staffType" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none focus:border-brand-neon bg-slate-50 dark:bg-black/30 text-slate-800 dark:text-white font-semibold">
                             <option value="" disabled selected>-- Sélectionnez un rôle --</option>
                             {types_options}
@@ -365,7 +402,7 @@ def render_html() -> str:
 
                 <!-- 4. SPÉCIALITÉ MÉDICALE -->
                 <div>
-                    <label class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">Spécialité Médicale (Si applicable)</label>
+                    <div class="mb-1 flex items-center justify-between gap-2"><label for="staffSpecialite" class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">Spécialité Médicale (Si applicable)</label><button type="button" onclick="openStaffOption('specialite')" class="inline-flex items-center gap-1 rounded-lg border border-brand-neon/30 bg-brand-neon/10 px-2 py-1 text-[10px] font-bold text-emerald-800 transition hover:bg-brand-neon/20 dark:text-brand-neon"><i class="ph-bold ph-plus"></i>Ajouter</button></div>
                     <select id="staffSpecialite" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none focus:border-brand-neon bg-slate-50 dark:bg-black/30 text-slate-800 dark:text-white font-medium">
                         <option value="">Non applicable / Général</option>
                     </select>
@@ -398,12 +435,22 @@ def render_html() -> str:
         </div>
     </div>
 
+    <div id="staffOptionModal" class="fixed inset-0 z-[60] hidden items-center justify-center bg-black/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="staffOptionTitle">
+        <form onsubmit="saveStaffOption(event)" class="w-full max-w-md rounded-2xl border border-slate-100 bg-white p-5 shadow-2xl dark:border-white/10 dark:bg-[#121c15]">
+            <div class="mb-4 flex items-center justify-between gap-3"><div><p class="text-[10px] font-bold uppercase tracking-widest text-emerald-700 dark:text-brand-neon">Catalogue du staff</p><h3 id="staffOptionTitle" class="mt-1 text-base font-extrabold text-slate-800 dark:text-white">Ajouter une option</h3></div><button type="button" onclick="closeStaffOption()" class="grid h-8 w-8 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-white/10" aria-label="Fermer"><i class="ph-bold ph-x"></i></button></div>
+            <input id="staffOptionKind" type="hidden">
+            <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300">Intitulé<input id="staffOptionValue" required maxlength="100" class="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white" placeholder="Saisir un intitulé"></label>
+            <div class="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-4 dark:border-white/10"><button type="button" onclick="closeStaffOption()" class="rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 dark:border-white/10 dark:text-slate-300">Annuler</button><button type="submit" class="inline-flex items-center gap-1.5 rounded-xl bg-brand-neon px-4 py-2 text-xs font-bold text-black shadow-sm"><i class="ph-bold ph-plus-circle"></i>Ajouter à la liste</button></div>
+        </form>
+    </div>
+
     <!-- SCRIPT JAVASCRIPT DU MODULE STAFF -->
     <script>
         (function() {{
             let staffData = [];
             let availableServices = [];
             let availableSpecialites = [];
+            let availableTypes = [];
             const defaultAvatar = "{AVATAR_PAR_DEFAUT}";
 
             // Couleurs des badges par type de fonction
@@ -430,6 +477,7 @@ def render_html() -> str:
                     staffData = data.staff || [];
                     availableServices = data.services || [];
                     availableSpecialites = data.specialites || [];
+                    availableTypes = data.types_personnel || [];
 
                     document.getElementById('totalStaffCount').innerText = data.total_count || staffData.length;
                     renderStaffTable(staffData);
@@ -440,9 +488,24 @@ def render_html() -> str:
             }};
 
             window.populateSelectOptions = function() {{
+                const sType = document.getElementById('staffType');
+                const fType = document.getElementById('filterStaffType');
+                const selectedType = sType.value;
+                const selectedFilterType = fType.value;
+                sType.innerHTML = '<option value="" disabled>-- Sélectionnez un rôle --</option>';
+                fType.innerHTML = '<option value="">👤 Tous les Rôles / Fonctions</option>';
+                availableTypes.forEach(type => {{
+                    const option = document.createElement('option'); option.value = type; option.textContent = type; sType.appendChild(option);
+                    const filterOption = document.createElement('option'); filterOption.value = type; filterOption.textContent = type; fType.appendChild(filterOption);
+                }});
+                sType.value = selectedType;
+                fType.value = selectedFilterType;
+
                 // Sélecteurs de services (dans la modale et dans le filtre de recherche)
                 const sService = document.getElementById('staffService');
                 const fService = document.getElementById('filterStaffService');
+                const selectedService = sService.value;
+                const selectedFilterService = fService.value;
                 
                 let sOptions = '<option value="" disabled selected>-- Sélectionnez un service --</option>';
                 let fOptions = '<option value="">🏥 Tous les Services</option>';
@@ -454,14 +517,49 @@ def render_html() -> str:
 
                 sService.innerHTML = sOptions;
                 fService.innerHTML = fOptions;
+                sService.value = selectedService;
+                fService.value = selectedFilterService;
 
                 // Sélecteur de spécialités médicales dans la modale
                 const sSpe = document.getElementById('staffSpecialite');
+                const selectedSpecialite = sSpe.value;
                 let speOptions = '<option value="">Non applicable / Général</option>';
                 availableSpecialites.forEach(sp => {{
                     speOptions += `<option value="${{sp}}">${{sp}}</option>`;
                 }});
                 sSpe.innerHTML = speOptions;
+                sSpe.value = selectedSpecialite;
+            }};
+
+            window.openStaffOption = function(kind) {{
+                document.getElementById('staffOptionKind').value = kind;
+                document.getElementById('staffOptionTitle').textContent = kind === 'role' ? 'Ajouter une fonction / un rôle' : 'Ajouter une spécialité médicale';
+                document.getElementById('staffOptionValue').value = '';
+                const modal = document.getElementById('staffOptionModal');
+                modal.classList.remove('hidden'); modal.classList.add('flex');
+                document.getElementById('staffOptionValue').focus();
+            }};
+
+            window.closeStaffOption = function() {{
+                const modal = document.getElementById('staffOptionModal');
+                modal.classList.add('hidden'); modal.classList.remove('flex');
+            }};
+
+            window.saveStaffOption = async function(event) {{
+                event.preventDefault();
+                const kind = document.getElementById('staffOptionKind').value;
+                const value = document.getElementById('staffOptionValue').value.trim();
+                try {{
+                    const response = await fetch('/api/staff/options', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{kind,value}})}});
+                    const result = await response.json();
+                    if (!response.ok || !result.success) {{ alert(result.message || 'Impossible d’ajouter cette option.'); return; }}
+                    if (kind === 'role') availableTypes = [...availableTypes, result.value];
+                    else availableSpecialites = [...availableSpecialites, result.value];
+                    populateSelectOptions();
+                    if (kind === 'role') document.getElementById('staffType').value = result.value;
+                    else document.getElementById('staffSpecialite').value = result.value;
+                    closeStaffOption();
+                }} catch (error) {{ alert('Erreur lors de l’ajout de l’option.'); }}
             }};
 
             window.renderStaffTable = function(items) {{

@@ -219,6 +219,17 @@ def init_database() -> None:
         actif BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS clinic_staff_roles (
+        id SERIAL PRIMARY KEY,
+        nom TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS clinic_staff_specialties (
+        id SERIAL PRIMARY KEY,
+        nom TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
     
     -- Table du répertoire des médicaments
     CREATE TABLE IF NOT EXISTS medications (
