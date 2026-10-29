@@ -358,6 +358,12 @@
     <i class="ph-bold ph-shield-check text-sm text-brand-neon flex-shrink-0"></i>
     <span class="truncate">Journal d'Audit & Traçabilité</span>
 </button>
+                            {% if user.role == 'Administrateur' %}
+                            <button onclick="loadModule('gestion_configuration_notif')" data-module="gestion_configuration_notif" class="w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
+                                <i class="ph-bold ph-bell-ringing text-sm text-brand-neon flex-shrink-0"></i>
+                                <span class="truncate">Configuration Notif</span>
+                            </button>
+                            {% endif %}
                         </div>
                     </div>
 

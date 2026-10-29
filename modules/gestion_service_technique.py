@@ -3,14 +3,10 @@
 from datetime import date
 import asyncio
 import base64
-from email.message import EmailMessage
 import json
 from html import escape
 import logging
-import os
 from pathlib import Path
-import smtplib
-import ssl
 import sys
 import unicodedata
 from typing import Any, Dict, Optional
@@ -19,6 +15,7 @@ from uuid import uuid4
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from app.auth import get_current_user, track_action
+from app.smtp_mailer import get_smtp_configuration, send_smtp_email
 from database import DOCS_DIR, get_db_cursor
 
 service_tech_router = APIRouter(prefix="/api/service-technique", tags=["Service technique"])
@@ -599,43 +596,19 @@ async def service_tech_report_failure(request: Request):
 
 def _send_failure_email(recipients, ticket_id, subject, service, location, priority,
                         details, requester, stopped_work):
-    """Envoie le courriel de panne si le serveur SMTP est configuré par variables d'environnement."""
-    host = os.getenv("CLINIVA_SMTP_HOST", "").strip()
-    sender = os.getenv("CLINIVA_SMTP_FROM", os.getenv("CLINIVA_SMTP_USER", "")).strip()
-    if not host or not sender:
-        logger.info("Courriel panne #%s non envoyé : configuration SMTP absente.", ticket_id)
+    """Envoie la panne aux adresses des collaborateurs techniques du Staff."""
+    configuration = get_smtp_configuration()
+    if not configuration.get("enabled"):
+        logger.info("Courriel panne #%s non envoyé : configuration SMTP désactivée ou absente.", ticket_id)
         return "non_configure"
-    try:
-        port = int(os.getenv("CLINIVA_SMTP_PORT", "587"))
-    except ValueError as exc:
-        raise RuntimeError("CLINIVA_SMTP_PORT doit être un numéro de port.") from exc
-    message = EmailMessage()
-    message["Subject"] = f"[Cliniva] Panne #{ticket_id} · {priority} · {subject}"
-    message["From"] = sender
-    message["To"] = ", ".join(recipients)
-    message.set_content(
+    send_smtp_email(
+        configuration, recipients,
+        f"[Cliniva] Panne #{ticket_id} · {priority} · {subject}",
         f"Nouvelle déclaration de panne dans Cliniva\n\n"
         f"Dossier : #{ticket_id}\nTitre : {subject}\nService : {service}\nLieu : {location}\n"
         f"Priorité : {priority}\nArrêt du travail : {'Oui' if stopped_work else 'Non'}\n"
-        f"Déclaré par : {requester}\n\nDescription :\n{details}\n"
+        f"Déclaré par : {requester}\n\nDescription :\n{details}\n",
     )
-    context = ssl.create_default_context()
-    if os.getenv("CLINIVA_SMTP_SSL", "").strip().lower() in {"1", "true", "oui"} or port == 465:
-        with smtplib.SMTP_SSL(host, port, timeout=12, context=context) as smtp:
-            user = os.getenv("CLINIVA_SMTP_USER", "").strip()
-            if user:
-                smtp.login(user, os.getenv("CLINIVA_SMTP_PASSWORD", ""))
-            smtp.send_message(message)
-    else:
-        with smtplib.SMTP(host, port, timeout=12) as smtp:
-            smtp.ehlo()
-            if os.getenv("CLINIVA_SMTP_STARTTLS", "true").strip().lower() not in {"0", "false", "non"}:
-                smtp.starttls(context=context)
-                smtp.ehlo()
-            user = os.getenv("CLINIVA_SMTP_USER", "").strip()
-            if user:
-                smtp.login(user, os.getenv("CLINIVA_SMTP_PASSWORD", ""))
-            smtp.send_message(message)
     logger.info("Courriel de panne #%s envoyé à %d destinataire(s).", ticket_id, len(recipients))
     return "envoye"
 
