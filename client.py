@@ -761,21 +761,33 @@ def open_client_window(server_url: str) -> None:
         window.evaluate_js("""(() => {
           const install = () => {
             if (document.getElementById('cliniva-window-controls')) return;
+            if (!document.getElementById('cliniva-window-controls-style')) {
+              const style = document.createElement('style');
+              style.id = 'cliniva-window-controls-style';
+              style.textContent = `
+                #cliniva-window-controls button { transition: background .16s ease, color .16s ease, transform .16s ease, box-shadow .16s ease; }
+                #cliniva-window-controls button:hover { transform: translateY(-1px); box-shadow: 0 2px 7px rgba(24,55,43,.16); }
+                #cliniva-window-controls .cliniva-minimize:hover { background:#e7f3ed !important; color:#176b4d !important; }
+                #cliniva-window-controls .cliniva-close:hover { background:#d94450 !important; color:#fff !important; }
+                #cliniva-window-controls button:focus-visible { outline:2px solid #16845e; outline-offset:2px; }
+              `;
+              document.head.appendChild(style);
+            }
             const bar = document.createElement('div');
             bar.id = 'cliniva-window-controls';
             bar.setAttribute('role', 'group');
             bar.setAttribute('aria-label', 'Commandes de la fenêtre');
-            bar.style.cssText = 'position:fixed;top:8px;right:10px;z-index:2147483647;display:flex;gap:6px;padding:4px;background:rgba(20,35,48,.78);border:1px solid rgba(255,255,255,.24);border-radius:9px;box-shadow:0 3px 12px rgba(0,0,0,.22)';
-            const makeButton = (label, glyph, color, action) => {
+            bar.style.cssText = 'position:fixed;top:12px;right:14px;z-index:2147483647;display:flex;gap:4px;padding:4px;background:rgba(255,255,255,.97);border:1px solid #dce7e1;border-radius:11px;box-shadow:0 4px 14px rgba(26,55,43,.14);backdrop-filter:blur(8px)';
+            const makeButton = (label, icon, className, action) => {
               const button = document.createElement('button');
-              button.type = 'button'; button.title = label; button.setAttribute('aria-label', label);
-              button.textContent = glyph;
-              button.style.cssText = `width:34px;height:30px;border:0;border-radius:6px;background:${color};color:#fff;font:700 19px/1 'Segoe UI',sans-serif;cursor:pointer;display:grid;place-items:center`;
+              button.type = 'button'; button.title = label; button.setAttribute('aria-label', label); button.className = className;
+              button.innerHTML = icon;
+              button.style.cssText = `width:34px;height:32px;border:0;border-radius:8px;background:${className === 'cliniva-close' ? '#fff0f0' : '#f1f6f3'};color:${className === 'cliniva-close' ? '#c43e49' : '#527064'};cursor:pointer;display:grid;place-items:center;padding:0`;
               button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); window.pywebview.api[action](); });
               bar.appendChild(button);
             };
-            makeButton('Réduire', '—', '#607386', 'window_minimize');
-            makeButton('Fermer', '×', '#d84b54', 'window_close');
+            makeButton('Réduire', '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>', 'cliniva-minimize', 'window_minimize');
+            makeButton('Fermer', '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>', 'cliniva-close', 'window_close');
             document.body.appendChild(bar);
           };
           install();
