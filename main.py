@@ -1445,6 +1445,7 @@ def main() -> None:
         height=config.get("window_height", 900),
         resizable=True,
         zoomable=True,
+        fullscreen=True,
         min_size=(1024, 700),
         background_color="#f0f3f1",
         js_api=client_bridge,

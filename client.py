@@ -742,7 +742,7 @@ def open_client_window(server_url: str) -> None:
     bridge.dicom_print_autostart()
     webview.create_window(
         "Cliniva", server_url, width=1440, height=940, min_size=(900, 650),
-        resizable=True, zoomable=True, js_api=bridge,
+        resizable=True, zoomable=True, fullscreen=True, js_api=bridge,
     )
     webview.start(debug=False)
 
