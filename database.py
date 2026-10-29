@@ -633,6 +633,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         fournisseur TEXT NOT NULL DEFAULT '',
         date_acquisition DATE,
         statut TEXT NOT NULL DEFAULT 'En service',
+        systeme_exploitation TEXT NOT NULL DEFAULT '',
         derniere_maintenance DATE,
         prochaine_maintenance DATE,
         notes TEXT NOT NULL DEFAULT '',
@@ -645,6 +646,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     ALTER TABLE service_tech_equipment ADD COLUMN IF NOT EXISTS mot_de_passe_ciphertext TEXT NOT NULL DEFAULT '';
     ALTER TABLE service_tech_equipment ADD COLUMN IF NOT EXISTS aet TEXT NOT NULL DEFAULT '';
     ALTER TABLE service_tech_equipment ADD COLUMN IF NOT EXISTS port INT;
+    ALTER TABLE service_tech_equipment ADD COLUMN IF NOT EXISTS systeme_exploitation TEXT NOT NULL DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_service_tech_equipment_status
         ON service_tech_equipment (statut, prochaine_maintenance);
     CREATE TABLE IF NOT EXISTS service_tech_tickets (

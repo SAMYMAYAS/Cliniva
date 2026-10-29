@@ -13,14 +13,17 @@ Architecture logicielle complète :
 
 import html
 import importlib
+import ipaddress
 import json
 import logging
 import multiprocessing
 import os
 import platform
 import re
+import shutil
 import socket
 import sys
+import subprocess
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -49,6 +52,47 @@ from app.auth import (
     get_current_user_optional,
     track_action,
 )
+
+
+def _launch_service_tech_remote(system: str, host: str, username: str = "") -> Dict[str, Any]:
+    """Lance RDP ou SSH sur le poste Windows qui affiche Cliniva."""
+    if platform.system() != "Windows":
+        return {"ok": False, "error": "Le lancement de RDP/SSH est configuré pour les postes Windows."}
+    host = str(host or "").strip()
+    username = str(username or "").strip()
+    if not host:
+        return {"ok": False, "error": "L'adresse IP ou le nom réseau de l'équipement est manquant."}
+    try:
+        address = ipaddress.ip_address(host)
+        target_host = f"[{host}]" if address.version == 6 and system == "Windows" else host
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host):
+            return {"ok": False, "error": "L'adresse réseau de l'équipement est invalide."}
+        target_host = host
+    if username and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", username):
+        return {"ok": False, "error": "Le nom d'utilisateur ne peut pas être utilisé dans une commande SSH."}
+
+    if system == "Windows":
+        executable = shutil.which("mstsc.exe")
+        if not executable:
+            executable = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "mstsc.exe")
+        if not os.path.isfile(executable):
+            return {"ok": False, "error": "Le client Bureau à distance Windows (mstsc.exe) est introuvable."}
+        subprocess.Popen([executable, f"/v:{target_host}"], close_fds=True)
+        return {"ok": True}
+
+    if system == "Linux":
+        executable = shutil.which("ssh.exe") or shutil.which("ssh")
+        if not executable:
+            return {"ok": False, "error": "OpenSSH est introuvable sur ce poste. Installez le client OpenSSH Windows."}
+        target = f"{username}@{host}" if username else host
+        subprocess.Popen(
+            [executable, target],
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            close_fds=True,
+        )
+        return {"ok": True}
+    return {"ok": False, "error": "Le système doit être Windows ou Linux."}
 
 # Routeurs des modules métiers
 from modules.clinique_param import clinic_router
@@ -194,6 +238,9 @@ class ClientDicomServicesBridge:
         """Ferme la fenêtre Cliniva du poste courant."""
         if webview.windows:
             webview.windows[0].destroy()
+
+    def service_tech_remote_access(self, system: str, host: str, username: str = "") -> Dict[str, Any]:
+        return _launch_service_tech_remote(system, host, username)
 
     def client_scanner_detect(self) -> Dict[str, Any]:
         """Liste les scanners WIA connectés au poste qui affiche Cliniva."""

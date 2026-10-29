@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 from io import BytesIO
 import json
 import os
@@ -34,6 +35,47 @@ DEFAULT_PORT = 8000
 CONFIG_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Cliniva" / "client_config.json"
 DOCX_MIME = "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64"
 CLIENT_UPDATED_ON_START = False
+
+
+def launch_service_tech_remote(system: str, host: str, username: str = "") -> dict:
+    """Lance RDP ou SSH sur ce poste client Windows."""
+    if os.name != "nt":
+        return {"ok": False, "error": "Le lancement de RDP/SSH est configuré pour les postes Windows."}
+    host = str(host or "").strip()
+    username = str(username or "").strip()
+    if not host:
+        return {"ok": False, "error": "L'adresse IP ou le nom réseau de l'équipement est manquant."}
+    try:
+        address = ipaddress.ip_address(host)
+        target_host = f"[{host}]" if address.version == 6 and system == "Windows" else host
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host):
+            return {"ok": False, "error": "L'adresse réseau de l'équipement est invalide."}
+        target_host = host
+    if username and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", username):
+        return {"ok": False, "error": "Le nom d'utilisateur ne peut pas être utilisé dans une commande SSH."}
+
+    if system == "Windows":
+        executable = shutil.which("mstsc.exe")
+        if not executable:
+            executable = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "mstsc.exe")
+        if not os.path.isfile(executable):
+            return {"ok": False, "error": "Le client Bureau à distance Windows (mstsc.exe) est introuvable."}
+        subprocess.Popen([executable, f"/v:{target_host}"], close_fds=True)
+        return {"ok": True}
+
+    if system == "Linux":
+        executable = shutil.which("ssh.exe") or shutil.which("ssh")
+        if not executable:
+            return {"ok": False, "error": "OpenSSH est introuvable sur ce poste. Installez le client OpenSSH Windows."}
+        target = f"{username}@{host}" if username else host
+        subprocess.Popen(
+            [executable, target],
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            close_fds=True,
+        )
+        return {"ok": True}
+    return {"ok": False, "error": "Le système doit être Windows ou Linux."}
 
 
 def normalize_server_url(value: str) -> str:
@@ -211,6 +253,9 @@ class ClientHardwareBridge:
         import webview
         if webview.windows:
             webview.windows[0].destroy()
+
+    def service_tech_remote_access(self, system: str, host: str, username: str = "") -> dict:
+        return launch_service_tech_remote(system, host, username)
 
     def _client_config(self) -> dict:
         try:
