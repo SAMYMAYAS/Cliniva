@@ -26,6 +26,7 @@ import sys
 import subprocess
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -52,6 +53,46 @@ from app.auth import (
     get_current_user_optional,
     track_action,
 )
+
+
+# Préremplissage réservé au poste de développement Cliniva.
+# Adresses relevées sur ses interfaces Wi-Fi, Ethernet et Bluetooth.
+_DEV_WORKSTATION_MACS = {
+    "18473DEC5E8F",
+    "3024A9914C8F",
+    "18473DEC5E90",
+}
+
+
+def _is_dev_workstation() -> bool:
+    """Reconnaît le poste de développement à partir de son adresse MAC locale."""
+    try:
+        return f"{uuid.getnode():012X}" in _DEV_WORKSTATION_MACS
+    except (OSError, ValueError):
+        return False
+
+
+def _is_request_from_this_machine(request: Request) -> bool:
+    """N'autorise le préremplissage que pour une requête locale au serveur."""
+    if not request.client:
+        return False
+    try:
+        remote = ipaddress.ip_address(request.client.host.split("%", 1)[0])
+    except ValueError:
+        return False
+    if remote.is_loopback:
+        return True
+
+    local_addresses = set()
+    try:
+        local_addresses.update(socket.gethostbyname_ex(socket.gethostname())[2])
+        local_addresses.update(
+            item[4][0]
+            for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+        )
+    except OSError:
+        return False
+    return str(remote) in local_addresses
 
 
 def _launch_service_tech_remote(system: str, host: str, username: str = "") -> Dict[str, Any]:
@@ -1090,6 +1131,18 @@ async def login_page(request: Request) -> Any:
     if get_current_user_optional(request):
         return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
     return templates.TemplateResponse(request, "login.html", {})
+
+
+@app.get("/api/auth/dev-login-prefill", summary="Préremplissage local du compte de développement")
+async def dev_login_prefill(request: Request) -> JSONResponse:
+    """Renvoie les identifiants de test seulement sur le PC local de développement."""
+    allowed = _is_dev_workstation() and _is_request_from_this_machine(request)
+    if not allowed:
+        return JSONResponse(content={"enabled": False}, headers={"Cache-Control": "no-store"})
+    return JSONResponse(
+        content={"enabled": True, "login": "SYSTEM", "password": "SYSTEM"},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/api/auth/login", summary="Traitement de l'authentification")

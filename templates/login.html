@@ -74,6 +74,23 @@
     </div>
 
     <script>
+        async function prefillDevCredentials() {
+            try {
+                const response = await fetch('/api/auth/dev-login-prefill', {
+                    cache: 'no-store',
+                    credentials: 'same-origin'
+                });
+                if (!response.ok) return;
+                const profile = await response.json();
+                if (profile.enabled !== true) return;
+
+                document.getElementById('loginInput').value = profile.login || '';
+                document.getElementById('passwordInput').value = profile.password || '';
+            } catch (_) {
+                // En cas d'indisponibilité, le formulaire reste utilisable manuellement.
+            }
+        }
+
         function togglePasswordVisibility() {
             const pwd = document.getElementById('passwordInput');
             const icon = document.getElementById('eyeIcon');
@@ -122,6 +139,8 @@
                 btn.innerHTML = '<span>Se connecter</span> <i class="ph-bold ph-arrow-right text-sm"></i>';
             }
         }
+
+        prefillDevCredentials();
     </script>
     <script src="/static/js/interface_zoom.js"></script>
 </body>
