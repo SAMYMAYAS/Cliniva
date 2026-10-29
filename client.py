@@ -200,6 +200,18 @@ class ClientHardwareBridge:
         self._word_sync_states: dict[tuple[str, str, int], dict] = {}
         self._word_sync_lock = threading.Lock()
 
+    def window_minimize(self) -> None:
+        """Réduit la fenêtre Cliniva du poste client."""
+        import webview
+        if webview.windows:
+            webview.windows[0].minimize()
+
+    def window_close(self) -> None:
+        """Ferme la fenêtre Cliniva du poste client."""
+        import webview
+        if webview.windows:
+            webview.windows[0].destroy()
+
     def _client_config(self) -> dict:
         try:
             data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -740,10 +752,37 @@ def open_client_window(server_url: str) -> None:
         ) from exc
     bridge = ClientHardwareBridge()
     bridge.dicom_print_autostart()
-    webview.create_window(
+    window = webview.create_window(
         "Cliniva", server_url, width=1440, height=940, min_size=(900, 650),
         resizable=True, zoomable=True, fullscreen=True, js_api=bridge,
     )
+
+    def install_window_controls() -> None:
+        window.evaluate_js("""(() => {
+          const install = () => {
+            if (document.getElementById('cliniva-window-controls')) return;
+            const bar = document.createElement('div');
+            bar.id = 'cliniva-window-controls';
+            bar.setAttribute('role', 'group');
+            bar.setAttribute('aria-label', 'Commandes de la fenêtre');
+            bar.style.cssText = 'position:fixed;top:8px;right:10px;z-index:2147483647;display:flex;gap:6px;padding:4px;background:rgba(20,35,48,.78);border:1px solid rgba(255,255,255,.24);border-radius:9px;box-shadow:0 3px 12px rgba(0,0,0,.22)';
+            const makeButton = (label, glyph, color, action) => {
+              const button = document.createElement('button');
+              button.type = 'button'; button.title = label; button.setAttribute('aria-label', label);
+              button.textContent = glyph;
+              button.style.cssText = `width:34px;height:30px;border:0;border-radius:6px;background:${color};color:#fff;font:700 19px/1 'Segoe UI',sans-serif;cursor:pointer;display:grid;place-items:center`;
+              button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); window.pywebview.api[action](); });
+              bar.appendChild(button);
+            };
+            makeButton('Réduire', '—', '#607386', 'window_minimize');
+            makeButton('Fermer', '×', '#d84b54', 'window_close');
+            document.body.appendChild(bar);
+          };
+          install();
+          new MutationObserver(install).observe(document.documentElement, {childList:true, subtree:true});
+        })()""")
+
+    window.events.loaded += install_window_controls
     webview.start(debug=False)
 
 

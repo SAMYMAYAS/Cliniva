@@ -185,6 +185,16 @@ class ClientDicomServicesBridge:
         self._pacs_send_jobs_lock = threading.Lock()
         self._pacs_send_processes: Dict[str, Any] = {}
 
+    def window_minimize(self) -> None:
+        """Réduit la fenêtre Cliniva du poste courant."""
+        if webview.windows:
+            webview.windows[0].minimize()
+
+    def window_close(self) -> None:
+        """Ferme la fenêtre Cliniva du poste courant."""
+        if webview.windows:
+            webview.windows[0].destroy()
+
     def client_scanner_detect(self) -> Dict[str, Any]:
         """Liste les scanners WIA connectés au poste qui affiche Cliniva."""
         if sys.platform != "win32":
@@ -1438,7 +1448,7 @@ def main() -> None:
     logger.info("Ouverture de la fenêtre logicielle sur : %s", target_url)
 
     # 4. Création de la fenêtre logicielle native Windows (Chromeless / Edge WebView2)
-    webview.create_window(
+    window = webview.create_window(
         title=config.get("window_title", "Cliniva"),
         url=target_url,
         width=config.get("window_width", 1400),
@@ -1450,6 +1460,33 @@ def main() -> None:
         background_color="#f0f3f1",
         js_api=client_bridge,
     )
+
+    def install_window_controls() -> None:
+        window.evaluate_js("""(() => {
+          const install = () => {
+            if (document.getElementById('cliniva-window-controls')) return;
+            const bar = document.createElement('div');
+            bar.id = 'cliniva-window-controls';
+            bar.setAttribute('role', 'group');
+            bar.setAttribute('aria-label', 'Commandes de la fenêtre');
+            bar.style.cssText = 'position:fixed;top:8px;right:10px;z-index:2147483647;display:flex;gap:6px;padding:4px;background:rgba(20,35,48,.78);border:1px solid rgba(255,255,255,.24);border-radius:9px;box-shadow:0 3px 12px rgba(0,0,0,.22)';
+            const makeButton = (label, glyph, color, action) => {
+              const button = document.createElement('button');
+              button.type = 'button'; button.title = label; button.setAttribute('aria-label', label);
+              button.textContent = glyph;
+              button.style.cssText = `width:34px;height:30px;border:0;border-radius:6px;background:${color};color:#fff;font:700 19px/1 'Segoe UI',sans-serif;cursor:pointer;display:grid;place-items:center`;
+              button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); window.pywebview.api[action](); });
+              bar.appendChild(button);
+            };
+            makeButton('Réduire', '—', '#607386', 'window_minimize');
+            makeButton('Fermer', '×', '#d84b54', 'window_close');
+            document.body.appendChild(bar);
+          };
+          install();
+          new MutationObserver(install).observe(document.documentElement, {childList:true, subtree:true});
+        })()""")
+
+    window.events.loaded += install_window_controls
 
     # 5. Démarrage de la boucle d'événements native
     try:
