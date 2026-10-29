@@ -765,6 +765,8 @@ def open_client_window(server_url: str) -> None:
               const style = document.createElement('style');
               style.id = 'cliniva-window-controls-style';
               style.textContent = `
+                #cliniva-window-controls { opacity:0; transform:translateY(-6px); transition:opacity .18s ease, transform .18s ease; }
+                #cliniva-window-controls:hover, #cliniva-window-controls:focus-within { opacity:1; transform:translateY(0); }
                 #cliniva-window-controls button { transition: background .16s ease, color .16s ease, transform .16s ease, box-shadow .16s ease; }
                 #cliniva-window-controls button:hover { transform: translateY(-1px); box-shadow: 0 2px 7px rgba(24,55,43,.16); }
                 #cliniva-window-controls .cliniva-minimize:hover { background:#e7f3ed !important; color:#176b4d !important; }
