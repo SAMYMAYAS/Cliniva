@@ -647,11 +647,14 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         demandeur TEXT NOT NULL DEFAULT '',
         responsable TEXT NOT NULL DEFAULT '',
         date_echeance DATE,
+        heure_echeance TIME,
         date_cloture TIMESTAMP WITH TIME ZONE,
         created_by INT REFERENCES users(id) ON DELETE SET NULL,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE service_tech_tickets ADD COLUMN IF NOT EXISTS heure_echeance TIME;
+    UPDATE service_tech_tickets SET type='Demande non définie' WHERE type='Demande';
     CREATE INDEX IF NOT EXISTS idx_service_tech_tickets_status
         ON service_tech_tickets (statut, priorite, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_service_tech_tickets_equipment
