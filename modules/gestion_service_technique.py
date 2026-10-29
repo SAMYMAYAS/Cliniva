@@ -15,7 +15,7 @@ from uuid import uuid4
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from app.auth import get_current_user, track_action
-from app.smtp_mailer import get_smtp_configuration, send_smtp_email
+from app.smtp_mailer import build_cliniva_email_html, get_smtp_configuration, send_smtp_email
 from database import DOCS_DIR, get_db_cursor
 
 service_tech_router = APIRouter(prefix="/api/service-technique", tags=["Service technique"])
@@ -601,14 +601,45 @@ def _send_failure_email(recipients, ticket_id, subject, service, location, prior
     if not configuration.get("enabled"):
         logger.info("Courriel panne #%s non envoyé : configuration SMTP désactivée ou absente.", ticket_id)
         return "non_configure"
-    send_smtp_email(
-        configuration, recipients,
-        f"[Cliniva] Panne #{ticket_id} · {priority} · {subject}",
-        f"Nouvelle déclaration de panne dans Cliniva\n\n"
-        f"Dossier : #{ticket_id}\nTitre : {subject}\nService : {service}\nLieu : {location}\n"
-        f"Priorité : {priority}\nArrêt du travail : {'Oui' if stopped_work else 'Non'}\n"
-        f"Déclaré par : {requester}\n\nDescription :\n{details}\n",
+    priority_color = {"Urgente": "#be123c", "Haute": "#c2410c", "Normale": "#0369a1"}.get(priority, "#475569")
+    rows = [
+        ("Référence", f"Panne #{ticket_id}"), ("Service", service), ("Lieu", location),
+        ("Priorité", priority), ("Arrêt de travail", "Oui" if stopped_work else "Non"),
+        ("Déclarée par", requester),
+    ]
+    rows_html_parts = []
+    for label, value in rows:
+        safe_value = escape(str(value))
+        if label == "Priorité":
+            safe_value = (
+                f'<span style="display:inline-block;border-radius:999px;padding:4px 10px;'
+                f'background:{priority_color};color:#fff;font-size:11px">{safe_value}</span>'
+            )
+        rows_html_parts.append(
+            f'<tr><td style="padding:10px 12px;border-bottom:1px solid #e7eee9;width:36%;font-size:12px;font-weight:700;color:#68786d">{escape(label)}</td>'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #e7eee9;font-size:13px;font-weight:700;color:#17231b">{safe_value}</td></tr>'
+        )
+    rows_html = "".join(rows_html_parts)
+    html_content = (
+        '<p style="margin:0 0 18px;font-size:14px;line-height:1.65;color:#435249">Une nouvelle panne vient d’être déclarée. Voici les informations à traiter :</p>'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border:1px solid #e2eae4;border-collapse:collapse;border-radius:10px;overflow:hidden">'
+        f'{rows_html}</table>'
+        '<div style="margin-top:18px;padding:16px;border:1px solid #e2eae4;border-left:4px solid #4d8b42;border-radius:10px;background:#f8faf8">'
+        '<div style="margin-bottom:8px;font-size:11px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:#52705a">Description de la panne</div>'
+        f'<div style="font-size:13px;line-height:1.65;color:#26352a;white-space:pre-wrap;overflow-wrap:anywhere">{escape(details)}</div></div>'
+        '<p style="margin:20px 0 0;font-size:12px;line-height:1.6;color:#68786d">Ouvre <strong>Service Technique → Incidents et interventions</strong> dans Cliniva pour consulter et prendre en charge le dossier.</p>'
     )
+    plain_body = (
+        f"Nouvelle déclaration de panne Cliniva · dossier #{ticket_id}\n\nTitre : {subject}\n"
+        f"Service : {service}\nLieu : {location}\nPriorité : {priority}\n"
+        f"Arrêt de travail : {'Oui' if stopped_work else 'Non'}\nDéclarée par : {requester}\n\n"
+        f"Description :\n{details}\n\nConsulte le dossier dans Service Technique → Incidents et interventions.\n"
+    )
+    html_body = build_cliniva_email_html(
+        "Nouvelle déclaration de panne", f"Dossier #{ticket_id} · {subject}", html_content,
+        f"Panne {priority.lower()} déclarée au service {service}.",
+    )
+    send_smtp_email(configuration, recipients, f"[Cliniva] Panne #{ticket_id} · {priority} · {subject}", plain_body, html_body)
     logger.info("Courriel de panne #%s envoyé à %d destinataire(s).", ticket_id, len(recipients))
     return "envoye"
 

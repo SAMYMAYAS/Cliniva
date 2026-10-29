@@ -2,6 +2,7 @@
 
 import base64
 from email.message import EmailMessage
+from html import escape
 import os
 import smtplib
 import ssl
@@ -68,7 +69,28 @@ def get_smtp_configuration() -> dict:
     return {"enabled": False}
 
 
-def send_smtp_email(configuration: dict, recipients: list[str], subject: str, body: str) -> None:
+def build_cliniva_email_html(title: str, subtitle: str, content_html: str, preheader: str = "") -> str:
+    """Cadre de courriel Cliniva sans ressource distante, compatible mobile et clients classiques."""
+    safe_title = escape(str(title))
+    safe_subtitle = escape(str(subtitle))
+    safe_preheader = escape(str(preheader or title))
+    return f'''<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f1f5f3;font-family:Arial,Helvetica,sans-serif;color:#17231b;-webkit-text-size-adjust:100%;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">{safe_preheader}</div>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;background:#f1f5f3;border-collapse:collapse"><tr><td align="center" style="padding:24px 12px">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="620" style="width:100%;max-width:620px;border-collapse:separate;border-spacing:0;background:#ffffff;border:1px solid #e0e9e2;border-radius:16px;overflow:hidden">
+<tr><td style="padding:24px 28px;background:#14271b;background-image:linear-gradient(120deg,#101b13,#1d4b2b);color:#ffffff">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:22px;line-height:1.2;font-weight:800;letter-spacing:.2px">Cliniva</td><td align="right" style="font-size:10px;line-height:1.4;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#c9f27b">NOTIFICATION SYSTÈME</td></tr></table>
+<div style="margin-top:20px;font-size:22px;line-height:1.25;font-weight:800">{safe_title}</div><div style="margin-top:6px;font-size:13px;line-height:1.5;color:#d4e4d8">{safe_subtitle}</div>
+</td></tr><tr><td style="padding:24px 28px 28px">{content_html}</td></tr>
+<tr><td style="padding:16px 28px;border-top:1px solid #e6ece8;background:#f8faf8;font-size:11px;line-height:1.55;color:#718078">Ce message automatique a été envoyé par <strong style="color:#31533a">Cliniva</strong>. Consulte le module Service Technique pour le suivi de la déclaration.</td></tr>
+</table><div style="max-width:620px;padding:12px 8px 0;font-size:10px;line-height:1.4;color:#8a9690;text-align:center">Cliniva · Système de gestion de clinique</div>
+</td></tr></table></body></html>'''
+
+
+def send_smtp_email(configuration: dict, recipients: list[str], subject: str, body: str,
+                    html_body: str | None = None) -> None:
     if not configuration.get("enabled"):
         raise RuntimeError("L'envoi SMTP est désactivé ou non configuré.")
     host = str(configuration.get("host") or "").strip()
@@ -82,6 +104,8 @@ def send_smtp_email(configuration: dict, recipients: list[str], subject: str, bo
     message["From"] = sender
     message["To"] = ", ".join(sorted(set(recipients)))
     message.set_content(body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
     username = str(configuration.get("user") or "").strip()
     password = str(configuration.get("password") or "")
     context = ssl.create_default_context()

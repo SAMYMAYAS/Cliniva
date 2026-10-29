@@ -5,7 +5,7 @@ import re
 
 from fastapi import APIRouter, HTTPException, Request
 from app.auth import get_current_user, track_action
-from app.smtp_mailer import encrypt_smtp_password, get_smtp_configuration, send_smtp_email
+from app.smtp_mailer import build_cliniva_email_html, encrypt_smtp_password, get_smtp_configuration, send_smtp_email
 
 notification_config_router = APIRouter(prefix="/api/configuration-notif", tags=["Configuration des notifications"])
 
@@ -95,6 +95,11 @@ async def notification_settings_test(request: Request):
             send_smtp_email, configuration, [recipient],
             "Test des notifications Cliniva",
             f"Bonjour,\n\nCe courriel confirme que le serveur SMTP des notifications Cliniva fonctionne.\nTest demandé par {user.get('prenom', '')} {user.get('nom', '')}.\n",
+            build_cliniva_email_html(
+                "Test des notifications", "Configuration du serveur SMTP Cliniva",
+                '<p style="margin:0;font-size:14px;line-height:1.7;color:#435249">Ce message confirme que le serveur SMTP est configuré et que Cliniva peut envoyer des courriels. Vous recevrez les alertes de panne selon votre rôle et les coordonnées enregistrées dans le Staff.</p>',
+                "Le test SMTP Cliniva a réussi.",
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Échec du test SMTP : {exc}") from exc
