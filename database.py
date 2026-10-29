@@ -693,8 +693,26 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         CHECK (type IN ('Préventive', 'Curative')),
         CHECK (heure_fin > heure_debut)
     );
+    ALTER TABLE service_tech_maintenance ADD COLUMN IF NOT EXISTS statut TEXT NOT NULL DEFAULT 'Planifiée';
     CREATE INDEX IF NOT EXISTS idx_service_tech_maintenance_date
         ON service_tech_maintenance (maintenance_date, heure_debut);
+    CREATE TABLE IF NOT EXISTS service_tech_closure_reports (
+        id SERIAL PRIMARY KEY,
+        ticket_id INT UNIQUE REFERENCES service_tech_tickets(id) ON DELETE CASCADE,
+        maintenance_id INT UNIQUE REFERENCES service_tech_maintenance(id) ON DELETE CASCADE,
+        intervenant TEXT NOT NULL,
+        solution_trouvee TEXT NOT NULL,
+        date_execution DATE NOT NULL,
+        heure_debut_travail TIME NOT NULL,
+        heure_fin_travail TIME NOT NULL,
+        etapes_correction TEXT NOT NULL,
+        correction_definitive BOOLEAN NOT NULL DEFAULT FALSE,
+        scan_pages JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CHECK ((ticket_id IS NOT NULL)::int + (maintenance_id IS NOT NULL)::int = 1),
+        CHECK (heure_fin_travail > heure_debut_travail)
+    );
 
     """
     from modules.exam_requests_core import SCHEMA as EXAM_REQUESTS_SCHEMA
