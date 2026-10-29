@@ -667,6 +667,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     ALTER TABLE service_tech_tickets ADD COLUMN IF NOT EXISTS heure_echeance TIME;
+    ALTER TABLE service_tech_tickets ADD COLUMN IF NOT EXISTS service_concerne TEXT NOT NULL DEFAULT '';
+    ALTER TABLE service_tech_tickets ADD COLUMN IF NOT EXISTS lieu_panne TEXT NOT NULL DEFAULT '';
+    ALTER TABLE service_tech_tickets ADD COLUMN IF NOT EXISTS arret_travail BOOLEAN NOT NULL DEFAULT FALSE;
     UPDATE service_tech_tickets SET type='Demande non définie' WHERE type='Demande';
     CREATE INDEX IF NOT EXISTS idx_service_tech_tickets_status
         ON service_tech_tickets (statut, priorite, created_at DESC);
