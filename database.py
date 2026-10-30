@@ -795,6 +795,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS fournisseur TEXT NOT NULL DEFAULT '';
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS fournisseur_id INT REFERENCES stock_suppliers(id) ON DELETE SET NULL;
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS agent_reception TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS agent_preleveur TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS personne_retrait TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS bon_commande_id INT REFERENCES stock_documents(id) ON DELETE RESTRICT;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_documents_number
         ON stock_documents (numero) WHERE numero <> '';
     CREATE INDEX IF NOT EXISTS idx_stock_documents_type_date
