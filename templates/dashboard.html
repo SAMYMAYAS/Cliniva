@@ -285,17 +285,10 @@
     {% endif %}
 
     {% if user.role == 'Administrateur' or user.permissions.stock_view or user.permissions.stock_manage %}
-    <div class="space-y-1">
-        <button onclick="loadModule('gestion_stock')" data-module="gestion_stock" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
-            <i class="ph-bold ph-warehouse text-xl text-emerald-400"></i>
-            <span>Gestion Stock</span>
-        </button>
-        {% if user.role == 'Administrateur' or user.permissions.stock_manage %}
-        <button onclick="loadModule('gestion_stock').then(ok=>{if(ok){window.stockSetTab('suppliers');document.querySelectorAll('[data-module=gestion_stock]').forEach(b=>b.className='sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left');this.className='sidebar-sub-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] bg-brand-neon/20 text-brand-neon font-bold rounded-lg transition';}})" data-module="gestion_stock_fournisseurs" class="sidebar-sub-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 text-[11px] text-slate-300 hover:text-brand-neon hover:bg-white/5 rounded-lg transition">
-            <i class="ph-bold ph-truck text-emerald-400"></i><span>Gestion fournisseurs</span>
-        </button>
-        {% endif %}
-    </div>
+    <button onclick="loadModule('gestion_stock')" data-module="gestion_stock" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+        <i class="ph-bold ph-warehouse text-xl text-emerald-400"></i>
+        <span>Gestion Stock</span>
+    </button>
     {% endif %}
 
     <!-- Médicaments -->
