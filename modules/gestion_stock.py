@@ -137,7 +137,7 @@ def _serpapi_search(query: str) -> list[dict[str, Any]]:
         raise HTTPException(status_code=424, detail="Google Images n’est pas encore configuré. Ouvre « Configurer Google Images » et enregistre ta clé SerpApi gratuite.")
     params = urlencode({"engine": "google_images", "q": query, "api_key": key,
                         "google_domain": "google.com", "gl": "dz", "hl": "fr",
-                        "safe": "active", "tbs": "sur:cl"})
+                        "safe": "active"})
     request = UrlRequest(f"https://serpapi.com/search.json?{params}", headers={"Accept": "application/json", "User-Agent": "ClinivaStock/1.0"})
     try:
         with urlopen(request, timeout=25) as response:
@@ -160,7 +160,7 @@ def _serpapi_search(query: str) -> list[dict[str, Any]]:
         results.append({"id": str(image.get("position") or len(results) + 1),
                         "title": str(image.get("title") or "Image sans titre")[:250],
                         "creator": str(image.get("source") or "Source non indiquée")[:160],
-                        "license": "Creative Commons · résultats filtrés par Google",
+                        "license": "Licence à vérifier auprès de la source",
                         "license_version": "",
                         "license_url": "https://creativecommons.org/licenses/",
                         "thumbnail": thumbnail,
