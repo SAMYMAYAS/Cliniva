@@ -3,6 +3,7 @@
 from decimal import Decimal, InvalidOperation
 from html import escape
 import asyncio
+import base64
 import json
 import mimetypes
 from pathlib import Path
@@ -10,7 +11,7 @@ import re
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request as UrlRequest, urlopen
+from urllib.request import HTTPRedirectHandler, Request as UrlRequest, build_opener, urlopen
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
@@ -110,6 +111,87 @@ def _openverse_image(image_id: str, *, full_size: bool = True) -> tuple[bytes, s
         raise HTTPException(status_code=415, detail="Cette image n’est pas un JPG, PNG ou WebP valide de moins de 8 Mo.")
     if content_type == "image/webp" and content[8:12] != b"WEBP":
         raise HTTPException(status_code=415, detail="Le fichier WebP reçu est invalide.")
+    return content, content_type
+
+
+def _get_serpapi_key() -> str:
+    import os
+    key = os.getenv("SERPAPI_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        from main import load_app_configuration
+        ciphertext = str(load_app_configuration().get("stock_serpapi_key_ciphertext") or "")
+        if not ciphertext:
+            return ""
+        import win32crypt
+        encrypted = base64.b64decode(ciphertext, validate=True)
+        return win32crypt.CryptUnprotectData(encrypted, None, None, None, 0)[1].decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="La clé Google Images enregistrée ne peut pas être déchiffrée sur ce compte Windows. Reconfigure-la depuis Cliniva.") from exc
+
+
+def _serpapi_search(query: str) -> list[dict[str, Any]]:
+    key = _get_serpapi_key()
+    if not key:
+        raise HTTPException(status_code=424, detail="Google Images n’est pas encore configuré. Ouvre « Configurer Google Images » et enregistre ta clé SerpApi gratuite.")
+    params = urlencode({"engine": "google_images", "q": query, "api_key": key,
+                        "google_domain": "google.com", "gl": "dz", "hl": "fr",
+                        "safe": "active", "tbs": "sur:cl"})
+    request = UrlRequest(f"https://serpapi.com/search.json?{params}", headers={"Accept": "application/json", "User-Agent": "ClinivaStock/1.0"})
+    try:
+        with urlopen(request, timeout=25) as response:
+            payload = json.loads(response.read(3 * 1024 * 1024))
+    except HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Google Images est temporairement indisponible (HTTP {exc.code}).") from exc
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="La recherche Google Images est indisponible. Vérifie la connexion du serveur.") from exc
+    if payload.get("error"):
+        message = str(payload["error"])
+        if "Invalid API key" in message or "invalid" in message.lower() and "key" in message.lower():
+            raise HTTPException(status_code=424, detail="La clé SerpApi est invalide. Vérifie-la dans « Configurer Google Images ».")
+        raise HTTPException(status_code=502, detail=f"SerpApi : {message[:220]}")
+    results = []
+    for image in payload.get("images_results", [])[:12]:
+        thumbnail = str(image.get("thumbnail") or "")
+        parsed = urlsplit(thumbnail)
+        if parsed.scheme != "https" or parsed.hostname != "serpapi.com" or not parsed.path.startswith("/searches/"):
+            continue
+        results.append({"id": str(image.get("position") or len(results) + 1),
+                        "title": str(image.get("title") or "Image sans titre")[:250],
+                        "creator": str(image.get("source") or "Source non indiquée")[:160],
+                        "license": "Creative Commons · résultats filtrés par Google",
+                        "license_version": "",
+                        "license_url": "https://creativecommons.org/licenses/",
+                        "thumbnail": thumbnail,
+                        "source_url": str(image.get("link") or "")[:1000]})
+    return results
+
+
+def _download_serpapi_thumbnail(thumbnail_url: str) -> tuple[bytes, str]:
+    parsed = urlsplit(thumbnail_url)
+    if parsed.scheme != "https" or parsed.hostname != "serpapi.com" or not parsed.path.startswith("/searches/") or parsed.query or parsed.fragment:
+        raise HTTPException(status_code=400, detail="Adresse de miniature Google invalide.")
+    class SerpApiRedirectGuard(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            target = urlsplit(newurl)
+            if target.scheme != "https" or target.hostname != "serpapi.com" or not target.path.startswith("/searches/"):
+                return None
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+    request = UrlRequest(thumbnail_url, headers={"Accept": "image/*", "User-Agent": "ClinivaStock/1.0"})
+    try:
+        with build_opener(SerpApiRedirectGuard).open(request, timeout=20) as response:
+            content_type = response.headers.get_content_type()
+            content = response.read(8 * 1024 * 1024 + 1)
+    except HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Impossible de récupérer cette miniature Google.") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(status_code=502, detail="Téléchargement de la miniature Google indisponible.") from exc
+    signatures = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG\r\n\x1a\n", "image/webp": b"RIFF"}
+    if not content or len(content) > 8 * 1024 * 1024 or content_type not in signatures or not content.startswith(signatures[content_type]):
+        raise HTTPException(status_code=415, detail="La miniature reçue n’est pas une image JPG, PNG ou WebP valide.")
+    if content_type == "image/webp" and content[8:12] != b"WEBP":
+        raise HTTPException(status_code=415, detail="La miniature WebP reçue est invalide.")
     return content, content_type
 
 
@@ -228,6 +310,54 @@ async def stock_photo_search(request: Request):
     return {"results": results, "query": query}
 
 
+@stock_router.get("/photo-search/google")
+async def stock_google_photo_search(request: Request):
+    user = get_current_user(request)
+    _require(user, "stock_manage")
+    query = str(request.query_params.get("q") or "").strip()
+    if len(query) < 2 or len(query) > 200:
+        raise HTTPException(status_code=400, detail="Saisis au moins deux caractères (200 maximum) pour rechercher une photo.")
+    results = await asyncio.to_thread(_serpapi_search, query)
+    return {"results": results, "query": query}
+
+
+@stock_router.get("/photo-search/google-settings")
+def stock_google_photo_settings(request: Request):
+    user = get_current_user(request)
+    _require(user, "stock_manage")
+    import os
+    configured = bool(os.getenv("SERPAPI_API_KEY", "").strip())
+    if not configured:
+        try:
+            from main import load_app_configuration
+            configured = bool(load_app_configuration().get("stock_serpapi_key_ciphertext"))
+        except Exception:
+            configured = False
+    return {"configured": configured}
+
+
+@stock_router.post("/photo-search/google-settings")
+async def stock_save_google_photo_settings(request: Request):
+    user = get_current_user(request)
+    _require(user, "stock_manage")
+    data = await request.json()
+    if data.get("clear"):
+        from main import _persist_config_updates
+        _persist_config_updates({"stock_serpapi_key_ciphertext": ""})
+        return {"success": True, "configured": False}
+    key = str(data.get("api_key") or "").strip()
+    if len(key) < 12 or len(key) > 256:
+        raise HTTPException(status_code=400, detail="Saisis une clé SerpApi valide.")
+    try:
+        import win32crypt
+        ciphertext = base64.b64encode(win32crypt.CryptProtectData(key.encode("utf-8"), "Cliniva Google Images", None, None, None, 0)).decode("ascii")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Cliniva n’a pas pu protéger la clé sur ce serveur Windows.") from exc
+    from main import _persist_config_updates
+    _persist_config_updates({"stock_serpapi_key_ciphertext": ciphertext})
+    return {"success": True, "configured": True}
+
+
 @stock_router.get("/photo-openverse/{image_id}")
 async def stock_openverse_photo(image_id: str, request: Request):
     user = get_current_user(request)
@@ -237,6 +367,15 @@ async def stock_openverse_photo(image_id: str, request: Request):
     thumbnail = request.query_params.get("thumbnail") == "1"
     content, content_type = await asyncio.to_thread(_openverse_image, image_id, full_size=not thumbnail)
     return Response(content=content, media_type=content_type, headers={"Cache-Control": "private, max-age=3600" if thumbnail else "private, no-store"})
+
+
+@stock_router.get("/photo-google-thumbnail")
+async def stock_google_thumbnail(request: Request):
+    user = get_current_user(request)
+    _require(user, "stock_manage")
+    thumbnail_url = str(request.query_params.get("url") or "")
+    content, content_type = await asyncio.to_thread(_download_serpapi_thumbnail, thumbnail_url)
+    return Response(content=content, media_type=content_type, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @stock_router.post("/catalog/save")
@@ -631,6 +770,16 @@ def render_html(user: dict[str, Any] | None = None) -> str:
  window.stockCloseInternetPhoto=()=>{const modal=$('stockInternetPhotoModal');if(modal){modal.classList.add('hidden');modal.classList.remove('flex');}};
  window.stockRunInternetPhotoSearch=async()=>{const query=$('siPhotoQuery')?.value.trim();const results=$('siPhotoResults');if(!query||query.length<2){results.innerHTML='<div class="py-10 text-center text-sm text-amber-700">Saisis au moins deux caractères.</div>';return;}results.innerHTML='<div class="grid min-h-28 place-items-center text-sm text-slate-500"><span><i class="ph-bold ph-spinner animate-spin mr-2"></i>Recherche en cours…</span></div>';try{const response=await api('/photo-search?q='+encodeURIComponent(query));const photos=response.results||[];if(!photos.length){results.innerHTML='<div class="py-10 text-center text-sm text-slate-500">Aucune photo trouvée. Essaie une autre formulation ou téléverse ta propre image.</div>';return;}results.innerHTML=`<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">${photos.map((photo,index)=>`<article class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-white/10 dark:bg-black/20"><div class="grid h-40 place-items-center bg-slate-100 dark:bg-white/5"><img src="${esc(photo.thumbnail)}" alt="${esc(photo.title)}" loading="lazy" referrerpolicy="no-referrer" class="h-full w-full object-contain"></div><div class="space-y-2 p-3"><b class="block truncate text-xs text-slate-800 dark:text-white" title="${esc(photo.title)}">${esc(photo.title)}</b><div class="text-[10px] text-slate-500">${esc(photo.creator)} · ${esc(photo.license)} ${esc(photo.license_version)}</div><div class="flex items-center justify-between gap-2"><a href="${esc(photo.source_url)}" target="_blank" rel="noopener noreferrer" class="text-[10px] font-semibold text-sky-700 underline">Voir la source</a><button type="button" onclick="stockUseInternetPhoto(${index})" class="rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-extrabold text-white hover:bg-emerald-800"><i class="ph-bold ph-check mr-1"></i>Choisir</button></div></div></article>`).join('')}</div>`;window.stockInternetPhotoResults=photos;}catch(error){results.innerHTML=`<div class="rounded-xl bg-rose-50 p-4 text-sm text-rose-700">${esc(error.message||'Recherche impossible.')}</div>`;}};
  window.stockUseInternetPhoto=async index=>{const photo=window.stockInternetPhotoResults?.[index];if(!photo)return;try{const response=await fetch('/api/gestion-stock/photo-openverse/'+encodeURIComponent(photo.id),{credentials:'same-origin'});if(!response.ok){let message='Impossible de récupérer cette photo.';try{const body=await response.json();message=body.detail||message;}catch{}throw new Error(message);}const blob=await response.blob();const extension=blob.type==='image/png'?'png':blob.type==='image/webp'?'webp':'jpg';const file=new File([blob],`openverse_${photo.id}.${extension}`,{type:blob.type});const transfer=new DataTransfer();transfer.items.add(file);$('siPhoto').files=transfer.files;window.stockPreviewPhoto({target:$('siPhoto')},true);$('siPhotoCredit').value=photo.creator||'';$('siPhotoLicense').value=[photo.license,photo.license_version].filter(Boolean).join(' ');$('siPhotoSource').value=photo.source_url||'';window.stockSelectedInternetPhoto=photo;window.stockCloseInternetPhoto();toast('Photo ajoutée à l’aperçu. Elle sera enregistrée avec l’article.');}catch(error){toast(error.message||'Téléchargement impossible.',true);}};
+ window.stockPhotoSearchSource='openverse';
+ window.stockEnsurePhotoSources=()=>{const query=$('siPhotoQuery');if(!query)return;const bar=query.parentElement;if(bar.dataset.sourcesReady)return;bar.dataset.sourcesReady='1';const controls=document.createElement('div');controls.className='flex w-full flex-wrap items-center justify-between gap-2';controls.innerHTML='<div class="flex flex-wrap gap-2"><button type="button" data-photo-source="openverse" onclick="stockSetPhotoProvider(\'openverse\')" class="rounded-lg bg-slate-100 px-3 py-2 text-[11px] font-bold">Openverse</button><button type="button" data-photo-source="google" onclick="stockSetPhotoProvider(\'google\')" class="rounded-lg bg-slate-100 px-3 py-2 text-[11px] font-bold"><i class="ph-bold ph-google-logo mr-1"></i>Google Images</button></div><button type="button" onclick="stockConfigureGoogleImages()" class="rounded-lg border border-slate-200 px-3 py-2 text-[11px] font-bold text-slate-600"><i class="ph-bold ph-gear-six mr-1"></i>Configurer Google</button>';bar.parentElement.insertBefore(controls,bar);};
+ const photoSourcesObserver=new MutationObserver(()=>window.stockEnsurePhotoSources());photoSourcesObserver.observe(document.body,{childList:true,subtree:true});
+ window.stockSetPhotoProvider=async source=>{window.stockPhotoSearchSource=source;document.querySelectorAll('[data-photo-source]').forEach(button=>button.className='rounded-lg bg-slate-100 px-3 py-2 text-[11px] font-bold dark:bg-white/10 dark:text-slate-300');const selected=document.querySelector(`[data-photo-source="${source}"]`);if(selected)selected.className='rounded-lg bg-emerald-700 px-3 py-2 text-[11px] font-extrabold text-white';const description=$('stockInternetPhotoModal')?.querySelector('p');if(description)description.textContent=source==='google'?'Google Images · résultats filtrés pour les licences Creative Commons. Vérifie la source et les conditions avant usage.':'Openverse · photos référencées sous licences ouvertes, avec attribution conservée.';if(source==='google'){try{const status=await api('/photo-search/google-settings');if(!status.configured){await window.stockConfigureGoogleImages();return;}}catch(error){toast(error.message,true);return;}}window.stockRunInternetPhotoSearch();};
+ window.stockConfigureGoogleImages=async()=>{let modal=$('stockGoogleConfigModal');if(!modal){modal=document.createElement('div');modal.id='stockGoogleConfigModal';modal.className='fixed inset-0 z-[2147483607] hidden items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm';modal.innerHTML='<section class="w-full max-w-lg overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-[#121c15]"><header class="bg-gradient-to-r from-[#101b13] to-[#183b20] px-5 py-4 text-white"><div class="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Connexion de recherche</div><h3 class="text-lg font-black">Configurer Google Images</h3></header><div class="space-y-4 p-5"><p class="text-sm leading-6 text-slate-600 dark:text-slate-300">La recherche automatique utilise SerpApi pour interroger Google Images. Crée un compte gratuit puis colle ici ta clé API; elle sera protégée sur le serveur Cliniva et ne sera jamais affichée.</p><a href="https://serpapi.com/users/sign_up" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 rounded-lg bg-sky-50 px-3 py-2 text-xs font-bold text-sky-800"><i class="ph-bold ph-arrow-square-out"></i>Créer un compte gratuit</a><label class="block text-xs font-bold text-slate-600 dark:text-slate-300">Clé API SerpApi<input id="stockSerpApiKey" type="password" autocomplete="new-password" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm dark:border-white/10 dark:bg-black/30 dark:text-white" placeholder="Colle la clé ici"></label><p id="stockSerpApiStatus" class="text-xs text-slate-500"></p><div class="flex justify-between gap-2"><button type="button" onclick="stockClearGoogleKey()" class="rounded-xl px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-50">Effacer la clé</button><div class="flex gap-2"><button type="button" onclick="stockCloseGoogleConfig()" class="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold dark:border-white/10 dark:text-white">Annuler</button><button type="button" onclick="stockSaveGoogleKey()" class="rounded-xl bg-emerald-700 px-4 py-2 text-xs font-extrabold text-white">Enregistrer</button></div></div></div></section>';document.body.appendChild(modal);}try{const status=await api('/photo-search/google-settings');$('stockSerpApiStatus').textContent=status.configured?'Une clé est enregistrée. Laisse le champ vide pour la conserver.':'Aucune clé n’est configurée.';}catch(error){$('stockSerpApiStatus').textContent=error.message||'Configuration indisponible.';}modal.classList.remove('hidden');modal.classList.add('flex');};
+ window.stockCloseGoogleConfig=()=>{const modal=$('stockGoogleConfigModal');if(modal){modal.classList.add('hidden');modal.classList.remove('flex');}};
+ window.stockSaveGoogleKey=async()=>{const key=$('stockSerpApiKey').value.trim();if(!key){toast('Colle d’abord la clé API SerpApi.',true);return;}try{await api('/photo-search/google-settings',{method:'POST',body:JSON.stringify({api_key:key})});$('stockSerpApiKey').value='';window.stockCloseGoogleConfig();toast('Google Images est configuré.');if(window.stockPhotoSearchSource==='google')window.stockRunInternetPhotoSearch();}catch(error){toast(error.message,true);}};
+ window.stockClearGoogleKey=async()=>{if(!confirm('Effacer la clé SerpApi enregistrée sur ce serveur ?'))return;try{await api('/photo-search/google-settings',{method:'POST',body:JSON.stringify({clear:true})});$('stockSerpApiKey').value='';$('stockSerpApiStatus').textContent='Clé effacée.';toast('Clé Google effacée.');}catch(error){toast(error.message,true);}};
+ window.stockRunInternetPhotoSearch=async()=>{const query=$('siPhotoQuery')?.value.trim();const results=$('siPhotoResults');if(!query||query.length<2){results.innerHTML='<div class="py-10 text-center text-sm text-amber-700">Saisis au moins deux caractères.</div>';return;}results.innerHTML='<div class="grid min-h-28 place-items-center text-sm text-slate-500"><span><i class="ph-bold ph-spinner animate-spin mr-2"></i>Recherche en cours…</span></div>';try{const endpoint=window.stockPhotoSearchSource==='google'?'/photo-search/google':'/photo-search';const response=await api(endpoint+'?q='+encodeURIComponent(query));const photos=response.results||[];if(!photos.length){results.innerHTML='<div class="py-10 text-center text-sm text-slate-500">Aucune photo trouvée. Essaie une autre formulation ou garde le téléversement manuel.</div>';return;}window.stockInternetPhotoResults=photos;results.innerHTML=`<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">${photos.map((photo,index)=>`<article class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-white/10 dark:bg-black/20"><div class="grid h-40 place-items-center bg-slate-100 dark:bg-white/5"><img src="${esc(photo.thumbnail)}" alt="${esc(photo.title)}" loading="lazy" referrerpolicy="no-referrer" class="h-full w-full object-contain"></div><div class="space-y-2 p-3"><b class="block truncate text-xs text-slate-800 dark:text-white" title="${esc(photo.title)}">${esc(photo.title)}</b><div class="text-[10px] text-slate-500">${esc(photo.creator)} · ${esc(photo.license)} ${esc(photo.license_version)}</div><div class="flex items-center justify-between gap-2"><a href="${esc(photo.source_url)}" target="_blank" rel="noopener noreferrer" class="text-[10px] font-semibold text-sky-700 underline">Voir la source</a><button type="button" onclick="stockUseInternetPhoto(${index})" class="rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-extrabold text-white hover:bg-emerald-800"><i class="ph-bold ph-check mr-1"></i>Choisir</button></div></div></article>`).join('')}</div>`;}catch(error){results.innerHTML=`<div class="rounded-xl bg-rose-50 p-4 text-sm text-rose-700">${esc(error.message||'Recherche impossible.')}</div>`;}};
+ window.stockUseInternetPhoto=async index=>{const photo=window.stockInternetPhotoResults?.[index];if(!photo)return;try{const google=window.stockPhotoSearchSource==='google';const url=google?'/api/gestion-stock/photo-google-thumbnail?url='+encodeURIComponent(photo.thumbnail):'/api/gestion-stock/photo-openverse/'+encodeURIComponent(photo.id);const response=await fetch(url,{credentials:'same-origin'});if(!response.ok){let message='Impossible de récupérer cette photo.';try{const body=await response.json();message=body.detail||message;}catch{}throw new Error(message);}const blob=await response.blob();const extension=blob.type==='image/png'?'png':blob.type==='image/webp'?'webp':'jpg';const file=new File([blob],`${google?'google':'openverse'}_${photo.id}.${extension}`,{type:blob.type});const transfer=new DataTransfer();transfer.items.add(file);$('siPhoto').files=transfer.files;window.stockPreviewPhoto({target:$('siPhoto')},true);$('siPhotoCredit').value=photo.creator||'';$('siPhotoLicense').value=[photo.license,photo.license_version].filter(Boolean).join(' ');$('siPhotoSource').value=photo.source_url||'';window.stockSelectedInternetPhoto=photo;window.stockCloseInternetPhoto();toast('Photo ajoutée à l’aperçu. Elle sera enregistrée avec l’article.');}catch(error){toast(error.message||'Téléchargement impossible.',true);}};
  const field=(label,id,type='text',value='',extra='')=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<input id="${id}" type="${type}" value="${esc(value)}" ${extra} class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white"></label>`;
  const catalogField=(label,id,values,selected,kind)=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<div class="mt-2 flex gap-2"><select id="${id}" class="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium dark:border-white/10 dark:bg-black/30 dark:text-white">${values.map(v=>`<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(v)}</option>`).join('')}</select>${canManage?`<button type="button" onclick="stockManageCatalog('${kind}')" class="shrink-0 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-200" title="Gérer ${label.toLowerCase()}"><i class="ph-bold ph-sliders-horizontal mr-1"></i>Gérer</button>`:''}</div></label>`;
  const photoField=(path='')=>`<section class="sm:col-span-2 overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white shadow-sm dark:border-white/10 dark:from-white/[.04] dark:to-[#121c15]"><div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 px-4 py-3.5 dark:border-white/10"><div class="flex items-center gap-3"><span class="grid h-10 w-10 place-items-center rounded-xl bg-emerald-100 text-emerald-800 dark:bg-emerald-400/10 dark:text-emerald-300"><i class="ph-bold ph-image-square text-xl"></i></span><div><h4 class="text-sm font-extrabold text-slate-800 dark:text-white">Photo de l’article</h4><p class="mt-0.5 text-[11px] text-slate-500">Une image claire aide à reconnaître rapidement le produit.</p></div></div><span class="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">Facultatif</span></div><div id="stockPhotoDropzone" class="group relative m-4 grid min-h-48 place-items-center overflow-hidden rounded-2xl border-2 border-dashed border-slate-300 bg-white transition hover:border-emerald-400 hover:bg-emerald-50/40 dark:border-white/15 dark:bg-black/20 dark:hover:border-emerald-400/60 dark:hover:bg-emerald-400/[.04]"><div id="siPhotoPlaceholder" class="${path?'hidden':''} pointer-events-none flex flex-col items-center px-5 py-8 text-center"><span class="grid h-14 w-14 place-items-center rounded-2xl bg-emerald-50 text-emerald-700 shadow-sm transition group-hover:scale-105 dark:bg-emerald-400/10 dark:text-emerald-300"><i class="ph-bold ph-upload-simple text-2xl"></i></span><b class="mt-3 text-sm font-bold text-slate-700 dark:text-slate-200">Dépose la photo ici</b><span class="mt-1 text-xs text-slate-400">ou choisis une image depuis ton ordinateur</span></div><img id="siPhotoPreview" src="${path?`/api/gestion-stock/items/${path}/photo`:''}" class="${path?'':'hidden'} pointer-events-none max-h-64 w-full object-contain p-3" alt="Aperçu de la photo de l’article"><input id="siPhoto" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" onchange="stockPreviewPhoto(event)" class="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0" aria-label="Choisir ou déposer une photo de l’article"><span class="pointer-events-none absolute bottom-3 right-3 z-0 rounded-lg bg-slate-900/75 px-2.5 py-1.5 text-[10px] font-bold text-white opacity-0 transition group-hover:opacity-100"><i class="ph-bold ph-arrows-out-simple mr-1"></i>Cliquer pour remplacer</span></div><div class="flex flex-wrap items-center justify-between gap-3 px-4 pb-4"><div class="flex min-w-0 items-center gap-2 text-[11px] text-slate-500"><i class="ph-bold ph-info text-emerald-600"></i><span>JPG, PNG ou WebP · 8 Mo maximum</span><span id="siPhotoFileName" class="hidden max-w-48 truncate rounded-full bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-800 dark:bg-emerald-400/10 dark:text-emerald-200"></span></div>${path?'<label class="inline-flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 dark:hover:bg-rose-400/10"><input id="siRemovePhoto" type="checkbox" class="h-4 w-4 rounded accent-rose-600">Retirer cette photo</label>':''}</div></section>`;
