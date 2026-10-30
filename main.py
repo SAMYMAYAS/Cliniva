@@ -561,6 +561,33 @@ class ClientDicomServicesBridge:
             logger.exception("Impossible d’enregistrer le PDF A3 DICOM Print")
             return {"ok": False, "error": str(exc)}
 
+    def stock_save_alert_csv(self, csv_content: str, suggested_name: str = "alerte_stock.csv") -> Dict[str, Any]:
+        """Enregistre un export CSV via le sélecteur natif de Windows."""
+        try:
+            if not webview.windows:
+                return {"ok": False, "error": "La fenêtre Cliniva n’est pas prête à enregistrer le fichier."}
+            name = os.path.basename(str(suggested_name or "alerte_stock.csv"))
+            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .") or "alerte_stock.csv"
+            if not name.lower().endswith(".csv"):
+                name += ".csv"
+            dialog_api = getattr(webview, "FileDialog", None)
+            dialog_type = dialog_api.SAVE if dialog_api else webview.SAVE_DIALOG
+            selected = webview.windows[0].create_file_dialog(
+                dialog_type, save_filename=name, file_types=("Fichier CSV (*.csv)",)
+            )
+            if not selected:
+                return {"ok": True, "cancelled": True}
+            output_path = selected[0] if isinstance(selected, (list, tuple)) else selected
+            output_path = os.fspath(output_path)
+            if not output_path.lower().endswith(".csv"):
+                output_path += ".csv"
+            with open(output_path, "w", encoding="utf-8-sig", newline="") as destination:
+                destination.write(str(csv_content or ""))
+            return {"ok": True, "path": output_path}
+        except Exception as exc:
+            logger.exception("Impossible d’enregistrer l’export CSV des alertes de stock")
+            return {"ok": False, "error": str(exc)}
+
     def kacel_job_save_and_open_docx(self, docx_data_url: str, suggested_name: str = "Convention.docx") -> Dict[str, Any]:
         """Enregistre un DOCX via le dialogue Windows puis l’ouvre dans Word."""
         import base64
