@@ -703,6 +703,31 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS stock_categories (
+        id SERIAL PRIMARY KEY,
+        nom TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS stock_units (
+        id SERIAL PRIMARY KEY,
+        nom TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO stock_categories (nom) VALUES
+        ('Pharmaceutique'), ('Informatique'), ('Technique'),
+        ('Sanitaire et détergent'), ('Pièces informatique et mécanique'), ('Autre')
+        ON CONFLICT (nom) DO NOTHING;
+    INSERT INTO stock_categories (nom)
+        SELECT DISTINCT categorie FROM stock_items WHERE BTRIM(categorie) <> ''
+        ON CONFLICT (nom) DO NOTHING;
+    INSERT INTO stock_units (nom) VALUES
+        ('unité'), ('pièce'), ('boîte'), ('carton'), ('paquet'), ('flacon'),
+        ('ampoule'), ('sachet'), ('tube'), ('paire'), ('kg'), ('g'), ('litre'),
+        ('ml'), ('rouleau'), ('bidon')
+        ON CONFLICT (nom) DO NOTHING;
+    INSERT INTO stock_units (nom)
+        SELECT DISTINCT unite FROM stock_items WHERE BTRIM(unite) <> ''
+        ON CONFLICT (nom) DO NOTHING;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_items_reference_unique
         ON stock_items (reference) WHERE reference <> '';
     CREATE INDEX IF NOT EXISTS idx_stock_items_category_name
