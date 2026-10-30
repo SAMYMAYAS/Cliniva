@@ -721,6 +721,19 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         nom TEXT NOT NULL UNIQUE,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS stock_suppliers (
+        id SERIAL PRIMARY KEY,
+        designation TEXT NOT NULL UNIQUE,
+        adresse TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL DEFAULT '',
+        telephone TEXT NOT NULL DEFAULT '',
+        contact TEXT NOT NULL DEFAULT '',
+        secteur_activite TEXT NOT NULL DEFAULT '',
+        observations TEXT NOT NULL DEFAULT '',
+        actif BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     INSERT INTO stock_categories (nom) VALUES
         ('Pharmaceutique'), ('Informatique'), ('Technique'),
         ('Sanitaire et détergent'), ('Pièces informatique et mécanique'), ('Autre')
@@ -773,6 +786,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         validated_at TIMESTAMP WITH TIME ZONE
     );
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS fournisseur TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS fournisseur_id INT REFERENCES stock_suppliers(id) ON DELETE SET NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_documents_number
         ON stock_documents (numero) WHERE numero <> '';
     CREATE INDEX IF NOT EXISTS idx_stock_documents_type_date
