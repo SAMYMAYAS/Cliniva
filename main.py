@@ -588,6 +588,88 @@ class ClientDicomServicesBridge:
             logger.exception("Impossible d’enregistrer l’export CSV des alertes de stock")
             return {"ok": False, "error": str(exc)}
 
+    def stock_save_alert_xlsx(self, payload_json: str, suggested_name: str = "alerte_stock.xlsx") -> Dict[str, Any]:
+        """Construit un classeur Cliniva formaté et demande où l’enregistrer."""
+        try:
+            from io import BytesIO
+            from openpyxl import Workbook
+            from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+            from openpyxl.utils import get_column_letter
+
+            if not webview.windows:
+                return {"ok": False, "error": "La fenêtre Cliniva n’est pas prête à enregistrer le fichier."}
+            payload = json.loads(str(payload_json or "{}"))
+            rows = payload.get("rows") or []
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Alertes stock"
+            headers = ["Produit", "Référence", "Lot", "Quantité", "Détail"]
+            sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+            title = sheet.cell(1, 1, str(payload.get("title") or "Alertes de stock"))
+            title.font = Font(name="Aptos Display", size=18, bold=True, color="FFFFFF")
+            title.fill = PatternFill("solid", fgColor="173B2B")
+            title.alignment = Alignment(vertical="center")
+            sheet.row_dimensions[1].height = 34
+            sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(headers))
+            subtitle = sheet.cell(2, 1, f"Gestion Stock · Cliniva  |  Généré le {payload.get('generated_at', '')}  |  {len(rows)} ligne(s)")
+            subtitle.font = Font(name="Aptos", size=10, color="53665B", italic=True)
+            subtitle.alignment = Alignment(vertical="center")
+            sheet.row_dimensions[2].height = 23
+            header_fill = PatternFill("solid", fgColor="E7F2EA")
+            header_font = Font(name="Aptos", size=10, bold=True, color="173B2B")
+            thin = Side(style="thin", color="D5E1D8")
+            for col, value in enumerate(headers, 1):
+                cell = sheet.cell(4, col, value)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(vertical="center")
+                cell.border = Border(bottom=Side(style="medium", color="4D8A62"))
+            for row_index, row in enumerate(rows, 5):
+                values = [row.get("designation", ""), row.get("reference", "") or "—",
+                          row.get("lot", "—") or "—", row.get("quantity", ""), row.get("detail", "")]
+                for col, value in enumerate(values, 1):
+                    cell = sheet.cell(row_index, col, value)
+                    cell.font = Font(name="Aptos", size=10, color="26352B", bold=(col == 1))
+                    cell.alignment = Alignment(vertical="center", wrap_text=True)
+                    cell.border = Border(bottom=thin)
+                    if row_index % 2 == 1:
+                        cell.fill = PatternFill("solid", fgColor="F5F8F6")
+                sheet.row_dimensions[row_index].height = 25
+            widths = [34, 20, 20, 20, 24]
+            for col, width in enumerate(widths, 1):
+                sheet.column_dimensions[get_column_letter(col)].width = width
+            sheet.freeze_panes = "A5"
+            sheet.auto_filter.ref = f"A4:E{max(4, 4 + len(rows))}"
+            sheet.sheet_view.showGridLines = False
+            sheet.sheet_properties.pageSetUpPr.fitToPage = True
+            sheet.page_setup.orientation = "landscape"
+            sheet.page_setup.fitToWidth = 1
+            sheet.page_setup.fitToHeight = 0
+            output = BytesIO()
+            workbook.save(output)
+
+            name = os.path.basename(str(suggested_name or "alerte_stock.xlsx"))
+            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .") or "alerte_stock.xlsx"
+            if not name.lower().endswith(".xlsx"):
+                name += ".xlsx"
+            dialog_api = getattr(webview, "FileDialog", None)
+            dialog_type = dialog_api.SAVE if dialog_api else webview.SAVE_DIALOG
+            selected = webview.windows[0].create_file_dialog(
+                dialog_type, save_filename=name, file_types=("Classeur Excel (*.xlsx)",)
+            )
+            if not selected:
+                return {"ok": True, "cancelled": True}
+            output_path = selected[0] if isinstance(selected, (list, tuple)) else selected
+            output_path = os.fspath(output_path)
+            if not output_path.lower().endswith(".xlsx"):
+                output_path += ".xlsx"
+            with open(output_path, "wb") as destination:
+                destination.write(output.getvalue())
+            return {"ok": True, "path": output_path}
+        except Exception as exc:
+            logger.exception("Impossible d’enregistrer le classeur des alertes de stock")
+            return {"ok": False, "error": str(exc)}
+
     def kacel_job_save_and_open_docx(self, docx_data_url: str, suggested_name: str = "Convention.docx") -> Dict[str, Any]:
         """Enregistre un DOCX via le dialogue Windows puis l’ouvre dans Word."""
         import base64
