@@ -2,14 +2,19 @@
 
 from decimal import Decimal, InvalidOperation
 from html import escape
+import asyncio
 import json
 import mimetypes
 from pathlib import Path
+import re
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit
+from urllib.request import Request as UrlRequest, urlopen
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from app.auth import get_current_user, track_action
 from database import DOCS_DIR, get_db_cursor
 
@@ -47,6 +52,65 @@ def _date(value: Any, label: str) -> str | None:
         return date.fromisoformat(raw).isoformat()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"La date « {label} » est invalide.") from exc
+
+
+def _openverse_search(query: str) -> list[dict[str, Any]]:
+    params = urlencode({"q": query, "page_size": 12, "mature": "false"})
+    request = UrlRequest(
+        f"https://api.openverse.org/v1/images/?{params}",
+        headers={"Accept": "application/json", "User-Agent": "ClinivaStock/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=18) as response:
+            payload = json.loads(response.read(2 * 1024 * 1024))
+    except HTTPError as exc:
+        if exc.code == 429:
+            raise HTTPException(status_code=429, detail="Le service de recherche d’images limite momentanément les requêtes. Réessaie dans un instant.") from exc
+        raise HTTPException(status_code=502, detail=f"Le service d’images a répondu avec l’erreur {exc.code}.") from exc
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="Recherche Internet indisponible. Vérifie la connexion du serveur et réessaie.") from exc
+    results = []
+    for image in payload.get("results", []):
+        image_id = str(image.get("id") or "")
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", image_id):
+            continue
+        results.append({
+            "id": image_id,
+            "title": str(image.get("title") or "Image sans titre")[:250],
+            "creator": str(image.get("creator") or "Auteur non indiqué")[:160],
+            "license": str(image.get("license") or "")[:40],
+            "license_version": str(image.get("license_version") or "")[:20],
+            "license_url": str(image.get("license_url") or "")[:500],
+            "thumbnail": f"/api/gestion-stock/photo-openverse/{image_id}?thumbnail=1",
+            "source_url": str(image.get("foreign_landing_url") or "")[:1000],
+        })
+    return results
+
+
+def _openverse_image(image_id: str, *, full_size: bool = True) -> tuple[bytes, str]:
+    request = UrlRequest(
+        f"https://api.openverse.org/v1/images/{image_id}/thumb/?full_size={'true' if full_size else 'false'}&compressed=true",
+        headers={"Accept": "image/*", "User-Agent": "ClinivaStock/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=25) as response:
+            content_type = response.headers.get_content_type()
+            content = response.read(8 * 1024 * 1024 + 1)
+    except HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Impossible de récupérer cette image depuis Openverse.") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(status_code=502, detail="Téléchargement de l’image indisponible. Réessaie.") from exc
+    signatures = {
+        "image/jpeg": b"\xff\xd8\xff",
+        "image/png": b"\x89PNG\r\n\x1a\n",
+        "image/webp": b"RIFF",
+    }
+    signature = signatures.get(content_type)
+    if not content or len(content) > 8 * 1024 * 1024 or not signature or not content.startswith(signature):
+        raise HTTPException(status_code=415, detail="Cette image n’est pas un JPG, PNG ou WebP valide de moins de 8 Mo.")
+    if content_type == "image/webp" and content[8:12] != b"WEBP":
+        raise HTTPException(status_code=415, detail="Le fichier WebP reçu est invalide.")
+    return content, content_type
 
 
 def _stock_document_data(cursor, document_ids: list[int]) -> list[dict[str, Any]]:
@@ -87,6 +151,7 @@ def stock_data(request: Request):
         cursor.execute("SELECT nom FROM stock_units ORDER BY nom")
         units = [row["nom"] for row in cursor.fetchall()]
         cursor.execute("""SELECT i.id, i.reference, i.designation, i.categorie, i.unite, i.photo_path,
+                i.photo_credit, i.photo_license, i.photo_source_url,
                 i.seuil_alerte, i.suivi_peremption, i.actif, i.notes, i.created_at,
                 COALESCE(SUM(l.quantite_actuelle),0) AS stock_total,
                 COALESCE(SUM(l.quantite_actuelle) FILTER (WHERE l.date_peremption IS NULL OR l.date_peremption >= CURRENT_DATE),0) AS stock_disponible,
@@ -152,6 +217,28 @@ def stock_item_photo(item_id: int, request: Request):
     return FileResponse(photo_path, media_type=mimetypes.guess_type(photo_path.name)[0] or "application/octet-stream", headers={"Cache-Control": "private, max-age=300"})
 
 
+@stock_router.get("/photo-search")
+async def stock_photo_search(request: Request):
+    user = get_current_user(request)
+    _require(user, "stock_manage")
+    query = str(request.query_params.get("q") or "").strip()
+    if len(query) < 2 or len(query) > 200:
+        raise HTTPException(status_code=400, detail="Saisis au moins deux caractères (200 maximum) pour rechercher une photo.")
+    results = await asyncio.to_thread(_openverse_search, query)
+    return {"results": results, "query": query}
+
+
+@stock_router.get("/photo-openverse/{image_id}")
+async def stock_openverse_photo(image_id: str, request: Request):
+    user = get_current_user(request)
+    _require(user, "stock_manage")
+    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", image_id):
+        raise HTTPException(status_code=400, detail="Identifiant d’image invalide.")
+    thumbnail = request.query_params.get("thumbnail") == "1"
+    content, content_type = await asyncio.to_thread(_openverse_image, image_id, full_size=not thumbnail)
+    return Response(content=content, media_type=content_type, headers={"Cache-Control": "private, max-age=3600" if thumbnail else "private, no-store"})
+
+
 @stock_router.post("/catalog/save")
 async def stock_catalog_save(request: Request):
     user = get_current_user(request)
@@ -211,6 +298,11 @@ async def stock_item_save(request: Request):
     data = await request.form()
     photo = data.get("photo")
     remove_photo = str(data.get("supprimer_photo") or "").lower() in {"true", "1", "on"}
+    photo_credit = str(data.get("photo_credit") or "").strip()[:240]
+    photo_license = str(data.get("photo_license") or "").strip()[:100]
+    photo_source_url = str(data.get("photo_source_url") or "").strip()[:1000]
+    if photo_source_url and urlsplit(photo_source_url).scheme.lower() not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="Le lien de provenance de la photo est invalide.")
     uploaded_photo_path = ""
     uploaded_photo_file: Path | None = None
     photo_content: bytes | None = None
@@ -265,25 +357,36 @@ async def stock_item_save(request: Request):
             if not cursor.fetchone():
                 raise HTTPException(status_code=400, detail="Choisis une unité existante dans la liste.")
             if item_id:
-                cursor.execute("SELECT photo_path FROM stock_items WHERE id=%s AND actif=TRUE FOR UPDATE", (item_id,))
+                cursor.execute("SELECT photo_path, photo_credit, photo_license, photo_source_url FROM stock_items WHERE id=%s AND actif=TRUE FOR UPDATE", (item_id,))
                 existing = cursor.fetchone()
                 if not existing:
                     raise HTTPException(status_code=404, detail="Article introuvable ou archivé.")
                 old_photo_path = existing["photo_path"] or ""
                 photo_path = uploaded_photo_path or ("" if remove_photo else old_photo_path)
+                if not uploaded_photo_path and not remove_photo:
+                    photo_credit = existing["photo_credit"] or ""
+                    photo_license = existing["photo_license"] or ""
+                    photo_source_url = existing["photo_source_url"] or ""
+                elif remove_photo and not uploaded_photo_path:
+                    photo_credit = photo_license = photo_source_url = ""
                 cursor.execute("""UPDATE stock_items SET reference=%s, designation=%s, categorie=%s,
                     unite=%s, seuil_alerte=%s, suivi_peremption=%s, notes=%s, photo_path=%s,
+                    photo_credit=%s, photo_license=%s, photo_source_url=%s,
                     updated_at=CURRENT_TIMESTAMP WHERE id=%s AND actif=TRUE RETURNING id""",
-                    (reference, designation, category, unit, threshold, track_expiry, notes, photo_path, item_id))
+                    (reference, designation, category, unit, threshold, track_expiry, notes, photo_path,
+                     photo_credit, photo_license, photo_source_url, item_id))
                 row = cursor.fetchone()
                 if not row:
                     raise HTTPException(status_code=404, detail="Article introuvable ou archivé.")
                 saved_id = item_id
             else:
                 cursor.execute("""INSERT INTO stock_items
-                    (reference, designation, categorie, unite, seuil_alerte, suivi_peremption, notes, photo_path, created_by)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-                    (reference, designation, category, unit, threshold, track_expiry, notes, uploaded_photo_path, user["id"]))
+                    (reference, designation, categorie, unite, seuil_alerte, suivi_peremption, notes, photo_path,
+                     photo_credit, photo_license, photo_source_url, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (reference, designation, category, unit, threshold, track_expiry, notes, uploaded_photo_path,
+                     photo_credit if uploaded_photo_path else "", photo_license if uploaded_photo_path else "",
+                     photo_source_url if uploaded_photo_path else "", user["id"]))
                 saved_id = cursor.fetchone()["id"]
                 if not reference:
                     reference = f"STK-{saved_id:06d}"
@@ -521,14 +624,18 @@ def render_html(user: dict[str, Any] | None = None) -> str:
  function dateTime(v){return v?new Date(v).toLocaleString('fr-FR'):'—';}
  function renderMovements(){const body=$('stockMovementRows');body.innerHTML=data.movements.length?data.movements.map(m=>`<tr class="border-b border-slate-100 hover:bg-sky-50/60 dark:border-white/5"><td class="px-3 py-3"><b>${esc(m.bon_numero)}</b><small class="block text-xs text-slate-400">${dateTime(m.created_at)}</small></td><td class="px-3 py-3 font-semibold dark:text-white">${esc(m.designation)} <small class="block text-xs text-slate-400">${esc(m.reference)}</small></td><td class="px-3 py-3">${esc(m.numero_lot)}${m.date_peremption?`<small class="block text-xs text-slate-400">${esc(m.date_peremption)}</small>`:''}</td><td class="px-3 py-3"><span class="rounded-full px-2.5 py-1 text-[10px] font-bold ${m.sens==='Entrée'?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-700'}">${esc(m.sens)}</span></td><td class="px-3 py-3 font-extrabold ${m.sens==='Entrée'?'text-emerald-700':'text-rose-600'}">${m.sens==='Entrée'?'+':'−'}${fmt(m.quantite)} ${esc(m.unite)}</td><td class="px-3 py-3 text-slate-500">${esc(m.utilisateur)}</td></tr>`).join(''):'<tr><td colspan="6" class="p-8 text-center text-slate-400">Aucun mouvement enregistré.</td></tr>';}
  async function refresh(){if(!$('stockModule'))return;try{data=await api('/data');if(!$('stockModule'))return;categories=data.categories||[];units=data.unites||[];$('stockKpiItems').textContent=data.summary.articles||0;$('stockKpiLow').textContent=data.summary.alertes_stock||0;$('stockKpiExpiring').textContent=data.summary.lots_proches||0;$('stockKpiExpired').textContent=fmt(data.summary.quantite_perimee||0);stockRenderInventory();stockRenderDocuments();renderMovements();}catch(e){if($('stockModule'))toast(e.message,true);}}
- window.stockOpenModal=(title,html,handler)=>{activeForm=handler;$('stockSubmitButton').classList.remove('hidden');$('stockSubmitButton').textContent='Valider';$('stockModalTitle').textContent=title;$('stockFormFields').innerHTML=html;$('stockModal').classList.remove('hidden');$('stockModal').classList.add('flex');document.body.classList.add('overflow-hidden');};
+ window.stockOpenModal=(title,html,handler)=>{activeForm=handler;window.stockSelectedInternetPhoto=null;$('stockSubmitButton').classList.remove('hidden');$('stockSubmitButton').textContent='Valider';$('stockModalTitle').textContent=title;if(title.toLocaleLowerCase('fr').includes('article')){const toolbar=`<div class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50/70 p-3 dark:border-emerald-400/20 dark:bg-emerald-400/[.06]"><div><b class="block text-xs text-emerald-900 dark:text-emerald-200">Photo du produit</b><span class="text-[11px] text-emerald-800/75 dark:text-emerald-100/70">Recherche par nom et référence, ou conserve le téléversement manuel.</span></div><button type="button" onclick="stockSearchInternetPhoto()" class="inline-flex items-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-sm transition hover:bg-emerald-800"><i class="ph-bold ph-globe-hemisphere-west text-base"></i>Rechercher sur Internet</button><input id="siPhotoCredit" type="hidden" value=""><input id="siPhotoLicense" type="hidden" value=""><input id="siPhotoSource" type="hidden" value=""></div>`;const marker='<section class="sm:col-span-2 overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br';const index=html.indexOf(marker);html=index>=0?html.slice(0,index)+toolbar+html.slice(index):toolbar+html;}$('stockFormFields').innerHTML=html;$('stockModal').classList.remove('hidden');$('stockModal').classList.add('flex');document.body.classList.add('overflow-hidden');};
  window.stockCloseModal=()=>{$('stockModal').classList.add('hidden');$('stockModal').classList.remove('flex');window.stockCloseCatalog();if(window.stockPhotoPreviewUrl){URL.revokeObjectURL(window.stockPhotoPreviewUrl);window.stockPhotoPreviewUrl=null;}document.body.classList.remove('overflow-hidden');};
  window.stockCloseCatalog=()=>{$('stockCatalogModal').classList.add('hidden');$('stockCatalogModal').classList.remove('flex');};
+ window.stockSearchInternetPhoto=()=>{const modalId='stockInternetPhotoModal';let modal=$(modalId);if(!modal){modal=document.createElement('div');modal.id=modalId;modal.className='fixed inset-0 z-[2147483605] hidden items-center justify-center bg-slate-950/75 p-3 backdrop-blur-sm';modal.innerHTML=`<section class="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-[#121c15]"><header class="flex items-center justify-between bg-gradient-to-r from-[#101b13] to-[#183b20] px-5 py-4 text-white"><div><div class="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Images libres de droits</div><h3 class="text-lg font-black">Recherche de photos produit</h3></div><button type="button" onclick="stockCloseInternetPhoto()" class="grid h-9 w-9 place-items-center rounded-xl bg-white/10 hover:bg-white/20" aria-label="Fermer"><i class="ph-bold ph-x"></i></button></header><div class="flex flex-wrap gap-2 border-b border-slate-100 p-4 dark:border-white/10"><input id="siPhotoQuery" class="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-white/10 dark:bg-black/30 dark:text-white" placeholder="Nom et référence du produit"><button type="button" onclick="stockRunInternetPhotoSearch()" class="inline-flex items-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-xs font-extrabold text-white"><i class="ph-bold ph-magnifying-glass"></i>Rechercher</button></div><p class="px-4 pt-3 text-[11px] text-slate-500">Les résultats Openverse sont accompagnés de leur auteur et de leur licence. La photo sélectionnée sera enregistrée avec l’article.</p><div id="siPhotoResults" class="min-h-32 flex-1 overflow-y-auto p-4"><div class="grid min-h-28 place-items-center text-sm text-slate-400">Saisis un nom ou une référence pour rechercher.</div></div><footer class="flex justify-end border-t border-slate-100 p-3 dark:border-white/10"><button type="button" onclick="stockCloseInternetPhoto()" class="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold dark:border-white/10 dark:text-white">Fermer</button></footer></section>`;document.body.appendChild(modal);}const query=[$('siReference')?.value,$('siName')?.value].map(v=>(v||'').trim()).filter(Boolean).join(' ');$('siPhotoQuery').value=query;modal.classList.remove('hidden');modal.classList.add('flex');if(query.length>=2)window.stockRunInternetPhotoSearch();};
+ window.stockCloseInternetPhoto=()=>{const modal=$('stockInternetPhotoModal');if(modal){modal.classList.add('hidden');modal.classList.remove('flex');}};
+ window.stockRunInternetPhotoSearch=async()=>{const query=$('siPhotoQuery')?.value.trim();const results=$('siPhotoResults');if(!query||query.length<2){results.innerHTML='<div class="py-10 text-center text-sm text-amber-700">Saisis au moins deux caractères.</div>';return;}results.innerHTML='<div class="grid min-h-28 place-items-center text-sm text-slate-500"><span><i class="ph-bold ph-spinner animate-spin mr-2"></i>Recherche en cours…</span></div>';try{const response=await api('/photo-search?q='+encodeURIComponent(query));const photos=response.results||[];if(!photos.length){results.innerHTML='<div class="py-10 text-center text-sm text-slate-500">Aucune photo trouvée. Essaie une autre formulation ou téléverse ta propre image.</div>';return;}results.innerHTML=`<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">${photos.map((photo,index)=>`<article class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-white/10 dark:bg-black/20"><div class="grid h-40 place-items-center bg-slate-100 dark:bg-white/5"><img src="${esc(photo.thumbnail)}" alt="${esc(photo.title)}" loading="lazy" referrerpolicy="no-referrer" class="h-full w-full object-contain"></div><div class="space-y-2 p-3"><b class="block truncate text-xs text-slate-800 dark:text-white" title="${esc(photo.title)}">${esc(photo.title)}</b><div class="text-[10px] text-slate-500">${esc(photo.creator)} · ${esc(photo.license)} ${esc(photo.license_version)}</div><div class="flex items-center justify-between gap-2"><a href="${esc(photo.source_url)}" target="_blank" rel="noopener noreferrer" class="text-[10px] font-semibold text-sky-700 underline">Voir la source</a><button type="button" onclick="stockUseInternetPhoto(${index})" class="rounded-lg bg-emerald-700 px-3 py-2 text-[10px] font-extrabold text-white hover:bg-emerald-800"><i class="ph-bold ph-check mr-1"></i>Choisir</button></div></div></article>`).join('')}</div>`;window.stockInternetPhotoResults=photos;}catch(error){results.innerHTML=`<div class="rounded-xl bg-rose-50 p-4 text-sm text-rose-700">${esc(error.message||'Recherche impossible.')}</div>`;}};
+ window.stockUseInternetPhoto=async index=>{const photo=window.stockInternetPhotoResults?.[index];if(!photo)return;try{const response=await fetch('/api/gestion-stock/photo-openverse/'+encodeURIComponent(photo.id),{credentials:'same-origin'});if(!response.ok){let message='Impossible de récupérer cette photo.';try{const body=await response.json();message=body.detail||message;}catch{}throw new Error(message);}const blob=await response.blob();const extension=blob.type==='image/png'?'png':blob.type==='image/webp'?'webp':'jpg';const file=new File([blob],`openverse_${photo.id}.${extension}`,{type:blob.type});const transfer=new DataTransfer();transfer.items.add(file);$('siPhoto').files=transfer.files;window.stockPreviewPhoto({target:$('siPhoto')},true);$('siPhotoCredit').value=photo.creator||'';$('siPhotoLicense').value=[photo.license,photo.license_version].filter(Boolean).join(' ');$('siPhotoSource').value=photo.source_url||'';window.stockSelectedInternetPhoto=photo;window.stockCloseInternetPhoto();toast('Photo ajoutée à l’aperçu. Elle sera enregistrée avec l’article.');}catch(error){toast(error.message||'Téléchargement impossible.',true);}};
  const field=(label,id,type='text',value='',extra='')=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<input id="${id}" type="${type}" value="${esc(value)}" ${extra} class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white"></label>`;
  const catalogField=(label,id,values,selected,kind)=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<div class="mt-2 flex gap-2"><select id="${id}" class="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium dark:border-white/10 dark:bg-black/30 dark:text-white">${values.map(v=>`<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(v)}</option>`).join('')}</select>${canManage?`<button type="button" onclick="stockManageCatalog('${kind}')" class="shrink-0 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-200" title="Gérer ${label.toLowerCase()}"><i class="ph-bold ph-sliders-horizontal mr-1"></i>Gérer</button>`:''}</div></label>`;
  const photoField=(path='')=>`<section class="sm:col-span-2 overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white shadow-sm dark:border-white/10 dark:from-white/[.04] dark:to-[#121c15]"><div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 px-4 py-3.5 dark:border-white/10"><div class="flex items-center gap-3"><span class="grid h-10 w-10 place-items-center rounded-xl bg-emerald-100 text-emerald-800 dark:bg-emerald-400/10 dark:text-emerald-300"><i class="ph-bold ph-image-square text-xl"></i></span><div><h4 class="text-sm font-extrabold text-slate-800 dark:text-white">Photo de l’article</h4><p class="mt-0.5 text-[11px] text-slate-500">Une image claire aide à reconnaître rapidement le produit.</p></div></div><span class="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">Facultatif</span></div><div id="stockPhotoDropzone" class="group relative m-4 grid min-h-48 place-items-center overflow-hidden rounded-2xl border-2 border-dashed border-slate-300 bg-white transition hover:border-emerald-400 hover:bg-emerald-50/40 dark:border-white/15 dark:bg-black/20 dark:hover:border-emerald-400/60 dark:hover:bg-emerald-400/[.04]"><div id="siPhotoPlaceholder" class="${path?'hidden':''} pointer-events-none flex flex-col items-center px-5 py-8 text-center"><span class="grid h-14 w-14 place-items-center rounded-2xl bg-emerald-50 text-emerald-700 shadow-sm transition group-hover:scale-105 dark:bg-emerald-400/10 dark:text-emerald-300"><i class="ph-bold ph-upload-simple text-2xl"></i></span><b class="mt-3 text-sm font-bold text-slate-700 dark:text-slate-200">Dépose la photo ici</b><span class="mt-1 text-xs text-slate-400">ou choisis une image depuis ton ordinateur</span></div><img id="siPhotoPreview" src="${path?`/api/gestion-stock/items/${path}/photo`:''}" class="${path?'':'hidden'} pointer-events-none max-h-64 w-full object-contain p-3" alt="Aperçu de la photo de l’article"><input id="siPhoto" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" onchange="stockPreviewPhoto(event)" class="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0" aria-label="Choisir ou déposer une photo de l’article"><span class="pointer-events-none absolute bottom-3 right-3 z-0 rounded-lg bg-slate-900/75 px-2.5 py-1.5 text-[10px] font-bold text-white opacity-0 transition group-hover:opacity-100"><i class="ph-bold ph-arrows-out-simple mr-1"></i>Cliquer pour remplacer</span></div><div class="flex flex-wrap items-center justify-between gap-3 px-4 pb-4"><div class="flex min-w-0 items-center gap-2 text-[11px] text-slate-500"><i class="ph-bold ph-info text-emerald-600"></i><span>JPG, PNG ou WebP · 8 Mo maximum</span><span id="siPhotoFileName" class="hidden max-w-48 truncate rounded-full bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-800 dark:bg-emerald-400/10 dark:text-emerald-200"></span></div>${path?'<label class="inline-flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 dark:hover:bg-rose-400/10"><input id="siRemovePhoto" type="checkbox" class="h-4 w-4 rounded accent-rose-600">Retirer cette photo</label>':''}</div></section>`;
- function stockItemFormData(id=null){const d=new FormData();if(id)d.append('id',id);['designation','reference','categorie','unite','seuil_alerte','notes'].forEach(k=>{const fieldId={designation:'siName',reference:'siReference',categorie:'siCategory',unite:'siUnit',seuil_alerte:'siThreshold',notes:'siNotes'}[k];d.append(k,$(fieldId).value);});d.append('suivi_peremption',$('siExpiry').checked?'true':'false');d.append('supprimer_photo',$('siRemovePhoto')?.checked?'true':'false');const file=$('siPhoto').files?.[0];if(file)d.append('photo',file,file.name);return d;}
- window.stockPreviewPhoto=e=>{const file=e.target.files?.[0];if(!file)return;if(window.stockPhotoPreviewUrl)URL.revokeObjectURL(window.stockPhotoPreviewUrl);window.stockPhotoPreviewUrl=URL.createObjectURL(file);$('siPhotoPreview').src=window.stockPhotoPreviewUrl;$('siPhotoPreview').classList.remove('hidden');$('siPhotoPlaceholder').classList.add('hidden');const name=$('siPhotoFileName');name.textContent=file.name;name.classList.remove('hidden');};
+ function stockItemFormData(id=null){const d=new FormData();if(id)d.append('id',id);['designation','reference','categorie','unite','seuil_alerte','notes'].forEach(k=>{const fieldId={designation:'siName',reference:'siReference',categorie:'siCategory',unite:'siUnit',seuil_alerte:'siThreshold',notes:'siNotes'}[k];d.append(k,$(fieldId).value);});d.append('suivi_peremption',$('siExpiry').checked?'true':'false');d.append('supprimer_photo',$('siRemovePhoto')?.checked?'true':'false');d.append('photo_credit',$('siPhotoCredit')?.value||'');d.append('photo_license',$('siPhotoLicense')?.value||'');d.append('photo_source_url',$('siPhotoSource')?.value||'');const file=$('siPhoto').files?.[0];if(file)d.append('photo',file,file.name);return d;}
+ window.stockPreviewPhoto=(e,fromInternet=false)=>{const file=e.target.files?.[0];if(!file)return;if(!fromInternet){$('siPhotoCredit').value='';$('siPhotoLicense').value='';$('siPhotoSource').value='';window.stockSelectedInternetPhoto=null;}if(window.stockPhotoPreviewUrl)URL.revokeObjectURL(window.stockPhotoPreviewUrl);window.stockPhotoPreviewUrl=URL.createObjectURL(file);$('siPhotoPreview').src=window.stockPhotoPreviewUrl;$('siPhotoPreview').classList.remove('hidden');$('siPhotoPlaceholder').classList.add('hidden');const name=$('siPhotoFileName');name.textContent=file.name;name.classList.remove('hidden');};
  window.stockNewItem=()=>{if(!canManage)return;stockOpenModal('Nouvel article',`<div class="grid gap-3 sm:grid-cols-2">${field('Désignation *','siName')} ${field('Référence (facultative)','siReference')}${catalogField('Catégorie *','siCategory',categories,categories[0],'categorie')}${catalogField('Unité de stock *','siUnit',units,units[0],'unite')}${field('Seuil d’alerte','siThreshold','number','0','min="0" step="0.001"')}<label class="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800"><input id="siExpiry" type="checkbox" class="h-4 w-4 accent-amber-600">Suivre la date de péremption</label>${photoField()}<label class="block text-xs font-bold text-slate-600 dark:text-slate-300 sm:col-span-2">Notes<textarea id="siNotes" rows="2" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-white/10 dark:bg-black/30 dark:text-white"></textarea></label></div>`,async()=>{const r=await api('/items/save',{method:'POST',body:stockItemFormData()});stockCloseModal();toast(`Article ${r.reference} enregistré.`);await refresh();});};
  window.stockEditItem=id=>{const i=data.items.find(x=>Number(x.id)===Number(id));if(!i)return;stockOpenModal('Modifier un article',`<div class="grid gap-3 sm:grid-cols-2">${field('Désignation *','siName','text',i.designation)}${field('Référence','siReference','text',i.reference)}${catalogField('Catégorie *','siCategory',categories,i.categorie,'categorie')}${catalogField('Unité *','siUnit',units,i.unite,'unite')}${field('Seuil d’alerte','siThreshold','number',i.seuil_alerte,'min="0" step="0.001"')}<label class="flex items-center gap-2 rounded-xl border p-3 text-sm font-semibold"><input id="siExpiry" type="checkbox" ${i.suivi_peremption?'checked':''}>Suivre la date de péremption</label>${photoField(i.photo_path?i.id:'')}<label class="block text-xs font-bold sm:col-span-2">Notes<textarea id="siNotes" rows="2" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm">${esc(i.notes||'')}</textarea></label></div>`,async()=>{await api('/items/save',{method:'POST',body:stockItemFormData(i.id)});stockCloseModal();toast('Article modifié.');await refresh();});};
  window.stockManageCatalog=kind=>{if(!canManage||!['categorie','unite'].includes(kind))return;catalogEdit=null;$('stockCatalogTitle').textContent=kind==='categorie'?'Gérer les catégories':'Gérer les unités';$('stockCatalogLabel').textContent=kind==='categorie'?'Nom de la catégorie':'Nom de l’unité';$('stockCatalogName').value='';$('stockCatalogSaveButton').innerHTML='<i class="ph-bold ph-plus mr-1"></i>Ajouter';$('stockCatalogModal').dataset.kind=kind;stockRenderCatalog();$('stockCatalogModal').classList.remove('hidden');$('stockCatalogModal').classList.add('flex');};
