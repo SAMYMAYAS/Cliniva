@@ -734,6 +734,13 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS stock_settings (
+        id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        jours_alerte_peremption INT NOT NULL DEFAULT 90 CHECK (jours_alerte_peremption BETWEEN 1 AND 3650),
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO stock_settings (id, jours_alerte_peremption) VALUES (1, 90)
+        ON CONFLICT (id) DO NOTHING;
     INSERT INTO stock_categories (nom) VALUES
         ('Pharmaceutique'), ('Informatique'), ('Technique'),
         ('Sanitaire et détergent'), ('Pièces informatique et mécanique'), ('Autre')
