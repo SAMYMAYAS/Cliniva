@@ -687,6 +687,89 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     );
     CREATE INDEX IF NOT EXISTS idx_cliniva_notifications_user_unread
         ON cliniva_notifications (user_id, created_at DESC) WHERE read_at IS NULL;
+
+    -- Gestion centralisée des stocks multi-catégories, lots et documents internes.
+    CREATE TABLE IF NOT EXISTS stock_items (
+        id SERIAL PRIMARY KEY,
+        reference TEXT NOT NULL DEFAULT '',
+        designation TEXT NOT NULL,
+        categorie TEXT NOT NULL,
+        unite TEXT NOT NULL DEFAULT 'unité',
+        seuil_alerte NUMERIC(14,3) NOT NULL DEFAULT 0 CHECK (seuil_alerte >= 0),
+        suivi_peremption BOOLEAN NOT NULL DEFAULT FALSE,
+        actif BOOLEAN NOT NULL DEFAULT TRUE,
+        notes TEXT NOT NULL DEFAULT '',
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_items_reference_unique
+        ON stock_items (reference) WHERE reference <> '';
+    CREATE INDEX IF NOT EXISTS idx_stock_items_category_name
+        ON stock_items (categorie, designation);
+    CREATE TABLE IF NOT EXISTS stock_lots (
+        id SERIAL PRIMARY KEY,
+        item_id INT NOT NULL REFERENCES stock_items(id) ON DELETE RESTRICT,
+        numero_lot TEXT NOT NULL,
+        date_peremption DATE,
+        quantite_initiale NUMERIC(14,3) NOT NULL CHECK (quantite_initiale >= 0),
+        quantite_actuelle NUMERIC(14,3) NOT NULL CHECK (quantite_actuelle >= 0),
+        prix_unitaire NUMERIC(14,2),
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CHECK (prix_unitaire IS NULL OR prix_unitaire >= 0)
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_lots_item_expiry
+        ON stock_lots (item_id, date_peremption, created_at);
+    CREATE TABLE IF NOT EXISTS stock_documents (
+        id SERIAL PRIMARY KEY,
+        numero TEXT NOT NULL DEFAULT '',
+        type_document TEXT NOT NULL CHECK (type_document IN ('Entrée', 'Sortie', 'Commande interne')),
+        statut TEXT NOT NULL DEFAULT 'Validé' CHECK (statut IN ('Validé', 'En attente', 'Clôturé', 'Annulé')),
+        service_destination TEXT NOT NULL DEFAULT '',
+        demandeur TEXT NOT NULL DEFAULT '',
+        motif TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        validated_by INT REFERENCES users(id) ON DELETE SET NULL,
+        validated_at TIMESTAMP WITH TIME ZONE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_documents_number
+        ON stock_documents (numero) WHERE numero <> '';
+    CREATE INDEX IF NOT EXISTS idx_stock_documents_type_date
+        ON stock_documents (type_document, created_at DESC);
+    CREATE TABLE IF NOT EXISTS stock_document_lines (
+        id SERIAL PRIMARY KEY,
+        document_id INT NOT NULL REFERENCES stock_documents(id) ON DELETE CASCADE,
+        item_id INT NOT NULL REFERENCES stock_items(id) ON DELETE RESTRICT,
+        item_reference TEXT NOT NULL DEFAULT '',
+        item_designation TEXT NOT NULL,
+        unite TEXT NOT NULL,
+        quantite NUMERIC(14,3) NOT NULL CHECK (quantite > 0),
+        lot_id INT REFERENCES stock_lots(id) ON DELETE RESTRICT,
+        numero_lot TEXT NOT NULL DEFAULT '',
+        date_peremption DATE,
+        prix_unitaire NUMERIC(14,2),
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_document_lines_document
+        ON stock_document_lines (document_id, id);
+    CREATE TABLE IF NOT EXISTS stock_movements (
+        id BIGSERIAL PRIMARY KEY,
+        item_id INT NOT NULL REFERENCES stock_items(id) ON DELETE RESTRICT,
+        lot_id INT NOT NULL REFERENCES stock_lots(id) ON DELETE RESTRICT,
+        document_id INT NOT NULL REFERENCES stock_documents(id) ON DELETE RESTRICT,
+        document_line_id INT REFERENCES stock_document_lines(id) ON DELETE SET NULL,
+        sens TEXT NOT NULL CHECK (sens IN ('Entrée', 'Sortie')),
+        quantite NUMERIC(14,3) NOT NULL CHECK (quantite > 0),
+        utilisateur TEXT NOT NULL DEFAULT '',
+        user_id INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_movements_item_date
+        ON stock_movements (item_id, created_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_stock_movements_document
+        ON stock_movements (document_id, id);
     CREATE TABLE IF NOT EXISTS service_tech_maintenance (
         id SERIAL PRIMARY KEY,
         site_designation TEXT NOT NULL,

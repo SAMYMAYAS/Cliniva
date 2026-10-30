@@ -588,6 +588,13 @@ def _render_html() -> str:
                             <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_service_tech_view" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Consulter équipements et interventions</span></label>
                             <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_service_tech_manage" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Gérer équipements et interventions</span></label>
                         </div>
+                        <div class="space-y-1.5 bg-white dark:bg-[#121c15] p-3 rounded-2xl border border-emerald-200/70 dark:border-emerald-400/20">
+                            <div class="font-bold text-emerald-800 dark:text-emerald-300 text-[11px] border-b border-emerald-100 dark:border-white/10 pb-1 flex items-center gap-1.5">
+                                <i class="ph-bold ph-warehouse text-emerald-600"></i> Gestion Stock
+                            </div>
+                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_stock_view" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Consulter les stocks et les mouvements</span></label>
+                            <label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="perm_stock_manage" class="user-perm-check rounded text-brand-neon focus:ring-brand-neon"><span>Gérer articles et bons de stock</span></label>
+                        </div>
                         <!-- 13. Administration Système -->
                         <div class="space-y-1.5 bg-brand-neon/10 dark:bg-brand-neon/5 p-3 rounded-2xl border border-brand-neon/30">
                             <div class="font-bold text-emerald-950 dark:text-brand-neon text-[11px] border-b border-brand-neon/20 pb-1 flex items-center gap-1.5">
