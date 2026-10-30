@@ -751,6 +751,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         CHECK (prix_unitaire IS NULL OR prix_unitaire >= 0)
     );
+    ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS prix_achat NUMERIC(14,2);
+    ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS prix_vente NUMERIC(14,2);
+    ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS marge_vente NUMERIC(8,3) NOT NULL DEFAULT 15;
+    ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS unite_stock TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS quantite_par_unite NUMERIC(14,3) NOT NULL DEFAULT 1;
     CREATE INDEX IF NOT EXISTS idx_stock_lots_item_expiry
         ON stock_lots (item_id, date_peremption, created_at);
     CREATE TABLE IF NOT EXISTS stock_documents (
@@ -767,6 +772,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         validated_by INT REFERENCES users(id) ON DELETE SET NULL,
         validated_at TIMESTAMP WITH TIME ZONE
     );
+    ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS fournisseur TEXT NOT NULL DEFAULT '';
     CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_documents_number
         ON stock_documents (numero) WHERE numero <> '';
     CREATE INDEX IF NOT EXISTS idx_stock_documents_type_date
@@ -785,6 +791,12 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         prix_unitaire NUMERIC(14,2),
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS quantite_unite_stock NUMERIC(14,3) NOT NULL DEFAULT 0;
+    ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS unite_stock TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS quantite_par_unite NUMERIC(14,3) NOT NULL DEFAULT 1;
+    ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS prix_achat NUMERIC(14,2);
+    ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS prix_vente NUMERIC(14,2);
+    ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS marge_vente NUMERIC(8,3) NOT NULL DEFAULT 15;
     CREATE INDEX IF NOT EXISTS idx_stock_document_lines_document
         ON stock_document_lines (document_id, id);
     CREATE TABLE IF NOT EXISTS stock_movements (
