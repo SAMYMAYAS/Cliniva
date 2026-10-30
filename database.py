@@ -787,6 +787,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     );
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS fournisseur TEXT NOT NULL DEFAULT '';
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS fournisseur_id INT REFERENCES stock_suppliers(id) ON DELETE SET NULL;
+    ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS agent_reception TEXT NOT NULL DEFAULT '';
     CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_documents_number
         ON stock_documents (numero) WHERE numero <> '';
     CREATE INDEX IF NOT EXISTS idx_stock_documents_type_date
@@ -811,6 +812,19 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS prix_achat NUMERIC(14,2);
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS prix_vente NUMERIC(14,2);
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS marge_vente NUMERIC(8,3) NOT NULL DEFAULT 15;
+    CREATE TABLE IF NOT EXISTS stock_document_attachments (
+        id SERIAL PRIMARY KEY,
+        document_id INT NOT NULL REFERENCES stock_documents(id) ON DELETE CASCADE,
+        file_path TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+        page_number INT NOT NULL,
+        file_size BIGINT NOT NULL DEFAULT 0,
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_document_attachments_document
+        ON stock_document_attachments (document_id, page_number, id);
     CREATE INDEX IF NOT EXISTS idx_stock_document_lines_document
         ON stock_document_lines (document_id, id);
     CREATE TABLE IF NOT EXISTS stock_movements (
