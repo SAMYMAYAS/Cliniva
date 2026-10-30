@@ -695,6 +695,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         designation TEXT NOT NULL,
         categorie TEXT NOT NULL,
         unite TEXT NOT NULL DEFAULT 'unité',
+        photo_path TEXT NOT NULL DEFAULT '',
         seuil_alerte NUMERIC(14,3) NOT NULL DEFAULT 0 CHECK (seuil_alerte >= 0),
         suivi_peremption BOOLEAN NOT NULL DEFAULT FALSE,
         actif BOOLEAN NOT NULL DEFAULT TRUE,
@@ -703,6 +704,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stock_items ADD COLUMN IF NOT EXISTS photo_path TEXT NOT NULL DEFAULT '';
     CREATE TABLE IF NOT EXISTS stock_categories (
         id SERIAL PRIMARY KEY,
         nom TEXT NOT NULL UNIQUE,

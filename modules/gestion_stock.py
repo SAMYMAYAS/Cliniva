@@ -3,11 +3,15 @@
 from decimal import Decimal, InvalidOperation
 from html import escape
 import json
+import mimetypes
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from app.auth import get_current_user, track_action
-from database import get_db_cursor
+from database import DOCS_DIR, get_db_cursor
 
 stock_router = APIRouter(prefix="/api/gestion-stock", tags=["Gestion Stock"])
 
@@ -82,7 +86,7 @@ def stock_data(request: Request):
         categories = [row["nom"] for row in cursor.fetchall()]
         cursor.execute("SELECT nom FROM stock_units ORDER BY nom")
         units = [row["nom"] for row in cursor.fetchall()]
-        cursor.execute("""SELECT i.id, i.reference, i.designation, i.categorie, i.unite,
+        cursor.execute("""SELECT i.id, i.reference, i.designation, i.categorie, i.unite, i.photo_path,
                 i.seuil_alerte, i.suivi_peremption, i.actif, i.notes, i.created_at,
                 COALESCE(SUM(l.quantite_actuelle),0) AS stock_total,
                 COALESCE(SUM(l.quantite_actuelle) FILTER (WHERE l.date_peremption IS NULL OR l.date_peremption >= CURRENT_DATE),0) AS stock_disponible,
@@ -129,6 +133,23 @@ def stock_data(request: Request):
                     "lots_perimes": len([lot for lot in lots if lot.get("perime")]),
                     "lots_proches": expiring_count, "quantite_perimee": expired_qty},
     }
+
+
+@stock_router.get("/items/{item_id}/photo")
+def stock_item_photo(item_id: int, request: Request):
+    user = get_current_user(request)
+    if not (_can(user, "stock_view") or _can(user, "stock_manage")):
+        raise HTTPException(status_code=403, detail="Accès non autorisé.")
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT photo_path FROM stock_items WHERE id=%s", (item_id,))
+        row = cursor.fetchone()
+    if not row or not row["photo_path"]:
+        raise HTTPException(status_code=404, detail="Aucune photo pour cet article.")
+    photo_path = (Path(DOCS_DIR) / row["photo_path"]).resolve()
+    photo_root = (Path(DOCS_DIR) / "stock_items").resolve()
+    if photo_root not in photo_path.parents or not photo_path.is_file():
+        raise HTTPException(status_code=404, detail="Photo introuvable.")
+    return FileResponse(photo_path, media_type=mimetypes.guess_type(photo_path.name)[0] or "application/octet-stream", headers={"Cache-Control": "private, max-age=300"})
 
 
 @stock_router.post("/catalog/save")
@@ -187,7 +208,28 @@ async def stock_catalog_delete(request: Request):
 async def stock_item_save(request: Request):
     user = get_current_user(request)
     _require(user, "stock_manage")
-    data = await request.json()
+    data = await request.form()
+    photo = data.get("photo")
+    remove_photo = str(data.get("supprimer_photo") or "").lower() in {"true", "1", "on"}
+    uploaded_photo_path = ""
+    uploaded_photo_file: Path | None = None
+    photo_content: bytes | None = None
+    photo_suffix = ""
+    if isinstance(photo, UploadFile) and photo.filename:
+        original_name = Path(photo.filename).name
+        suffix = Path(original_name).suffix.lower()
+        allowed = {".jpg": ("image/jpeg", b"\xff\xd8\xff"), ".jpeg": ("image/jpeg", b"\xff\xd8\xff"), ".png": ("image/png", b"\x89PNG\r\n\x1a\n"), ".webp": ("image/webp", b"RIFF")}
+        if suffix not in allowed:
+            raise HTTPException(status_code=400, detail="La photo doit être au format JPG, PNG ou WebP.")
+        content = await photo.read(8 * 1024 * 1024 + 1)
+        _, signature = allowed[suffix]
+        if not content or len(content) > 8 * 1024 * 1024 or not content.startswith(signature):
+            raise HTTPException(status_code=400, detail="Photo vide, invalide ou supérieure à 8 Mo.")
+        if suffix == ".webp" and content[8:12] != b"WEBP":
+            raise HTTPException(status_code=400, detail="Le fichier WebP est invalide.")
+        suffix = ".jpg" if suffix == ".jpeg" else suffix
+        photo_content = content
+        photo_suffix = suffix
     try:
         item_id = int(data.get("id")) if data.get("id") else None
     except (TypeError, ValueError) as exc:
@@ -204,8 +246,17 @@ async def stock_item_save(request: Request):
     if not unit or len(unit) > 30 or len(reference) > 60 or len(notes) > 2000:
         raise HTTPException(status_code=400, detail="Un champ de l’article dépasse la longueur autorisée.")
     threshold = _decimal(data.get("seuil_alerte", 0), "seuil d’alerte", allow_zero=True)
-    track_expiry = bool(data.get("suivi_peremption")) or category == "Pharmaceutique"
-    with get_db_cursor() as cursor:
+    track_expiry = str(data.get("suivi_peremption") or "").lower() in {"true", "1", "on"} or category == "Pharmaceutique"
+    if photo_content is not None:
+        upload_dir = Path(DOCS_DIR) / "stock_items"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        stored_name = f"{uuid4().hex}{photo_suffix}"
+        uploaded_photo_file = upload_dir / stored_name
+        uploaded_photo_file.write_bytes(photo_content)
+        uploaded_photo_path = str(Path("stock_items") / stored_name)
+    old_photo_path = ""
+    try:
+      with get_db_cursor() as cursor:
         try:
             cursor.execute("SELECT 1 FROM stock_categories WHERE nom=%s", (category,))
             if not cursor.fetchone():
@@ -214,19 +265,25 @@ async def stock_item_save(request: Request):
             if not cursor.fetchone():
                 raise HTTPException(status_code=400, detail="Choisis une unité existante dans la liste.")
             if item_id:
+                cursor.execute("SELECT photo_path FROM stock_items WHERE id=%s AND actif=TRUE FOR UPDATE", (item_id,))
+                existing = cursor.fetchone()
+                if not existing:
+                    raise HTTPException(status_code=404, detail="Article introuvable ou archivé.")
+                old_photo_path = existing["photo_path"] or ""
+                photo_path = uploaded_photo_path or ("" if remove_photo else old_photo_path)
                 cursor.execute("""UPDATE stock_items SET reference=%s, designation=%s, categorie=%s,
-                    unite=%s, seuil_alerte=%s, suivi_peremption=%s, notes=%s,
+                    unite=%s, seuil_alerte=%s, suivi_peremption=%s, notes=%s, photo_path=%s,
                     updated_at=CURRENT_TIMESTAMP WHERE id=%s AND actif=TRUE RETURNING id""",
-                    (reference, designation, category, unit, threshold, track_expiry, notes, item_id))
+                    (reference, designation, category, unit, threshold, track_expiry, notes, photo_path, item_id))
                 row = cursor.fetchone()
                 if not row:
                     raise HTTPException(status_code=404, detail="Article introuvable ou archivé.")
                 saved_id = item_id
             else:
                 cursor.execute("""INSERT INTO stock_items
-                    (reference, designation, categorie, unite, seuil_alerte, suivi_peremption, notes, created_by)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-                    (reference, designation, category, unit, threshold, track_expiry, notes, user["id"]))
+                    (reference, designation, categorie, unite, seuil_alerte, suivi_peremption, notes, photo_path, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (reference, designation, category, unit, threshold, track_expiry, notes, uploaded_photo_path, user["id"]))
                 saved_id = cursor.fetchone()["id"]
                 if not reference:
                     reference = f"STK-{saved_id:06d}"
@@ -235,6 +292,15 @@ async def stock_item_save(request: Request):
             if getattr(exc, "sqlstate", None) == "23505":
                 raise HTTPException(status_code=409, detail="Cette référence existe déjà.") from exc
             raise
+    except Exception:
+        if uploaded_photo_file and uploaded_photo_file.exists():
+            uploaded_photo_file.unlink(missing_ok=True)
+        raise
+    if (remove_photo or uploaded_photo_path) and old_photo_path:
+        previous_file = (Path(DOCS_DIR) / old_photo_path).resolve()
+        previous_root = (Path(DOCS_DIR) / "stock_items").resolve()
+        if previous_root in previous_file.parents and previous_file.is_file():
+            previous_file.unlink(missing_ok=True)
     track_action(request, "STOCK_ITEM_SAVE", f"Article de stock enregistré : {reference} · {designation}")
     return {"success": True, "id": saved_id, "reference": reference}
 
@@ -446,22 +512,25 @@ def render_html(user: dict[str, Any] | None = None) -> str:
  const canManage=__MANAGE__, $=id=>document.getElementById(id), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  let categories=[],units=[];let data={items:[],lots:[],documents:[],movements:[],summary:{}};let activeForm=null,catalogEdit=null;
  const toast=(msg,bad=false)=>{const t=$('stockToast');t.textContent=msg;t.className='fixed bottom-5 right-5 z-[2147483602] max-w-sm rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-xl '+(bad?'bg-rose-700':'bg-slate-900');t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),4500)};
- const api=async(path,opts={})=>{const r=await fetch('/api/gestion-stock'+path,{credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts.headers||{})},...opts});const b=await r.json().catch(()=>({}));if(!r.ok)throw new Error(b.detail||'Une erreur est survenue.');return b;};
+ const api=async(path,opts={})=>{const headers={...(opts.headers||{})};if(!(opts.body instanceof FormData))headers['Content-Type']='application/json';const r=await fetch('/api/gestion-stock'+path,{credentials:'same-origin',headers,...opts});const b=await r.json().catch(()=>({}));if(!r.ok)throw new Error(b.detail||'Une erreur est survenue.');return b;};
  window.stockSetTab=name=>{document.querySelectorAll('[data-stock-tab]').forEach(b=>{const on=b.dataset.stockTab===name;b.className='rounded-xl px-4 py-2.5 text-xs font-bold transition '+(on?'bg-brand-neon text-black shadow-md shadow-brand-neon/20':'text-slate-500 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-white/5')});document.querySelectorAll('[data-stock-panel]').forEach(p=>p.classList.toggle('hidden',p.dataset.stockPanel!==name));};
  function fillCategoryFilter(){const s=$('stockCategoryFilter'),selected=s.value;if(s.options.length===1)s.insertAdjacentHTML('beforeend',categories.map(c=>`<option>${esc(c)}</option>`).join(''));else{const options='<option value="">Toutes les catégories</option>'+categories.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');s.innerHTML=options;s.value=selected;}}
- function stockRenderInventory(){fillCategoryFilter();const q=($('stockSearch').value||'').toLocaleLowerCase('fr'),cat=$('stockCategoryFilter').value;const rows=data.items.filter(i=>(!cat||i.categorie===cat)&&(!q||`${i.reference} ${i.designation} ${i.categorie}`.toLocaleLowerCase('fr').includes(q)));$('stockItemRows').innerHTML=rows.length?rows.map(i=>{const qty=Number(i.stock_disponible||0),low=Number(i.seuil_alerte||0)>0&&qty<=Number(i.seuil_alerte);const expiring=data.lots.filter(l=>Number(l.item_id)===Number(i.id)&&l.expire_bientot).length;const expired=Number(i.stock_perime||0)>0;return `<tr class="border-b border-slate-100 transition hover:bg-sky-50/60 dark:border-white/5 dark:hover:bg-white/[.03]"><td class="px-3 py-3"><b class="block text-slate-800 dark:text-white">${esc(i.designation)}</b><small class="text-xs text-slate-400">${esc(i.reference)}</small></td><td class="px-3 py-3"><span class="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold text-slate-600 dark:bg-white/10 dark:text-slate-300">${esc(i.categorie)}</span></td><td class="px-3 py-3 font-semibold">${Number(i.nombre_lots||0)}</td><td class="px-3 py-3"><span class="font-extrabold ${low?'text-rose-600':'text-emerald-700 dark:text-emerald-300'}">${fmt(i.stock_disponible)} ${esc(i.unite)}</span>${expired?`<small class="block text-[10px] text-rose-500">${fmt(i.stock_perime)} périmé(s) bloqué(s)</small>`:''}</td><td class="px-3 py-3 text-slate-500">${fmt(i.seuil_alerte)} ${esc(i.unite)}</td><td class="px-3 py-3">${expired?'<span class="text-xs font-bold text-rose-600">Périmé</span>':expiring?`<span class="text-xs font-bold text-amber-600">${expiring} lot(s) bientôt</span>`:i.suivi_peremption?'<span class="text-xs text-emerald-600">Suivi actif</span>':'<span class="text-xs text-slate-400">—</span>'}</td><td class="px-3 py-3 text-right"><div class="flex justify-end gap-1"><button type="button" title="Lots" onclick="stockShowLots(${i.id})" class="grid h-8 w-8 place-items-center rounded-lg bg-sky-50 text-sky-700 hover:bg-sky-100"><i class="ph-bold ph-list-bullets"></i></button>${canManage?`<button type="button" title="Entrée" onclick="stockOpenDocument('Entrée',${i.id})" class="grid h-8 w-8 place-items-center rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100"><i class="ph-bold ph-arrow-down-left"></i></button><button type="button" title="Sortie" onclick="stockOpenDocument('Sortie',${i.id})" class="grid h-8 w-8 place-items-center rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100"><i class="ph-bold ph-arrow-up-right"></i></button><button type="button" title="Modifier" onclick="stockEditItem(${i.id})" class="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><i class="ph-bold ph-pencil-simple"></i></button>`:''}</div></td></tr>`}).join(''):'<tr><td colspan="7" class="p-10 text-center text-slate-400">Aucun article ne correspond.</td></tr>';}
+ function stockRenderInventory(){fillCategoryFilter();const q=($('stockSearch').value||'').toLocaleLowerCase('fr'),cat=$('stockCategoryFilter').value;const rows=data.items.filter(i=>(!cat||i.categorie===cat)&&(!q||`${i.reference} ${i.designation} ${i.categorie}`.toLocaleLowerCase('fr').includes(q)));$('stockItemRows').innerHTML=rows.length?rows.map(i=>{const qty=Number(i.stock_disponible||0),low=Number(i.seuil_alerte||0)>0&&qty<=Number(i.seuil_alerte);const expiring=data.lots.filter(l=>Number(l.item_id)===Number(i.id)&&l.expire_bientot).length;const expired=Number(i.stock_perime||0)>0;return `<tr class="border-b border-slate-100 transition hover:bg-sky-50/60 dark:border-white/5 dark:hover:bg-white/[.03]"><td class="px-3 py-3"><div class="flex items-center gap-3"><span class="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-xl border border-slate-100 bg-slate-50 dark:border-white/10 dark:bg-white/5">${i.photo_path?`<img src="/api/gestion-stock/items/${i.id}/photo" alt="Photo ${esc(i.designation)}" loading="lazy" class="h-full w-full object-cover">`:'<i class="ph ph-image text-xl text-slate-300"></i>'}</span><span><b class="block text-slate-800 dark:text-white">${esc(i.designation)}</b><small class="text-xs text-slate-400">${esc(i.reference)}</small></span></div></td><td class="px-3 py-3"><span class="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold text-slate-600 dark:bg-white/10 dark:text-slate-300">${esc(i.categorie)}</span></td><td class="px-3 py-3 font-semibold">${Number(i.nombre_lots||0)}</td><td class="px-3 py-3"><span class="font-extrabold ${low?'text-rose-600':'text-emerald-700 dark:text-emerald-300'}">${fmt(i.stock_disponible)} ${esc(i.unite)}</span>${expired?`<small class="block text-[10px] text-rose-500">${fmt(i.stock_perime)} périmé(s) bloqué(s)</small>`:''}</td><td class="px-3 py-3 text-slate-500">${fmt(i.seuil_alerte)} ${esc(i.unite)}</td><td class="px-3 py-3">${expired?'<span class="text-xs font-bold text-rose-600">Périmé</span>':expiring?`<span class="text-xs font-bold text-amber-600">${expiring} lot(s) bientôt</span>`:i.suivi_peremption?'<span class="text-xs text-emerald-600">Suivi actif</span>':'<span class="text-xs text-slate-400">—</span>'}</td><td class="px-3 py-3 text-right"><div class="flex justify-end gap-1"><button type="button" title="Lots" onclick="stockShowLots(${i.id})" class="grid h-8 w-8 place-items-center rounded-lg bg-sky-50 text-sky-700 hover:bg-sky-100"><i class="ph-bold ph-list-bullets"></i></button>${canManage?`<button type="button" title="Entrée" onclick="stockOpenDocument('Entrée',${i.id})" class="grid h-8 w-8 place-items-center rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100"><i class="ph-bold ph-arrow-down-left"></i></button><button type="button" title="Sortie" onclick="stockOpenDocument('Sortie',${i.id})" class="grid h-8 w-8 place-items-center rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100"><i class="ph-bold ph-arrow-up-right"></i></button><button type="button" title="Modifier" onclick="stockEditItem(${i.id})" class="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><i class="ph-bold ph-pencil-simple"></i></button>`:''}</div></td></tr>`}).join(''):'<tr><td colspan="7" class="p-10 text-center text-slate-400">Aucun article ne correspond.</td></tr>';}
  function fmt(v){return Number(v||0).toLocaleString('fr-FR',{maximumFractionDigits:3});}
  function stockRenderDocuments(){const q=($('stockDocumentSearch').value||'').toLocaleLowerCase('fr');const docs=data.documents.filter(d=>`${d.numero} ${d.type_document} ${d.service_destination} ${d.demandeur}`.toLocaleLowerCase('fr').includes(q));$('stockDocumentRows').innerHTML=docs.length?docs.map(d=>`<tr class="border-b border-slate-100 hover:bg-sky-50/60 dark:border-white/5 dark:hover:bg-white/[.03]"><td class="px-3 py-3"><b class="block dark:text-white">${esc(d.numero)}</b><small class="text-xs text-slate-400">${dateTime(d.created_at)}</small></td><td class="px-3 py-3"><span class="rounded-full px-2.5 py-1 text-[10px] font-bold ${d.type_document==='Entrée'?'bg-emerald-50 text-emerald-700':d.type_document==='Sortie'?'bg-amber-50 text-amber-700':'bg-sky-50 text-sky-700'}">${esc(d.type_document)}</span></td><td class="px-3 py-3">${esc(d.service_destination||'Stock central')}</td><td class="px-3 py-3">${esc(d.demandeur)}</td><td class="px-3 py-3">${d.lignes.length} ligne(s)</td><td class="px-3 py-3"><span class="text-xs font-bold ${d.statut==='En attente'?'text-amber-600':d.statut==='Clôturé'?'text-slate-500':'text-emerald-700'}">${esc(d.statut)}</span></td><td class="px-3 py-3 text-right"><button onclick="stockPrintDocument(${d.id})" class="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold hover:bg-slate-200"><i class="ph-bold ph-eye mr-1"></i>Voir / Imprimer</button>${canManage&&d.type_document==='Commande interne'&&d.statut==='En attente'?`<button onclick="stockCloseOrder(${d.id})" class="ml-1 rounded-lg bg-emerald-100 px-3 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-200">Clôturer</button>`:''}</td></tr>`).join(''):'<tr><td colspan="7" class="p-10 text-center text-slate-400">Aucun bon trouvé.</td></tr>';}
  function dateTime(v){return v?new Date(v).toLocaleString('fr-FR'):'—';}
  function renderMovements(){const body=$('stockMovementRows');body.innerHTML=data.movements.length?data.movements.map(m=>`<tr class="border-b border-slate-100 hover:bg-sky-50/60 dark:border-white/5"><td class="px-3 py-3"><b>${esc(m.bon_numero)}</b><small class="block text-xs text-slate-400">${dateTime(m.created_at)}</small></td><td class="px-3 py-3 font-semibold dark:text-white">${esc(m.designation)} <small class="block text-xs text-slate-400">${esc(m.reference)}</small></td><td class="px-3 py-3">${esc(m.numero_lot)}${m.date_peremption?`<small class="block text-xs text-slate-400">${esc(m.date_peremption)}</small>`:''}</td><td class="px-3 py-3"><span class="rounded-full px-2.5 py-1 text-[10px] font-bold ${m.sens==='Entrée'?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-700'}">${esc(m.sens)}</span></td><td class="px-3 py-3 font-extrabold ${m.sens==='Entrée'?'text-emerald-700':'text-rose-600'}">${m.sens==='Entrée'?'+':'−'}${fmt(m.quantite)} ${esc(m.unite)}</td><td class="px-3 py-3 text-slate-500">${esc(m.utilisateur)}</td></tr>`).join(''):'<tr><td colspan="6" class="p-8 text-center text-slate-400">Aucun mouvement enregistré.</td></tr>';}
  async function refresh(){if(!$('stockModule'))return;try{data=await api('/data');if(!$('stockModule'))return;categories=data.categories||[];units=data.unites||[];$('stockKpiItems').textContent=data.summary.articles||0;$('stockKpiLow').textContent=data.summary.alertes_stock||0;$('stockKpiExpiring').textContent=data.summary.lots_proches||0;$('stockKpiExpired').textContent=fmt(data.summary.quantite_perimee||0);stockRenderInventory();stockRenderDocuments();renderMovements();}catch(e){if($('stockModule'))toast(e.message,true);}}
  window.stockOpenModal=(title,html,handler)=>{activeForm=handler;$('stockSubmitButton').classList.remove('hidden');$('stockSubmitButton').textContent='Valider';$('stockModalTitle').textContent=title;$('stockFormFields').innerHTML=html;$('stockModal').classList.remove('hidden');$('stockModal').classList.add('flex');document.body.classList.add('overflow-hidden');};
- window.stockCloseModal=()=>{$('stockModal').classList.add('hidden');$('stockModal').classList.remove('flex');window.stockCloseCatalog();document.body.classList.remove('overflow-hidden');};
+ window.stockCloseModal=()=>{$('stockModal').classList.add('hidden');$('stockModal').classList.remove('flex');window.stockCloseCatalog();if(window.stockPhotoPreviewUrl){URL.revokeObjectURL(window.stockPhotoPreviewUrl);window.stockPhotoPreviewUrl=null;}document.body.classList.remove('overflow-hidden');};
  window.stockCloseCatalog=()=>{$('stockCatalogModal').classList.add('hidden');$('stockCatalogModal').classList.remove('flex');};
  const field=(label,id,type='text',value='',extra='')=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<input id="${id}" type="${type}" value="${esc(value)}" ${extra} class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white"></label>`;
  const catalogField=(label,id,values,selected,kind)=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<div class="mt-2 flex gap-2"><select id="${id}" class="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium dark:border-white/10 dark:bg-black/30 dark:text-white">${values.map(v=>`<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(v)}</option>`).join('')}</select>${canManage?`<button type="button" onclick="stockManageCatalog('${kind}')" class="shrink-0 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-200" title="Gérer ${label.toLowerCase()}"><i class="ph-bold ph-sliders-horizontal mr-1"></i>Gérer</button>`:''}</div></label>`;
- window.stockNewItem=()=>{if(!canManage)return;stockOpenModal('Nouvel article',`<div class="grid gap-3 sm:grid-cols-2">${field('Désignation *','siName')} ${field('Référence (facultative)','siReference')}${catalogField('Catégorie *','siCategory',categories,categories[0],'categorie')}${catalogField('Unité de stock *','siUnit',units,units[0],'unite')}${field('Seuil d’alerte','siThreshold','number','0','min="0" step="0.001"')}<label class="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800"><input id="siExpiry" type="checkbox" class="h-4 w-4 accent-amber-600">Suivre la date de péremption</label><label class="block text-xs font-bold text-slate-600 dark:text-slate-300 sm:col-span-2">Notes<textarea id="siNotes" rows="2" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-white/10 dark:bg-black/30 dark:text-white"></textarea></label></div>`,async()=>{const d={designation:$('siName').value,reference:$('siReference').value,categorie:$('siCategory').value,unite:$('siUnit').value,seuil_alerte:$('siThreshold').value,suivi_peremption:$('siExpiry').checked,notes:$('siNotes').value};const r=await api('/items/save',{method:'POST',body:JSON.stringify(d)});stockCloseModal();toast(`Article ${r.reference} enregistré.`);await refresh();});};
- window.stockEditItem=id=>{const i=data.items.find(x=>Number(x.id)===Number(id));if(!i)return;stockOpenModal('Modifier un article',`<div class="grid gap-3 sm:grid-cols-2">${field('Désignation *','siName','text',i.designation)}${field('Référence','siReference','text',i.reference)}${catalogField('Catégorie *','siCategory',categories,i.categorie,'categorie')}${catalogField('Unité *','siUnit',units,i.unite,'unite')}${field('Seuil d’alerte','siThreshold','number',i.seuil_alerte,'min="0" step="0.001"')}<label class="flex items-center gap-2 rounded-xl border p-3 text-sm font-semibold"><input id="siExpiry" type="checkbox" ${i.suivi_peremption?'checked':''}>Suivre la date de péremption</label><label class="block text-xs font-bold sm:col-span-2">Notes<textarea id="siNotes" rows="2" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm">${esc(i.notes||'')}</textarea></label></div>`,async()=>{await api('/items/save',{method:'POST',body:JSON.stringify({id:i.id,designation:$('siName').value,reference:$('siReference').value,categorie:$('siCategory').value,unite:$('siUnit').value,seuil_alerte:$('siThreshold').value,suivi_peremption:$('siExpiry').checked,notes:$('siNotes').value})});stockCloseModal();toast('Article modifié.');await refresh();});};
+ const photoField=(path='')=>`<div class="sm:col-span-2"><label class="block text-xs font-bold text-slate-600 dark:text-slate-300">Photo de l’article <span class="font-normal text-slate-400">(JPG, PNG ou WebP · 8 Mo max.)</span><input id="siPhoto" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" onchange="stockPreviewPhoto(event)" class="mt-2 block w-full rounded-xl border border-slate-200 bg-slate-50 p-2 text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-100 file:px-3 file:py-2 file:text-xs file:font-bold file:text-emerald-800 dark:border-white/10 dark:bg-black/30 dark:text-white"></label><div class="mt-3 flex items-center gap-3"><img id="siPhotoPreview" src="${path?`/api/gestion-stock/items/${path}/photo`:''}" class="${path?'':'hidden'} h-20 w-20 rounded-xl border border-slate-200 bg-white object-cover dark:border-white/10" alt="Aperçu de la photo article"><span id="siPhotoPlaceholder" class="${path?'hidden':''} grid h-20 w-20 place-items-center rounded-xl bg-slate-100 text-slate-400 dark:bg-white/5"><i class="ph ph-image text-2xl"></i></span>${path?'<label class="text-xs font-semibold text-rose-600"><input id="siRemovePhoto" type="checkbox" class="mr-1 accent-rose-600">Supprimer la photo actuelle</label>':''}</div></div>`;
+ function stockItemFormData(id=null){const d=new FormData();if(id)d.append('id',id);['designation','reference','categorie','unite','seuil_alerte','notes'].forEach(k=>{const fieldId={designation:'siName',reference:'siReference',categorie:'siCategory',unite:'siUnit',seuil_alerte:'siThreshold',notes:'siNotes'}[k];d.append(k,$(fieldId).value);});d.append('suivi_peremption',$('siExpiry').checked?'true':'false');d.append('supprimer_photo',$('siRemovePhoto')?.checked?'true':'false');const file=$('siPhoto').files?.[0];if(file)d.append('photo',file,file.name);return d;}
+ window.stockPreviewPhoto=e=>{const file=e.target.files?.[0];if(!file)return;if(window.stockPhotoPreviewUrl)URL.revokeObjectURL(window.stockPhotoPreviewUrl);window.stockPhotoPreviewUrl=URL.createObjectURL(file);$('siPhotoPreview').src=window.stockPhotoPreviewUrl;$('siPhotoPreview').classList.remove('hidden');$('siPhotoPlaceholder').classList.add('hidden');};
+ window.stockNewItem=()=>{if(!canManage)return;stockOpenModal('Nouvel article',`<div class="grid gap-3 sm:grid-cols-2">${field('Désignation *','siName')} ${field('Référence (facultative)','siReference')}${catalogField('Catégorie *','siCategory',categories,categories[0],'categorie')}${catalogField('Unité de stock *','siUnit',units,units[0],'unite')}${field('Seuil d’alerte','siThreshold','number','0','min="0" step="0.001"')}<label class="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800"><input id="siExpiry" type="checkbox" class="h-4 w-4 accent-amber-600">Suivre la date de péremption</label>${photoField()}<label class="block text-xs font-bold text-slate-600 dark:text-slate-300 sm:col-span-2">Notes<textarea id="siNotes" rows="2" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-white/10 dark:bg-black/30 dark:text-white"></textarea></label></div>`,async()=>{const r=await api('/items/save',{method:'POST',body:stockItemFormData()});stockCloseModal();toast(`Article ${r.reference} enregistré.`);await refresh();});};
+ window.stockEditItem=id=>{const i=data.items.find(x=>Number(x.id)===Number(id));if(!i)return;stockOpenModal('Modifier un article',`<div class="grid gap-3 sm:grid-cols-2">${field('Désignation *','siName','text',i.designation)}${field('Référence','siReference','text',i.reference)}${catalogField('Catégorie *','siCategory',categories,i.categorie,'categorie')}${catalogField('Unité *','siUnit',units,i.unite,'unite')}${field('Seuil d’alerte','siThreshold','number',i.seuil_alerte,'min="0" step="0.001"')}<label class="flex items-center gap-2 rounded-xl border p-3 text-sm font-semibold"><input id="siExpiry" type="checkbox" ${i.suivi_peremption?'checked':''}>Suivre la date de péremption</label>${photoField(i.photo_path?i.id:'')}<label class="block text-xs font-bold sm:col-span-2">Notes<textarea id="siNotes" rows="2" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm">${esc(i.notes||'')}</textarea></label></div>`,async()=>{await api('/items/save',{method:'POST',body:stockItemFormData(i.id)});stockCloseModal();toast('Article modifié.');await refresh();});};
  window.stockManageCatalog=kind=>{if(!canManage||!['categorie','unite'].includes(kind))return;catalogEdit=null;$('stockCatalogTitle').textContent=kind==='categorie'?'Gérer les catégories':'Gérer les unités';$('stockCatalogLabel').textContent=kind==='categorie'?'Nom de la catégorie':'Nom de l’unité';$('stockCatalogName').value='';$('stockCatalogSaveButton').innerHTML='<i class="ph-bold ph-plus mr-1"></i>Ajouter';$('stockCatalogModal').dataset.kind=kind;stockRenderCatalog();$('stockCatalogModal').classList.remove('hidden');$('stockCatalogModal').classList.add('flex');};
  function stockRenderCatalog(){const modal=$('stockCatalogModal'),kind=modal.dataset.kind,values=kind==='categorie'?categories:units;$('stockCatalogRows').innerHTML=values.length?values.map((name,index)=>`<div class="flex items-center justify-between gap-2 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 dark:border-white/10 dark:bg-white/[.03]"><span class="min-w-0 truncate text-sm font-semibold dark:text-white">${esc(name)}</span><div class="flex shrink-0 gap-1"><button type="button" data-stock-catalog-edit="${index}" class="grid h-8 w-8 place-items-center rounded-lg bg-sky-50 text-sky-700 hover:bg-sky-100" title="Modifier"><i class="ph-bold ph-pencil-simple"></i></button><button type="button" data-stock-catalog-delete="${index}" class="grid h-8 w-8 place-items-center rounded-lg bg-rose-50 text-rose-700 hover:bg-rose-100" title="Supprimer"><i class="ph-bold ph-trash"></i></button></div></div>`).join(''):'<p class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500">Aucune valeur. Ajoute-en une ci-dessus.</p>'; $('stockCatalogRows').querySelectorAll('[data-stock-catalog-edit]').forEach(btn=>btn.addEventListener('click',()=>{const name=values[Number(btn.dataset.stockCatalogEdit)];catalogEdit=name;$('stockCatalogName').value=name;$('stockCatalogSaveButton').innerHTML='<i class="ph-bold ph-check mr-1"></i>Enregistrer';}));$('stockCatalogRows').querySelectorAll('[data-stock-catalog-delete]').forEach(btn=>btn.addEventListener('click',()=>stockCatalogDelete(kind,values[Number(btn.dataset.stockCatalogDelete)])));}
  window.stockCatalogSave=async e=>{e.preventDefault();const modal=$('stockCatalogModal'),kind=modal.dataset.kind,old=catalogEdit,name=$('stockCatalogName').value.trim(),button=$('stockCatalogSaveButton');if(!name)return;button.disabled=true;try{await api('/catalog/save',{method:'POST',body:JSON.stringify({type:kind,nom:name,ancien_nom:old||''})});catalogEdit=null;$('stockCatalogName').value='';await refresh();stockRenderCatalog();const select=$(kind==='categorie'?'siCategory':'siUnit');if(select){select.innerHTML=(kind==='categorie'?categories:units).map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');select.value=name;}button.innerHTML='<i class="ph-bold ph-plus mr-1"></i>Ajouter';toast(old?'Valeur mise à jour.':'Valeur ajoutée.');}catch(err){toast(err.message,true);}finally{button.disabled=false;}};
