@@ -14,8 +14,9 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request as UrlRequest, build_opener, urlopen
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from app.auth import get_current_user, track_action
 from database import DOCS_DIR, get_db_cursor
 
@@ -476,7 +477,9 @@ async def stock_item_save(request: Request):
     uploaded_photo_file: Path | None = None
     photo_content: bytes | None = None
     photo_suffix = ""
-    if isinstance(photo, UploadFile) and photo.filename:
+    # Request.form() creates Starlette UploadFile objects; FastAPI's
+    # UploadFile subclass check does not match those instances on all versions.
+    if isinstance(photo, StarletteUploadFile) and photo.filename:
         original_name = Path(photo.filename).name
         suffix = Path(original_name).suffix.lower()
         allowed = {".jpg": ("image/jpeg", b"\xff\xd8\xff"), ".jpeg": ("image/jpeg", b"\xff\xd8\xff"), ".png": ("image/png", b"\x89PNG\r\n\x1a\n"), ".webp": ("image/webp", b"RIFF")}

@@ -1650,6 +1650,45 @@
         // La page reste sur son accueil; les utilisateurs sans droit dashboard
         // disposent des raccourcis permis dans le panneau central.
     </script>
+    <script>
+        (() => {
+            const idleLimit = 3 * 60 * 1000;
+            const pingEvery = 45 * 1000;
+            let lastActivity = Date.now();
+            let lastPointerMove = 0;
+            let leaving = false;
+            const markActivity = () => { lastActivity = Date.now(); };
+            ['pointerdown', 'keydown', 'wheel', 'touchstart', 'click', 'input', 'change'].forEach(type =>
+                document.addEventListener(type, markActivity, { capture: true, passive: true })
+            );
+            document.addEventListener('pointermove', () => {
+                const now = Date.now();
+                if (now - lastPointerMove > 1500) { lastPointerMove = now; markActivity(); }
+            }, { capture: true, passive: true });
+
+            const logoutForInactivity = async () => {
+                if (leaving) return;
+                leaving = true;
+                try { await fetch('/api/auth/logout', { credentials: 'same-origin' }); } catch (_) { }
+                window.location.replace('/login?session=expired');
+            };
+
+            window.setInterval(() => {
+                if (Date.now() - lastActivity >= idleLimit) {
+                    logoutForInactivity();
+                    return;
+                }
+                if (document.visibilityState === 'visible' && Date.now() - lastActivity < idleLimit) {
+                    fetch('/api/auth/heartbeat', {
+                        method: 'POST', credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/json' }, body: '{}'
+                    }).then(response => {
+                        if (response.status === 401) window.location.replace('/login?session=expired');
+                    }).catch(() => { });
+                }
+            }, pingEvery);
+        })();
+    </script>
     <script src="/static/js/interface_zoom.js"></script>
 </body>
 </html>

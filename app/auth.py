@@ -13,7 +13,7 @@ from fastapi import Request, HTTPException, status
 from database import get_db_cursor, record_audit
 
 SESSION_COOKIE_NAME = "cliniva_session"
-SESSION_DURATION_HOURS = 24
+SESSION_IDLE_MINUTES = 3
 
 
 def hash_password(password: str) -> str:
@@ -24,7 +24,7 @@ def hash_password(password: str) -> str:
 def create_user_session(user_id: int) -> str:
     """Génère un token de session cryptographique et l'enregistre en base."""
     token = secrets.token_hex(32)
-    expires = datetime.now(timezone.utc) + timedelta(hours=SESSION_DURATION_HOURS)
+    expires = datetime.now(timezone.utc) + timedelta(minutes=SESSION_IDLE_MINUTES)
 
     with get_db_cursor() as cursor:
         cursor.execute("""
@@ -57,6 +57,14 @@ def get_current_user_optional(request: Request) -> Optional[Dict[str, Any]]:
             WHERE s.session_token = %s AND s.expires_at > CURRENT_TIMESTAMP;
         """, (token,))
         row = cursor.fetchone()
+        if row:
+            # Sliding expiration: every authenticated request extends the
+            # session, while an inactive session expires after three minutes.
+            cursor.execute("""
+                UPDATE user_sessions
+                SET expires_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 minute')
+                WHERE session_token = %s AND expires_at > CURRENT_TIMESTAMP;
+            """, (SESSION_IDLE_MINUTES, token))
         return dict(row) if row else None
 
 

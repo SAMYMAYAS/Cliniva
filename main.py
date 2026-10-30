@@ -1242,6 +1242,15 @@ async def api_logout(request: Request) -> RedirectResponse:
     return response
 
 
+@app.post("/api/auth/heartbeat", summary="Prolongation de session active")
+async def api_auth_heartbeat(request: Request) -> JSONResponse:
+    """Renouvelle la session tant que l'utilisateur est actif dans Cliniva."""
+    user = get_current_user_optional(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expirée. Veuillez vous reconnecter.")
+    return JSONResponse({"success": True})
+
+
 @app.get("/", response_class=HTMLResponse, summary="Vue racine du tableau de bord")
 async def serve_dashboard(request: Request) -> Any:
     """Affiche le tableau de bord avec injection des données et de l'utilisateur connecté."""
