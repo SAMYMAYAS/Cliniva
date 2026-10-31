@@ -316,11 +316,70 @@ def stock_data(request: Request):
                 l.prix_unitaire, l.prix_achat / NULLIF(l.quantite_par_unite,0), 0)),0) AS valeur
             FROM stock_lots l WHERE l.quantite_actuelle > 0""")
         inventory_value = cursor.fetchone()["valeur"]
+        cursor.execute("""WITH par_produit AS (
+                SELECT l.entrepot AS nom, i.id AS item_id, i.seuil_alerte,
+                    COALESCE(SUM(l.quantite_actuelle) FILTER (
+                        WHERE l.date_peremption IS NULL OR l.date_peremption >= CURRENT_DATE),0) AS stock_utilisable,
+                    COALESCE(SUM(l.quantite_actuelle) FILTER (
+                        WHERE l.quantite_actuelle > 0 AND l.date_peremption < CURRENT_DATE),0) AS quantite_perimee,
+                    COUNT(l.id) FILTER (WHERE l.quantite_actuelle > 0) AS nombre_lots,
+                    COUNT(l.id) FILTER (WHERE l.quantite_actuelle > 0 AND
+                        l.date_peremption BETWEEN CURRENT_DATE AND CURRENT_DATE + (%s * INTERVAL '1 day')) AS lots_proches,
+                    COALESCE(SUM(l.quantite_actuelle * COALESCE(
+                        l.prix_unitaire, l.prix_achat / NULLIF(l.quantite_par_unite,0), 0)),0) AS valeur_stock,
+                    COALESCE(SUM(l.quantite_actuelle * COALESCE(
+                        l.prix_unitaire, l.prix_achat / NULLIF(l.quantite_par_unite,0), 0)) FILTER (
+                        WHERE l.date_peremption IS NULL OR l.date_peremption >= CURRENT_DATE),0) AS valeur_utilisable
+                FROM stock_lots l JOIN stock_items i ON i.id=l.item_id
+                WHERE i.actif=TRUE AND BTRIM(l.entrepot)<>''
+                GROUP BY l.entrepot, i.id, i.seuil_alerte
+            ), mouvements_30j AS (
+                SELECT l.entrepot AS nom, COUNT(*) AS nombre
+                FROM stock_movements m JOIN stock_lots l ON l.id=m.lot_id
+                JOIN stock_documents d ON d.id=m.document_id
+                WHERE d.statut<>'Annulé' AND m.created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+                GROUP BY l.entrepot
+            )
+            SELECT p.nom, COUNT(*) AS produits_repertories,
+                COUNT(*) FILTER (WHERE p.stock_utilisable>0) AS produits_disponibles,
+                COUNT(*) FILTER (WHERE p.stock_utilisable<=0) AS ruptures,
+                COUNT(*) FILTER (WHERE p.seuil_alerte>0 AND p.stock_utilisable>0 AND
+                    p.stock_utilisable<=p.seuil_alerte) AS sous_seuil,
+                COUNT(*) FILTER (WHERE p.quantite_perimee>0) AS produits_perimes,
+                COALESCE(SUM(p.quantite_perimee),0) AS quantite_perimee,
+                COUNT(*) FILTER (WHERE p.lots_proches>0) AS produits_peremption_proche,
+                COALESCE(SUM(p.nombre_lots),0) AS nombre_lots,
+                COALESCE(SUM(p.valeur_stock),0) AS valeur_stock,
+                COALESCE(SUM(p.valeur_utilisable),0) AS valeur_utilisable,
+                COALESCE(MAX(m.nombre),0) AS mouvements_30j
+            FROM par_produit p LEFT JOIN mouvements_30j m ON m.nom=p.nom
+            GROUP BY p.nom ORDER BY p.nom""", (expiry_days,))
+        warehouse_stats = {row["nom"]: dict(row) for row in cursor.fetchall()}
+        for warehouse in warehouses:
+            warehouse_stats.setdefault(warehouse, {
+                "nom": warehouse, "produits_repertories": 0, "produits_disponibles": 0,
+                "ruptures": 0, "sous_seuil": 0, "produits_perimes": 0,
+                "quantite_perimee": 0, "produits_peremption_proche": 0,
+                "nombre_lots": 0, "valeur_stock": 0, "valeur_utilisable": 0,
+                "mouvements_30j": 0,
+            })
+        total_inventory_value = float(inventory_value or 0)
+        warehouse_stats = list(warehouse_stats.values())
+        for stats in warehouse_stats:
+            product_total = int(stats["produits_repertories"] or 0)
+            stats["disponibilite_pct"] = round(
+                int(stats["produits_disponibles"] or 0) * 100 / product_total, 1
+            ) if product_total else 0
+            stats["part_valeur_pct"] = round(
+                float(stats["valeur_stock"] or 0) * 100 / total_inventory_value, 1
+            ) if total_inventory_value else 0
+        warehouse_stats.sort(key=lambda stats: str(stats["nom"]).casefold())
     return {
         "items": items, "lots": lots, "documents": documents, "movements": movements,
         "categories": categories, "unites": units, "suppliers": suppliers, "staff": staff, "services": services,
         "motifs_commandes": order_reasons, "emplacements": storage_locations, "entrepots": warehouses,
         "parametres": {"jours_alerte_peremption": expiry_days},
+        "entrepot_stats": warehouse_stats,
         "summary": {"articles": item_count, "alertes_stock": low_stock,
                     "lots_perimes": len([lot for lot in lots if lot.get("perime")]),
                     "lots_proches": expiring_count, "quantite_perimee": expired_qty,
@@ -1338,6 +1397,12 @@ def render_html(user: dict[str, Any] | None = None) -> str:
 @media print { @page { size:A4 landscape; margin:12mm; } body.stock-print-consumption * { visibility:hidden!important; } body.stock-print-consumption #stockConsumptionModal, body.stock-print-consumption #stockConsumptionModal * { visibility:visible!important; } body.stock-print-consumption #stockConsumptionModal { position:absolute!important; inset:0!important; display:block!important; padding:0!important; background:#fff!important; } body.stock-print-consumption #stockConsumptionModal > section { width:100%!important; max-width:none!important; max-height:none!important; overflow:visible!important; border:0!important; border-radius:0!important; box-shadow:none!important; background:#fff!important; color:#17231b!important; } body.stock-print-consumption #stockConsumptionModal header, body.stock-print-consumption #stockConsumptionModal .stock-consumption-no-print { display:none!important; } body.stock-print-consumption #stockConsumptionPrintHeader { display:block!important; margin-bottom:14px!important; padding-bottom:12px!important; border-bottom:3px solid #56b86b!important; } body.stock-print-consumption #stockConsumptionModal .min-h-0 { overflow:visible!important; padding:0!important; } body.stock-print-consumption #stockConsumptionModal table { width:100%!important; min-width:0!important; border-collapse:collapse!important; font-size:10pt!important; } body.stock-print-consumption #stockConsumptionModal thead { display:table-header-group!important; } body.stock-print-consumption #stockConsumptionModal thead th { background:#173b2b!important; color:#fff!important; border:1px solid #173b2b!important; padding:9px!important; -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; } body.stock-print-consumption #stockConsumptionModal tbody td, body.stock-print-consumption #stockConsumptionModal tfoot td { border:1px solid #d5e1d8!important; padding:8px!important; color:#26352b!important; } body.stock-print-consumption #stockConsumptionModal tbody tr { break-inside:avoid!important; } }
 #stockModule button, [id^="stock"] button { line-height:1.25; }
 #stockModule button:not([class*="grid"]), [id^="stock"] button:not([class*="grid"]) { display:inline-flex; align-items:center; justify-content:center; gap:.45rem; }
+#stockWarehouseStats [class*="bg-rose-50"] { background:#fff1f2; color:#be123c; }
+#stockWarehouseStats [class*="bg-amber-50"] { background:#fffbeb; color:#b45309; }
+#stockWarehouseStats [class*="bg-emerald-50"] { background:#ecfdf5; color:#047857; }
+.dark #stockWarehouseStats [class*="bg-rose-50"] { background:rgba(244,63,94,.12); color:#fecdd3; }
+.dark #stockWarehouseStats [class*="bg-amber-50"] { background:rgba(245,158,11,.12); color:#fde68a; }
+.dark #stockWarehouseStats [class*="bg-emerald-50"] { background:rgba(16,185,129,.12); color:#a7f3d0; }
 
 </style>
 <section id="stockModule" class="space-y-5 text-slate-800" data-stock-manage="__MANAGE__">
@@ -1353,6 +1418,7 @@ def render_html(user: dict[str, Any] | None = None) -> str:
   <article onclick="stockShowKpi('expired')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();stockShowKpi('expired')}" role="button" tabindex="0" title="Afficher les produits concernés" class="flex min-h-[118px] cursor-pointer flex-col rounded-3xl border border-rose-100 bg-white p-4 shadow-sm transition hover:-translate-y-0.5 hover:border-rose-300 hover:shadow-md dark:border-rose-400/10 dark:bg-[#121c15]"><div class="flex min-h-10 items-center justify-between gap-2"><span class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Lots périmés</span><span class="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-rose-50 text-rose-600 dark:bg-rose-400/10 dark:text-rose-300"><i class="ph-bold ph-prohibit text-lg"></i></span></div><div id="stockKpiExpired" class="mt-auto pt-2 text-xl font-extrabold tracking-tight text-slate-900 dark:text-white">—</div></article>
  </section>
  __STORAGE_MANAGEMENT__
+ <section id="stockWarehouseStats" class="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/5 dark:bg-[#121c15] sm:p-5"><div class="mb-4 flex flex-wrap items-end justify-between gap-2"><div><h2 class="font-extrabold dark:text-white"><i class="ph-bold ph-chart-pie-slice mr-2 text-emerald-700 dark:text-emerald-300"></i>Statistiques par entrepôt</h2><p class="text-xs text-slate-500">Valeur, disponibilité, péremptions, ruptures locales et activité récente.</p></div><span class="rounded-full bg-emerald-50 px-3 py-1 text-[10px] font-bold text-emerald-800 dark:bg-emerald-400/10 dark:text-emerald-200">Actualisé automatiquement</span></div><div id="stockWarehouseStatsGrid" class="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3"><div class="rounded-2xl border border-slate-100 bg-slate-50 p-5 text-center text-sm text-slate-400 dark:border-white/10 dark:bg-white/[.03]">Chargement des statistiques…</div></div></section>
  <nav class="flex w-fit max-w-full flex-wrap items-center gap-1 rounded-2xl border border-slate-200/80 bg-white p-1.5 shadow-sm dark:border-white/10 dark:bg-[#121c15]">
   <button type="button" data-stock-tab="inventory" onclick="stockSetTab('inventory')" class="rounded-xl bg-brand-neon px-4 py-2.5 text-xs font-bold text-black"><i class="ph-bold ph-books mr-1"></i>Inventaire & lots</button>
   <button type="button" data-stock-tab="documents" onclick="stockSetTab('documents')" class="rounded-xl px-4 py-2.5 text-xs font-bold text-slate-500 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-white/5"><i class="ph-bold ph-receipt mr-1"></i>Bons & mouvements</button>
@@ -1479,6 +1545,8 @@ function stockFillLots(row){const select=row.querySelector('.sd-lot');if(!select
  window.stockSetPhotoProvider=()=>{window.stockPhotoSearchSource='google';window.stockRunInternetPhotoSearch();};
  const stockOpenGoogleSearch=window.stockSearchInternetPhoto;window.stockSearchInternetPhoto=()=>{window.stockPhotoSearchSource='google';stockOpenGoogleSearch();window.stockEnsurePhotoSources();const modal=$('stockInternetPhotoModal');const description=modal?.querySelector('p');if(description)description.textContent='Recherche Google Images via SerpApi. Vérifie les droits d’utilisation auprès de la source.';};
  window.stockUseInternetPhoto=async index=>{const photo=window.stockInternetPhotoResults?.[index];if(!photo)return;try{const url='/api/gestion-stock/photo-google-thumbnail?url='+encodeURIComponent(photo.thumbnail);const response=await fetch(url,{credentials:'same-origin'});if(!response.ok){let message='Impossible de récupérer cette photo.';try{const body=await response.json();message=body.detail||message;}catch{}throw new Error(message);}const blob=await response.blob();const extension=blob.type==='image/png'?'png':blob.type==='image/webp'?'webp':'jpg';const file=new File([blob],`google_${photo.id||index+1}.${extension}`,{type:blob.type});const transfer=new DataTransfer();transfer.items.add(file);$('siPhoto').files=transfer.files;window.stockPreviewPhoto({target:$('siPhoto')},true);$('siPhotoCredit').value=photo.creator||'';$('siPhotoLicense').value='Licence à vérifier auprès de la source';$('siPhotoSource').value=photo.source_url||'';window.stockSelectedInternetPhoto=photo;window.stockCloseInternetPhoto();toast('Photo ajoutée à l’aperçu. Elle sera enregistrée avec l’article.');}catch(error){toast(error.message||'Téléchargement impossible.',true);}};
+ function stockRenderWarehouseStats(){const root=$('stockWarehouseStatsGrid');if(!root)return;const rows=data.entrepot_stats||[];if(!rows.length){root.innerHTML='<div class="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/[.03]">Aucun entrepôt configuré. Crée un entrepôt pour suivre ses indicateurs.</div>';return;}root.innerHTML=rows.map(w=>{const available=Math.max(0,Math.min(100,Number(w.disponibilite_pct)||0)),risk=Number(w.ruptures||0)>0?'rose':Number(w.sous_seuil||0)>0?'amber':'emerald';return `<article class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-white/10 dark:bg-white/[.03]"><div class="flex items-center justify-between gap-3 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white px-4 py-3 dark:border-white/5 dark:from-white/[.04] dark:to-transparent"><div class="flex min-w-0 items-center gap-3"><span class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300"><i class="ph-bold ph-warehouse text-lg"></i></span><div class="min-w-0"><h3 class="truncate text-sm font-extrabold text-slate-800 dark:text-white" title="${esc(w.nom)}">${esc(w.nom)}</h3><p class="text-[10px] text-slate-500">${Number(w.produits_repertories||0)} produit(s) suivi(s)</p></div></div><span class="rounded-full bg-${risk}-50 px-2.5 py-1 text-[10px] font-extrabold text-${risk}-700 dark:bg-${risk}-400/10 dark:text-${risk}-200">${risk==='rose'?'À surveiller':risk==='amber'?'Attention':'Stable'}</span></div><div class="grid grid-cols-2 gap-2 p-3"><div class="col-span-2 rounded-xl bg-emerald-50/80 p-3 dark:bg-emerald-400/[.07]"><div class="flex items-center justify-between gap-2"><span class="text-[10px] font-bold uppercase tracking-wide text-emerald-800 dark:text-emerald-200">Valeur du stock</span><i class="ph-bold ph-currency-circle-dollar text-emerald-700 dark:text-emerald-300"></i></div><div class="mt-1 text-lg font-black text-emerald-950 dark:text-white">${fmt(w.valeur_stock||0)} <small class="text-xs">DA</small></div><div class="mt-1 text-[10px] text-emerald-800/70 dark:text-emerald-200/70">${Number(w.part_valeur_pct||0).toLocaleString('fr-FR')} % de la valeur totale</div></div><div class="rounded-xl border border-rose-100 bg-rose-50/70 p-2.5 dark:border-rose-400/10 dark:bg-rose-400/[.05]"><span class="block text-[10px] font-bold text-rose-700 dark:text-rose-200">Ruptures locales</span><b class="mt-1 block text-lg font-black text-rose-800 dark:text-rose-100">${Number(w.ruptures||0)}</b></div><div class="rounded-xl border border-amber-100 bg-amber-50/70 p-2.5 dark:border-amber-400/10 dark:bg-amber-400/[.05]"><span class="block text-[10px] font-bold text-amber-700 dark:text-amber-200">Sous le seuil</span><b class="mt-1 block text-lg font-black text-amber-800 dark:text-amber-100">${Number(w.sous_seuil||0)}</b></div><div class="rounded-xl border border-orange-100 bg-orange-50/70 p-2.5 dark:border-orange-400/10 dark:bg-orange-400/[.05]"><span class="block text-[10px] font-bold text-orange-700 dark:text-orange-200">Produits périmés</span><b class="mt-1 block text-lg font-black text-orange-800 dark:text-orange-100">${Number(w.produits_perimes||0)}</b><small class="text-[10px] text-orange-700 dark:text-orange-200">${fmt(w.quantite_perimee||0)} unité(s)</small></div><div class="rounded-xl border border-sky-100 bg-sky-50/70 p-2.5 dark:border-sky-400/10 dark:bg-sky-400/[.05]"><span class="block text-[10px] font-bold text-sky-700 dark:text-sky-200">Péremption proche</span><b class="mt-1 block text-lg font-black text-sky-800 dark:text-sky-100">${Number(w.produits_peremption_proche||0)}</b><small class="text-[10px] text-sky-700 dark:text-sky-200">produit(s)</small></div></div><div class="px-4 pb-3"><div class="mb-1 flex justify-between text-[10px] text-slate-500"><span>Disponibilité des produits</span><b class="text-slate-700 dark:text-slate-200">${available.toLocaleString('fr-FR')} %</b></div><div class="h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10"><div class="h-full rounded-full bg-gradient-to-r from-emerald-400 to-emerald-600 transition-all" style="width:${available}%"></div></div><div class="mt-2 flex items-center justify-between text-[10px] text-slate-500"><span><b class="text-slate-700 dark:text-slate-200">${Number(w.nombre_lots||0)}</b> lot(s) actifs · <b class="text-slate-700 dark:text-slate-200">${Number(w.mouvements_30j||0)}</b> mouvement(s) / 30 j</span><span>Stock utilisable : ${fmt(w.valeur_utilisable||0)} DA</span></div></div></article>`;}).join('');}
+ const stockRefreshBase=refresh;refresh=async()=>{await stockRefreshBase();stockRenderWarehouseStats();};
  document.addEventListener('input',event=>{if(event.target?.id==='siName'||event.target?.id==='siReference'){const query=[$('siReference')?.value,$('siName')?.value].map(value=>(value||'').trim()).filter(Boolean).join(' ');window.stockScheduleGooglePrefetch(query,false);}else if(event.target?.id==='siPhotoQuery'){window.stockGoogleSearchRunId=(window.stockGoogleSearchRunId||0)+1;window.stockScheduleGooglePrefetch(event.target.value,true);}});
  refresh();window.setInterval(refresh,7000);
  })();
