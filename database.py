@@ -727,6 +727,12 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         actif BOOLEAN NOT NULL DEFAULT TRUE,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS stock_warehouses (
+        id SERIAL PRIMARY KEY,
+        nom TEXT NOT NULL UNIQUE,
+        actif BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS stock_locations (
         id SERIAL PRIMARY KEY,
         nom TEXT NOT NULL UNIQUE,
@@ -794,6 +800,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS unite_stock TEXT NOT NULL DEFAULT '';
     ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS quantite_par_unite NUMERIC(14,3) NOT NULL DEFAULT 1;
     ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS emplacement TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS entrepot TEXT NOT NULL DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_stock_lots_item_expiry
         ON stock_lots (item_id, date_peremption, created_at);
     CREATE TABLE IF NOT EXISTS stock_documents (
@@ -841,6 +848,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS prix_vente NUMERIC(14,2);
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS marge_vente NUMERIC(8,3) NOT NULL DEFAULT 15;
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS emplacement TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS entrepot TEXT NOT NULL DEFAULT '';
     CREATE TABLE IF NOT EXISTS stock_document_attachments (
         id SERIAL PRIMARY KEY,
         document_id INT NOT NULL REFERENCES stock_documents(id) ON DELETE CASCADE,
