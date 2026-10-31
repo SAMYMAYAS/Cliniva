@@ -721,6 +721,12 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         nom TEXT NOT NULL UNIQUE,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS stock_order_reasons (
+        id SERIAL PRIMARY KEY,
+        nom TEXT NOT NULL UNIQUE,
+        actif BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS stock_suppliers (
         id SERIAL PRIMARY KEY,
         designation TEXT NOT NULL UNIQUE,
@@ -755,6 +761,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         ON CONFLICT (nom) DO NOTHING;
     INSERT INTO stock_units (nom)
         SELECT DISTINCT unite FROM stock_items WHERE BTRIM(unite) <> ''
+        ON CONFLICT (nom) DO NOTHING;
+    INSERT INTO stock_order_reasons (nom) VALUES
+        ('Commande normale'), ('Commande hebdomadaire'),
+        ('Commande pour les prochains 15 jours'), ('Commande pour le prochain mois'),
+        ('Commande pour deux mois'), ('Commande trois mois'), ('Commande six mois')
         ON CONFLICT (nom) DO NOTHING;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_items_reference_unique
         ON stock_items (reference) WHERE reference <> '';
