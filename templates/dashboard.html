@@ -838,6 +838,16 @@
     <script src="/static/vendor/js/html2pdf.bundle.min.js"></script>
     <!-- MOTEUR DE CHARGEMENT DYNAMIQUE -->
 <script>
+        // Les clics sur les arrière-plans ne ferment jamais les modals.
+        // La fermeture reste réservée aux boutons d'action de chaque fenêtre.
+        document.addEventListener('click', function(event) {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            const backdrop = (target.classList.contains('fixed') && (target.classList.contains('inset-0') || target.classList.contains('inset-x-0'))) ||
+                target.classList.contains('modal-backdrop') || target.classList.contains('modal') ||
+                (target.getAttribute('onclick') || '').includes('event.target');
+            if (backdrop) event.stopPropagation();
+        }, true);
         // =====================================================================
         // 1. GESTION DU THÈME SOMBRE / CLAIR
         // =====================================================================
