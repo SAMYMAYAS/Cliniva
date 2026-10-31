@@ -159,6 +159,7 @@ from modules.gestion_backup import backup_router, start_backup_scheduler, stop_b
 from modules.gestion_kacel_job import kacel_job_router
 from modules.gestion_service_technique import service_tech_router
 from modules.gestion_stock import stock_router
+from modules.gestion_approvisionnement import procurement_router
 from modules.gestion_configuration_notif import notification_config_router
 from app.mobile_scan import mobile_scan_router
 
@@ -1186,6 +1187,7 @@ app.include_router(backup_router)
 app.include_router(kacel_job_router)
 app.include_router(service_tech_router)
 app.include_router(stock_router)
+app.include_router(procurement_router)
 app.include_router(notification_config_router)
 app.include_router(mobile_scan_router)
 
@@ -1543,7 +1545,7 @@ async def execute_python_module(module_name: str, request: Request) -> HTMLRespo
             if not module_target.user_can_access_caisse(user):
                 raise HTTPException(status_code=403, detail="Aucun droit de caisse n'est accordé à ce compte.")
             html_output = module_target.render_html(user)
-        elif module_name in {"gestion_kacel_job", "gestion_service_technique", "gestion_stock", "gestion_configuration_notif"}:
+        elif module_name in {"gestion_kacel_job", "gestion_service_technique", "gestion_stock", "gestion_approvisionnement", "gestion_configuration_notif"}:
             html_output = module_target.render_html(user)
         elif module_name in {"gestion_dme", "gestion_worklist", "gestion_dicom_print", "gestion_pacs_server", "gestion_backup", "gestion_telephonie_ip"}:
             html_output = module_target.render_html(user)

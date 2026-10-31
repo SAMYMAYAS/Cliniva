@@ -31,6 +31,7 @@
             #sidebar.sidebar-collapsed .sidebar-group-btn > i:last-child,
             #sidebar.sidebar-collapsed #settings-submenu,
             #sidebar.sidebar-collapsed #dicom-submenu,
+            #sidebar.sidebar-collapsed #stock-submenu,
             #sidebar.sidebar-collapsed .sidebar-help-label,
             #sidebar.sidebar-collapsed #sidebarProfileCopy { display: none !important; }
             #sidebar.sidebar-collapsed .sidebar-nav-btn,
@@ -285,10 +286,16 @@
     {% endif %}
 
     {% if user.role == 'Administrateur' or user.permissions.stock_view or user.permissions.stock_manage %}
-    <button onclick="loadModule('gestion_stock')" data-module="gestion_stock" class="sidebar-nav-btn w-full flex items-center gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
-        <i class="ph-bold ph-warehouse text-xl text-emerald-400"></i>
-        <span>Gestion Stock</span>
-    </button>
+    <div>
+        <button type="button" onclick="toggleStockMenu()" aria-controls="stock-submenu" aria-expanded="false" class="sidebar-group-btn w-full flex items-center justify-between gap-3.5 px-3.5 py-2.5 text-slate-300 hover:text-white hover:bg-white/5 rounded-2xl transition duration-150 text-left">
+            <span class="flex items-center gap-3.5"><i class="ph-bold ph-warehouse text-xl text-emerald-400"></i><span>Gestion Stock</span></span>
+            <i id="stock-chevron" class="ph-bold ph-caret-down text-xs transition-transform"></i>
+        </button>
+        <div id="stock-submenu" class="hidden mt-1 ml-5 pl-3 pr-1 py-1 space-y-0.5 border-l-2 border-emerald-400/30">
+            <button onclick="loadModule('gestion_stock')" data-module="gestion_stock" class="sidebar-nav-btn w-full flex items-center gap-3 rounded-xl px-3 py-2 text-left text-sm text-slate-300 hover:bg-white/5 hover:text-white"><i class="ph-bold ph-package text-emerald-300"></i><span>Inventaire et bons</span></button>
+            <button onclick="loadModule('gestion_approvisionnement')" data-module="gestion_approvisionnement" class="sidebar-nav-btn w-full flex items-center gap-3 rounded-xl px-3 py-2 text-left text-sm text-slate-300 hover:bg-white/5 hover:text-white"><i class="ph-bold ph-truck text-emerald-300"></i><span>Approvisionnement & fournisseurs</span></button>
+        </div>
+    </div>
     {% endif %}
 
     <!-- Médicaments -->
@@ -1038,6 +1045,7 @@
             if (collapsed) {
                 document.getElementById('settings-submenu')?.classList.add('hidden');
                 document.getElementById('dicom-submenu')?.classList.add('hidden');
+                document.getElementById('stock-submenu')?.classList.add('hidden');
             }
         };
         window.toggleSidebarCollapse(localStorage.getItem('cliniva_sidebar_collapsed') === '1');
@@ -1055,6 +1063,16 @@
             const submenu = document.getElementById('dicom-submenu');
             const chevron = document.getElementById('dicom-chevron');
             const button = document.querySelector('[aria-controls="dicom-submenu"]');
+            if (submenu) submenu.classList.toggle('hidden');
+            if (chevron) chevron.classList.toggle('rotate-180');
+            if (button) button.setAttribute('aria-expanded', String(submenu && !submenu.classList.contains('hidden')));
+        };
+
+        window.toggleStockMenu = function() {
+            if (document.getElementById('sidebar')?.classList.contains('sidebar-collapsed')) window.toggleSidebarCollapse(false);
+            const submenu = document.getElementById('stock-submenu');
+            const chevron = document.getElementById('stock-chevron');
+            const button = document.querySelector('[aria-controls="stock-submenu"]');
             if (submenu) submenu.classList.toggle('hidden');
             if (chevron) chevron.classList.toggle('rotate-180');
             if (button) button.setAttribute('aria-expanded', String(submenu && !submenu.classList.contains('hidden')));
@@ -1081,6 +1099,11 @@
                 if (submenu) submenu.classList.remove('hidden');
                 if (chevron) chevron.classList.add('rotate-180');
                 if (button) button.setAttribute('aria-expanded', 'true');
+            }
+            if (moduleName === 'gestion_stock' || moduleName === 'gestion_approvisionnement') {
+                document.getElementById('stock-submenu')?.classList.remove('hidden');
+                document.getElementById('stock-chevron')?.classList.add('rotate-180');
+                document.querySelector('[aria-controls="stock-submenu"]')?.setAttribute('aria-expanded', 'true');
             }
 
             // 1. Mise à jour de l'état actif des boutons

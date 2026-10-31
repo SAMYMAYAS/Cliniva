@@ -849,6 +849,47 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS marge_vente NUMERIC(8,3) NOT NULL DEFAULT 15;
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS emplacement TEXT NOT NULL DEFAULT '';
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS entrepot TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS stock_supplier_orders (
+        id SERIAL PRIMARY KEY,
+        numero TEXT NOT NULL UNIQUE,
+        supplier_id INT NOT NULL REFERENCES stock_suppliers(id) ON DELETE RESTRICT,
+        date_commande DATE NOT NULL DEFAULT CURRENT_DATE,
+        date_prevue DATE,
+        statut TEXT NOT NULL DEFAULT 'Commandée' CHECK (statut IN ('Commandée','Partiellement reçue','Reçue','Annulée')),
+        notes TEXT NOT NULL DEFAULT '', created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS stock_supplier_order_lines (
+        id SERIAL PRIMARY KEY,
+        order_id INT NOT NULL REFERENCES stock_supplier_orders(id) ON DELETE CASCADE,
+        item_id INT REFERENCES stock_items(id) ON DELETE SET NULL,
+        designation TEXT NOT NULL, quantite NUMERIC(14,3) NOT NULL CHECK (quantite > 0),
+        unite TEXT NOT NULL DEFAULT '', prix_unitaire NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (prix_unitaire >= 0),
+        quantite_recue NUMERIC(14,3) NOT NULL DEFAULT 0 CHECK (quantite_recue >= 0),
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_supplier_orders_date ON stock_supplier_orders(date_commande DESC, id DESC);
+    CREATE TABLE IF NOT EXISTS stock_supplier_invoices (
+        id SERIAL PRIMARY KEY,
+        supplier_id INT NOT NULL REFERENCES stock_suppliers(id) ON DELETE RESTRICT,
+        order_id INT REFERENCES stock_supplier_orders(id) ON DELETE SET NULL,
+        stock_document_id INT UNIQUE REFERENCES stock_documents(id) ON DELETE SET NULL,
+        numero_facture TEXT NOT NULL, date_facture DATE NOT NULL DEFAULT CURRENT_DATE, date_echeance DATE,
+        montant NUMERIC(14,2) NOT NULL CHECK (montant >= 0), notes TEXT NOT NULL DEFAULT '',
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_supplier_invoices_supplier_date ON stock_supplier_invoices(supplier_id, date_facture DESC);
+    CREATE TABLE IF NOT EXISTS stock_supplier_payments (
+        id SERIAL PRIMARY KEY,
+        invoice_id INT NOT NULL REFERENCES stock_supplier_invoices(id) ON DELETE RESTRICT,
+        date_paiement DATE NOT NULL DEFAULT CURRENT_DATE, montant NUMERIC(14,2) NOT NULL CHECK (montant > 0),
+        mode_paiement TEXT NOT NULL DEFAULT '', reference TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_supplier_payments_invoice ON stock_supplier_payments(invoice_id, date_paiement DESC);
     CREATE TABLE IF NOT EXISTS stock_document_attachments (
         id SERIAL PRIMARY KEY,
         document_id INT NOT NULL REFERENCES stock_documents(id) ON DELETE CASCADE,
