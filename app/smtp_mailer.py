@@ -90,7 +90,8 @@ def build_cliniva_email_html(title: str, subtitle: str, content_html: str, prehe
 
 
 def send_smtp_email(configuration: dict, recipients: list[str], subject: str, body: str,
-                    html_body: str | None = None) -> None:
+                    html_body: str | None = None,
+                    attachments: list[tuple[str, bytes, str]] | None = None) -> None:
     if not configuration.get("enabled"):
         raise RuntimeError("L'envoi SMTP est désactivé ou non configuré.")
     host = str(configuration.get("host") or "").strip()
@@ -106,6 +107,10 @@ def send_smtp_email(configuration: dict, recipients: list[str], subject: str, bo
     message.set_content(body)
     if html_body:
         message.add_alternative(html_body, subtype="html")
+    for filename, content, mime_type in attachments or []:
+        maintype, _, subtype = str(mime_type or "application/octet-stream").partition("/")
+        message.add_attachment(content, maintype=maintype or "application",
+                               subtype=subtype or "octet-stream", filename=filename)
     username = str(configuration.get("user") or "").strip()
     password = str(configuration.get("password") or "")
     context = ssl.create_default_context()
