@@ -119,7 +119,7 @@ def procurement_data(request: Request):
             LEFT JOIN stock_supplier_orders o ON o.id=d.supplier_order_id
             LEFT JOIN stock_document_lines l ON l.document_id=d.id
             WHERE d.type_document='Entrée' AND d.statut<>'Annulé' AND d.fournisseur_id IS NOT NULL
-            GROUP BY d.id,s.designation ORDER BY d.created_at DESC,d.id DESC""")
+            GROUP BY d.id,s.designation,o.numero ORDER BY d.created_at DESC,d.id DESC""")
         receipts = [dict(row) for row in cur.fetchall()]
         cur.execute("""SELECT f.id,f.supplier_id,s.designation AS fournisseur,f.order_id,o.numero AS commande,
                 f.stock_document_id,d.numero AS bon_reception,f.numero_facture,f.date_facture,f.date_echeance,
