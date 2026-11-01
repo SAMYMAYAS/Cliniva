@@ -871,6 +871,35 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         quantite_recue NUMERIC(14,3) NOT NULL DEFAULT 0 CHECK (quantite_recue >= 0),
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS stock_proforma_requests (
+        id SERIAL PRIMARY KEY,
+        numero TEXT NOT NULL UNIQUE,
+        supplier_id INT NOT NULL REFERENCES stock_suppliers(id) ON DELETE RESTRICT,
+        date_demande DATE NOT NULL DEFAULT CURRENT_DATE,
+        date_limite DATE,
+        statut TEXT NOT NULL DEFAULT 'À envoyer'
+            CHECK (statut IN ('À envoyer','Envoyée','Reçue','Acceptée','Refusée','Convertie')),
+        montant_propose NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (montant_propose >= 0),
+        notes TEXT NOT NULL DEFAULT '',
+        converted_order_id INT REFERENCES stock_supplier_orders(id) ON DELETE SET NULL,
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS stock_proforma_request_lines (
+        id SERIAL PRIMARY KEY,
+        request_id INT NOT NULL REFERENCES stock_proforma_requests(id) ON DELETE CASCADE,
+        item_id INT NOT NULL REFERENCES stock_items(id) ON DELETE RESTRICT,
+        designation TEXT NOT NULL,
+        quantite NUMERIC(14,3) NOT NULL CHECK (quantite > 0),
+        unite TEXT NOT NULL DEFAULT '',
+        prix_reponse NUMERIC(14,2) CHECK (prix_reponse IS NULL OR prix_reponse >= 0),
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_proforma_supplier_date
+        ON stock_proforma_requests(supplier_id, date_demande DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_stock_proforma_lines_request
+        ON stock_proforma_request_lines(request_id, id);
     ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS supplier_order_line_id INT REFERENCES stock_supplier_order_lines(id) ON DELETE SET NULL;
     CREATE INDEX IF NOT EXISTS idx_stock_supplier_orders_date ON stock_supplier_orders(date_commande DESC, id DESC);
     CREATE TABLE IF NOT EXISTS stock_supplier_invoices (

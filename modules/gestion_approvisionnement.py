@@ -109,6 +109,18 @@ def procurement_data(request: Request):
             LEFT JOIN stock_supplier_order_lines l ON l.order_id=o.id
             GROUP BY o.id,s.designation ORDER BY o.date_commande DESC,o.id DESC""")
         orders = [dict(row) for row in cur.fetchall()]
+        cur.execute("""SELECT p.id,p.numero,p.supplier_id,s.designation AS fournisseur,p.date_demande,p.date_limite,
+                p.statut,p.montant_propose,p.notes,p.converted_order_id,o.numero AS commande_convertie,p.created_at,
+                COUNT(l.id) AS lignes
+            FROM stock_proforma_requests p JOIN stock_suppliers s ON s.id=p.supplier_id
+            LEFT JOIN stock_supplier_orders o ON o.id=p.converted_order_id
+            LEFT JOIN stock_proforma_request_lines l ON l.request_id=p.id
+            GROUP BY p.id,s.designation,o.numero ORDER BY p.date_demande DESC,p.id DESC""")
+        proformas = [dict(row) for row in cur.fetchall()]
+        cur.execute("""SELECT l.request_id,l.id,l.item_id,l.designation,l.quantite,l.unite,l.prix_reponse,
+                i.reference FROM stock_proforma_request_lines l JOIN stock_items i ON i.id=l.item_id
+            ORDER BY l.id""")
+        proforma_lines = [dict(row) for row in cur.fetchall()]
         cur.execute("""SELECT d.id,d.numero,d.created_at,d.fournisseur_id,s.designation AS fournisseur,
                 d.supplier_order_id,o.numero AS commande,
                 COALESCE(SUM(CASE WHEN COALESCE(l.quantite_unite_stock,0)>0 AND l.prix_achat IS NOT NULL
@@ -160,6 +172,11 @@ def procurement_data(request: Request):
         lines_by_order.setdefault(line.pop("order_id"), []).append(line)
     for order in orders:
         order["lignes_detail"] = lines_by_order.get(order["id"], [])
+    proforma_lines_by_request: dict[int, list[dict[str, Any]]] = {}
+    for line in proforma_lines:
+        proforma_lines_by_request.setdefault(line.pop("request_id"), []).append(line)
+    for proforma in proformas:
+        proforma["lignes_detail"] = proforma_lines_by_request.get(proforma["id"], [])
     with get_db_cursor() as cur:
         cur.execute("""SELECT r.id,r.numero,r.created_at,s.designation AS fournisseur,i.numero_facture,
                 d.numero AS bon_retour,r.montant_avoir,r.motif
@@ -197,7 +214,7 @@ def procurement_data(request: Request):
             FROM stock_lots l JOIN stock_items i ON i.id=l.item_id
             WHERE i.actif=TRUE AND BTRIM(l.entrepot)<>'' ORDER BY l.entrepot,i.designation,l.date_peremption NULLS LAST,l.id""")
         countable_lots=[dict(row) for row in cur.fetchall()]
-    return {"suppliers": suppliers, "items": items, "orders": orders, "receipts": receipts,
+    return {"suppliers": suppliers, "items": items, "orders": orders, "proformas": proformas, "receipts": receipts,
             "invoices": invoices, "payments": payments, "returns": returns,
             "inventory_counts": inventory_counts, "transfers": transfers,
             "restock_alerts": restock_alerts, "countable_lots": countable_lots,
@@ -252,6 +269,152 @@ async def procurement_order_save(request: Request):
                 VALUES(%s,%s,%s,%s,%s,%s)""", (order_id, item_id, name, quantity, unit, price))
     track_action(request, "STOCK_SUPPLIER_ORDER", f"Commande fournisseur {numero} créée · {supplier['designation']}")
     return {"success": True, "numero": numero}
+
+
+@procurement_router.post("/proformas")
+async def proforma_request_create(request: Request):
+    user = _require(request, True)
+    data = await request.json()
+    try:
+        supplier_id = int(data.get("supplier_id"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Choisis un fournisseur.") from exc
+    rows = data.get("lignes") or []
+    if not isinstance(rows, list) or not rows or len(rows) > 100:
+        raise HTTPException(status_code=400, detail="Ajoute de 1 à 100 articles à la demande de proforma.")
+    normalized = []
+    seen: set[int] = set()
+    for index, raw in enumerate(rows, 1):
+        try:
+            item_id = int(raw.get("item_id"))
+            quantity = Decimal(str(raw.get("quantite") or "").replace(",", "."))
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise HTTPException(status_code=400, detail=f"Article ou quantité invalide à la ligne {index}.") from exc
+        if item_id in seen or not quantity.is_finite() or quantity <= 0:
+            raise HTTPException(status_code=400, detail=f"Article dupliqué ou quantité invalide à la ligne {index}.")
+        seen.add(item_id)
+        normalized.append((item_id, quantity))
+    demand_date = _date(data.get("date_demande"), "demande", True)
+    deadline = _date(data.get("date_limite"), "date limite")
+    if deadline and deadline < demand_date:
+        raise HTTPException(status_code=400, detail="La date limite ne peut pas précéder la date de demande.")
+    notes = str(data.get("notes") or "").strip()[:2000]
+    with get_db_cursor() as cur:
+        cur.execute("SELECT designation FROM stock_suppliers WHERE id=%s AND actif=TRUE", (supplier_id,))
+        supplier = cur.fetchone()
+        if not supplier:
+            raise HTTPException(status_code=404, detail="Fournisseur actif introuvable.")
+        prepared = []
+        for index, (item_id, quantity) in enumerate(normalized, 1):
+            cur.execute("SELECT designation,unite FROM stock_items WHERE id=%s AND actif=TRUE", (item_id,))
+            item = cur.fetchone()
+            if not item:
+                raise HTTPException(status_code=400, detail=f"Article actif introuvable à la ligne {index}.")
+            prepared.append((item_id, item["designation"], quantity, item["unite"]))
+        cur.execute("SELECT nextval(pg_get_serial_sequence('stock_proforma_requests','id')) AS id")
+        request_id = int(cur.fetchone()["id"])
+        number = f"DPF-{date.today():%Y%m%d}-{request_id:05d}"
+        cur.execute("""INSERT INTO stock_proforma_requests(id,numero,supplier_id,date_demande,date_limite,statut,notes,created_by)
+            VALUES(%s,%s,%s,%s,%s,'À envoyer',%s,%s)""",
+            (request_id, number, supplier_id, demand_date, deadline, notes, user.get("id")))
+        for item_id, designation, quantity, unit in prepared:
+            cur.execute("""INSERT INTO stock_proforma_request_lines(request_id,item_id,designation,quantite,unite)
+                VALUES(%s,%s,%s,%s,%s)""", (request_id, item_id, designation, quantity, unit))
+    track_action(request, "STOCK_PROFORMA_REQUEST", f"Demande de proforma {number} créée · {supplier['designation']}")
+    return {"success": True, "numero": number}
+
+
+@procurement_router.post("/proformas/{proforma_id}/status")
+async def proforma_request_status(proforma_id: int, request: Request):
+    _require(request, True)
+    data = await request.json()
+    status = str(data.get("statut") or "")
+    if status not in {"Envoyée", "Acceptée", "Refusée"}:
+        raise HTTPException(status_code=400, detail="Statut de demande de proforma invalide.")
+    with get_db_cursor() as cur:
+        cur.execute("""UPDATE stock_proforma_requests SET statut=%s,updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND statut IN ('À envoyer','Envoyée','Reçue','Acceptée','Refusée') RETURNING numero""",
+            (status, proforma_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Demande introuvable ou déjà convertie en commande.")
+    track_action(request, "STOCK_PROFORMA_STATUS", f"Demande de proforma {row['numero']} : {status}")
+    return {"success": True}
+
+
+@procurement_router.post("/proformas/{proforma_id}/response")
+async def proforma_request_response(proforma_id: int, request: Request):
+    user = _require(request, True)
+    data = await request.json()
+    rows = data.get("lignes") or []
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="Saisis les prix reçus sur la proforma fournisseur.")
+    prepared = []
+    seen: set[int] = set()
+    for index, raw in enumerate(rows, 1):
+        try:
+            line_id = int(raw.get("ligne_id"))
+            price = _money(raw.get("prix_unitaire"), f"ligne {index}")
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Prix invalide à la ligne {index}.") from exc
+        if line_id in seen:
+            raise HTTPException(status_code=400, detail=f"Ligne dupliquée : {index}.")
+        seen.add(line_id)
+        prepared.append((line_id, price))
+    with get_db_cursor() as cur:
+        cur.execute("SELECT numero,statut FROM stock_proforma_requests WHERE id=%s FOR UPDATE", (proforma_id,))
+        proforma = cur.fetchone()
+        if not proforma or proforma["statut"] == "Convertie":
+            raise HTTPException(status_code=404, detail="Demande introuvable ou déjà convertie.")
+        cur.execute("SELECT id FROM stock_proforma_request_lines WHERE request_id=%s ORDER BY id", (proforma_id,))
+        expected = {int(row["id"]) for row in cur.fetchall()}
+        if seen != expected:
+            raise HTTPException(status_code=400, detail="Renseigne un prix pour chaque ligne de la proforma.")
+        total = Decimal("0")
+        for line_id, price in prepared:
+            cur.execute("UPDATE stock_proforma_request_lines SET prix_reponse=%s WHERE id=%s AND request_id=%s RETURNING quantite", (price, line_id, proforma_id))
+            line = cur.fetchone()
+            if not line:
+                raise HTTPException(status_code=400, detail="Une ligne ne correspond pas à cette demande.")
+            total += Decimal(str(line["quantite"])) * price
+        cur.execute("""UPDATE stock_proforma_requests SET statut='Reçue',montant_propose=%s,
+            updated_at=CURRENT_TIMESTAMP WHERE id=%s""", (total.quantize(Decimal("0.01")), proforma_id))
+    track_action(request, "STOCK_PROFORMA_RESPONSE", f"Réponse fournisseur enregistrée pour {proforma['numero']} · {total} DA")
+    return {"success": True, "montant": str(total.quantize(Decimal("0.01")))}
+
+
+@procurement_router.post("/proformas/{proforma_id}/convert")
+async def proforma_request_convert(proforma_id: int, request: Request):
+    user = _require(request, True)
+    with get_db_cursor() as cur:
+        cur.execute("""SELECT p.id,p.numero,p.supplier_id,p.statut,s.designation AS fournisseur
+            FROM stock_proforma_requests p JOIN stock_suppliers s ON s.id=p.supplier_id
+            WHERE p.id=%s FOR UPDATE OF p""", (proforma_id,))
+        proforma = cur.fetchone()
+        if not proforma:
+            raise HTTPException(status_code=404, detail="Demande de proforma introuvable.")
+        if proforma["statut"] not in {"Reçue", "Acceptée"}:
+            raise HTTPException(status_code=409, detail="Enregistre d’abord la réponse fournisseur et accepte la proforma.")
+        cur.execute("""SELECT l.item_id,l.designation,l.quantite,l.unite,l.prix_reponse,i.actif
+            FROM stock_proforma_request_lines l JOIN stock_items i ON i.id=l.item_id
+            WHERE l.request_id=%s ORDER BY l.id""", (proforma_id,))
+        lines = cur.fetchall()
+        if not lines or any(line["prix_reponse"] is None or not line["actif"] for line in lines):
+            raise HTTPException(status_code=409, detail="La proforma doit avoir un prix pour chaque article actif.")
+        cur.execute("SELECT nextval(pg_get_serial_sequence('stock_supplier_orders','id')) AS id")
+        order_id = int(cur.fetchone()["id"])
+        order_number = f"ACH-{date.today():%Y%m%d}-{order_id:05d}"
+        cur.execute("""INSERT INTO stock_supplier_orders(id,numero,supplier_id,date_commande,statut,notes,created_by)
+            VALUES(%s,%s,%s,CURRENT_DATE,'Commandée',%s,%s)""",
+            (order_id, order_number, proforma["supplier_id"], f"Commande créée depuis la proforma {proforma['numero']}", user.get("id")))
+        for line in lines:
+            cur.execute("""INSERT INTO stock_supplier_order_lines(order_id,item_id,designation,quantite,unite,prix_unitaire)
+                VALUES(%s,%s,%s,%s,%s,%s)""",
+                (order_id, line["item_id"], line["designation"], line["quantite"], line["unite"], line["prix_reponse"]))
+        cur.execute("""UPDATE stock_proforma_requests SET statut='Convertie',converted_order_id=%s,
+            updated_at=CURRENT_TIMESTAMP WHERE id=%s""", (order_id, proforma_id))
+    track_action(request, "STOCK_PROFORMA_CONVERT", f"Proforma {proforma['numero']} convertie en commande {order_number}")
+    return {"success": True, "numero": order_number}
 
 
 @procurement_router.post("/orders/{order_id}/status")
@@ -723,17 +886,23 @@ PROCUREMENT_ADVANCED_SCRIPT = r'''<script>
  const orderForm=()=>window.procOpenOrder();
  const renderOrders=()=>{const d=state.data;const rows=(d.orders||[]).map(o=>{const remain=(o.lignes_detail||[]).reduce((a,l)=>a+Math.max(0,Number(l.quantite)-Number(l.quantite_recue)),0);return `<tr class="border-t"><td class="p-3 font-bold">${esc(o.numero)}<small class="block text-slate-400">${Number(o.quantite_recue||0)} / ${Number(o.quantite_commandee||0)} unité(s) reçue(s)</small></td><td class="p-3">${esc(o.fournisseur)}</td><td class="p-3">${esc(o.date_commande)}</td><td class="p-3">${esc(o.date_prevue||'—')}</td><td class="p-3">${o.lignes} ligne(s)</td><td class="p-3 font-bold">${money(o.montant)}</td><td class="p-3"><span class="rounded-full bg-sky-50 px-2 py-1 text-[10px] font-bold text-sky-800">${esc(o.statut)}</span></td><td class="p-3">${remain>0&&o.statut!=='Annulée'?`<button onclick="procReceive(${o.id})" class="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800">Réceptionner</button>`:'—'}</td></tr>`}).join('');$('procContent').innerHTML=`<div class="mb-4 flex items-center justify-between"><div><h2 class="font-extrabold">Commandes d’achat</h2><p class="text-xs text-slate-500">Réception partielle ou complète, article et lot par lot.</p></div><button onclick="procOpenOrder()" class="rounded-xl bg-brand-neon px-3 py-2 text-xs font-bold">＋ Nouvelle commande</button></div>${table(['Commande / réception','Fournisseur','Date','Livraison prévue','Articles','Montant prévu','État','Action'],rows,'Aucune commande.')}`};
  const renderReceipts=()=>{const rows=(state.data.receipts||[]).map(r=>`<tr class="border-t"><td class="p-3 font-bold">${esc(r.numero)}${r.commande?`<small class="block text-slate-400">${esc(r.commande)}</small>`:''}</td><td class="p-3">${esc(r.fournisseur)}</td><td class="p-3">${esc(String(r.created_at||'').slice(0,16))}</td><td class="p-3 font-bold">${money(r.montant)}</td><td class="p-3">${r.facture_liee?'<span class="text-emerald-700">Facture liée</span>':`<button onclick="procOpenInvoice(${r.id})" class="rounded-lg bg-sky-50 px-3 py-2 text-xs font-bold text-sky-800">Créer la créance</button>`}</td></tr>`).join('');$('procContent').innerHTML=`<h2 class="mb-1 font-extrabold">Réceptions de stock</h2><p class="mb-4 text-xs text-slate-500">Historique des réceptions et rapprochement avec la facture du fournisseur.</p>${table(['Bon / commande','Fournisseur','Date','Valeur reçue','Facture'],rows,'Aucune réception fournisseur.')}`};
+ const renderProformas=()=>{const rows=(state.data.proformas||[]).map(p=>{const statuses=['À envoyer','Envoyée','Reçue','Acceptée','Refusée','Convertie'];return `<tr class="border-t"><td class="p-3 font-extrabold">${esc(p.numero)}<small class="block text-slate-400">${p.lignes} article(s)</small></td><td class="p-3">${esc(p.fournisseur)}</td><td class="p-3">${esc(p.date_demande)}</td><td class="p-3">${esc(p.date_limite||'—')}</td><td class="p-3 font-bold">${money(p.montant_propose)}</td><td class="p-3"><select ${p.statut==='Convertie'?'disabled':''} onchange="procProformaStatus(${p.id},this.value)" class="rounded-lg border px-2 py-1 text-xs">${statuses.map(s=>`<option ${p.statut===s?'selected':''}>${s}</option>`).join('')}</select></td><td class="p-3"><div class="flex flex-wrap gap-1">${p.statut!=='Convertie'?`<button onclick="procProformaResponse(${p.id})" class="rounded-lg bg-sky-50 px-2 py-1.5 text-[11px] font-bold text-sky-800">Saisir réponse</button>`:''}${p.statut==='Acceptée'?`<button onclick="procProformaConvert(${p.id})" class="rounded-lg bg-emerald-50 px-2 py-1.5 text-[11px] font-bold text-emerald-800">Créer commande</button>`:''}${p.commande_convertie?`<span class="rounded-lg bg-emerald-50 px-2 py-1.5 text-[11px] font-bold text-emerald-800">${esc(p.commande_convertie)}</span>`:''}<button onclick="procPrintProforma(${p.id})" class="rounded-lg border px-2 py-1.5 text-[11px] font-bold">Imprimer</button></div></td></tr>`}).join('');$('procContent').innerHTML=`<div class="mb-4 flex items-center justify-between"><div><h2 class="font-extrabold">Demandes de proforma</h2><p class="text-xs text-slate-500">Prépare les demandes par fournisseur, suis les réponses reçues et transforme une offre acceptée en commande d’achat.</p></div><button onclick="procOpenProforma()" class="rounded-xl bg-brand-neon px-3 py-2 text-xs font-extrabold">＋ Nouvelle demande</button></div>${table(['Référence','Fournisseur','Demande','Réponse attendue','Montant reçu','État','Actions'],rows,'Aucune demande de proforma.')}`};
  const renderCounts=()=>{const rows=(state.data.inventory_counts||[]).map(x=>`<tr class="border-t"><td class="p-3 font-bold">${esc(x.numero)}</td><td class="p-3">${esc(x.entrepot)}</td><td class="p-3">${esc(String(x.created_at||'').slice(0,16))}</td><td class="p-3">${x.lots}</td><td class="p-3 font-bold ${Number(x.ecarts)?'text-amber-700':'text-emerald-700'}">${x.ecarts} écart(s) · ${Number(x.quantite_ecart).toLocaleString('fr-FR')}</td><td class="p-3">${esc(x.statut)}</td></tr>`).join('');$('procContent').innerHTML=`<div class="mb-4 flex items-center justify-between"><div><h2 class="font-extrabold">Inventaires physiques</h2><p class="text-xs text-slate-500">Les écarts génèrent automatiquement des mouvements d’ajustement traçables.</p></div><button onclick="procOpenCount()" class="rounded-xl bg-brand-neon px-3 py-2 text-xs font-bold">＋ Démarrer un inventaire</button></div>${table(['N° inventaire','Entrepôt','Date','Lots comptés','Écarts','État'],rows,'Aucun inventaire validé.')}`};
  const renderTransfers=()=>{const rows=(state.data.transfers||[]).map(x=>`<tr class="border-t"><td class="p-3 font-bold">${esc(x.numero)}</td><td class="p-3">${esc(x.entrepot_source)} → ${esc(x.entrepot_destination)}</td><td class="p-3">${x.lignes} lot(s)</td><td class="p-3">${Number(x.quantite).toLocaleString('fr-FR')}</td><td class="p-3">${esc(String(x.created_at||'').slice(0,16))}</td></tr>`).join('');$('procContent').innerHTML=`<div class="mb-4 flex items-center justify-between"><div><h2 class="font-extrabold">Transferts entre entrepôts</h2><p class="text-xs text-slate-500">Les lots gardent leur numéro et leur date de péremption. Chaque transfert crée les deux mouvements correspondants.</p></div><button onclick="procOpenTransfer()" class="rounded-xl bg-brand-neon px-3 py-2 text-xs font-bold">＋ Nouveau transfert</button></div>${table(['Référence','Trajet','Lots','Quantité','Date'],rows,'Aucun transfert enregistré.')}`};
  const renderReturns=()=>{const rows=(state.data.returns||[]).map(x=>`<tr class="border-t"><td class="p-3 font-bold">${esc(x.numero)}</td><td class="p-3">${esc(x.fournisseur)}</td><td class="p-3">${esc(x.numero_facture||'Avoir non imputé')}</td><td class="p-3">${esc(x.bon_retour)}</td><td class="p-3 font-bold text-amber-700">${money(x.montant_avoir)}</td><td class="p-3">${esc(String(x.created_at||'').slice(0,16))}</td></tr>`).join('');$('procContent').innerHTML=`<div class="mb-4 flex items-center justify-between"><div><h2 class="font-extrabold">Retours et avoirs fournisseur</h2><p class="text-xs text-slate-500">Le stock est diminué par lot et l’avoir rattaché réduit le solde de la facture.</p></div><button onclick="procOpenReturn()" class="rounded-xl bg-brand-neon px-3 py-2 text-xs font-bold">＋ Enregistrer un retour</button></div>${table(['Avoir','Fournisseur','Facture','Bon retour','Montant','Date'],rows,'Aucun retour enregistré.')}`};
  const renderAlerts=()=>{const rows=(state.data.restock_alerts||[]).map(x=>`<tr class="border-t"><td class="p-3 font-bold">${esc(x.designation)}<small class="block text-slate-400">${esc(x.reference||'')}</small></td><td class="p-3">${Number(x.dispo).toLocaleString('fr-FR')} ${esc(x.unite)}</td><td class="p-3">${Number(x.seuil_alerte).toLocaleString('fr-FR')} ${esc(x.unite)}</td><td class="p-3">${Number(x.en_commande).toLocaleString('fr-FR')}</td><td class="p-3 font-extrabold text-amber-700">${Number(x.quantite_suggeree).toLocaleString('fr-FR')} ${esc(x.unite)}</td></tr>`).join('');$('procContent').innerHTML=`<h2 class="mb-1 font-extrabold">Suggestions de réapprovisionnement</h2><p class="mb-4 text-xs text-slate-500">Seuil cible : deux fois le seuil d’alerte, en tenant compte des commandes ouvertes. Vérifie les suggestions avant de créer une commande.</p>${table(['Article','Stock utilisable','Seuil','Déjà commandé','Quantité suggérée'],rows,'Aucun article en alerte.')}`};
  const renderTrace=()=>{const opts=(state.data.countable_lots||[]).map(l=>`<option value="${l.lot_id}">${esc(l.designation)} · lot ${esc(l.numero_lot)} · ${esc(l.entrepot)}</option>`).join('');$('procContent').innerHTML=`<h2 class="mb-1 font-extrabold">Traçabilité par lot</h2><p class="mb-4 text-xs text-slate-500">Réceptions, sorties, transferts, retours et inventaires conservés dans l’historique.</p><div class="mb-4 flex max-w-3xl flex-wrap items-end gap-3">${select('Lot à consulter','traceLot',opts)}<button onclick="procShowTrace()" class="rounded-xl bg-brand-neon px-4 py-2.5 text-xs font-extrabold">Afficher la traçabilité</button></div><div id="procTraceResult"></div>`};
  const renderReports=()=>{$('procContent').innerHTML=`<div class="mb-4"><h2 class="font-extrabold">Rapports de stock et fournisseurs</h2><p class="text-xs text-slate-500">Achats, réceptions, règlements, avoirs, consommation, soldes et état des entrepôts.</p></div><div class="mb-4 grid gap-3 rounded-2xl bg-slate-50 p-4 sm:grid-cols-2 lg:grid-cols-4">${control('Date début','rStart','date',`value="${new Date(Date.now()-30*864e5).toISOString().slice(0,10)}"`)}${control('Date fin','rEnd','date',`value="${today}"`)}${select('Fournisseur','rSupplier','<option value="">Tous</option>'+(state.data.suppliers||[]).map(s=>`<option value="${s.id}">${esc(s.designation)}</option>`).join(''),false)}${select('Entrepôt','rWarehouse','<option value="">Tous</option>'+(state.data.warehouses||[]).map(x=>`<option>${esc(x)}</option>`).join(''),false)}<label class="block text-xs font-bold text-slate-600 sm:col-span-2">Produit<select id="rItem" class="mt-1.5 w-full rounded-xl border px-3 py-2.5"><option value="">Tous les produits</option>${(state.data.items||[]).map(x=>`<option value="${x.id}">${esc(x.designation)}</option>`).join('')}</select></label><button onclick="procRunReport()" class="self-end rounded-xl bg-brand-neon px-4 py-2.5 text-xs font-extrabold">Afficher le rapport</button></div><div id="procReportResult" class="space-y-4"><p class="p-8 text-center text-sm text-slate-400">Choisis la période puis affiche le rapport.</p></div>`};
- const render=()=>{setActive(state.tab);const d=state.data;if(state.tab==='orders')renderOrders();else if(state.tab==='receipts')renderReceipts();else if(state.tab==='invoices'||state.tab==='payments'||state.tab==='suppliers')baseTab(state.tab);else if(state.tab==='counts')renderCounts();else if(state.tab==='transfers')renderTransfers();else if(state.tab==='returns')renderReturns();else if(state.tab==='alerts')renderAlerts();else if(state.tab==='trace')renderTrace();else renderReports();if(d.summary){$('procTotal').textContent=money(d.summary.total_facture);$('procPaid').textContent=money(d.summary.total_paye);$('procBalance').textContent=money(d.summary.reste);$('procLate').textContent=d.summary.retards||0}};
+ const render=()=>{setActive(state.tab);const d=state.data;if(state.tab==='orders')renderOrders();else if(state.tab==='receipts')renderReceipts();else if(state.tab==='invoices'||state.tab==='payments'||state.tab==='suppliers')baseTab(state.tab);else if(state.tab==='proformas')renderProformas();else if(state.tab==='counts')renderCounts();else if(state.tab==='transfers')renderTransfers();else if(state.tab==='returns')renderReturns();else if(state.tab==='alerts')renderAlerts();else if(state.tab==='trace')renderTrace();else renderReports();if(d.summary){$('procTotal').textContent=money(d.summary.total_facture);$('procPaid').textContent=money(d.summary.total_paye);$('procBalance').textContent=money(d.summary.reste);$('procLate').textContent=d.summary.retards||0}};
  const show=async name=>{state.tab=name;try{await getData();render()}catch(e){notify(e.message)}};
- const baseTab=window.procTab;window.procTab=name=>{if(['orders','receipts','invoices','payments','suppliers','counts','transfers','returns','alerts','trace','reports'].includes(name))show(name);else baseTab(name)};
+ const baseTab=window.procTab;window.procTab=name=>{if(['orders','receipts','invoices','payments','suppliers','proformas','counts','transfers','returns','alerts','trace','reports'].includes(name))show(name);else baseTab(name)};
  window.procReceive=id=>{const order=(state.data.orders||[]).find(x=>Number(x.id)===Number(id));if(order)runReceive(order)};
  const addLineControls=(lotOptions)=>`<div class="grid gap-2 sm:grid-cols-12"><label class="sm:col-span-8 text-[11px] font-bold">Lot<select class="x-lot mt-1 w-full rounded-lg border p-2" required>${lotOptions}</select></label><label class="sm:col-span-3 text-[11px] font-bold">Quantité<input class="x-qty mt-1 w-full rounded-lg border p-2" type="number" min="0.001" step="0.001" required></label><button type="button" onclick="this.parentElement.remove()" class="text-rose-700">Retirer</button></div>`;
+ window.procOpenProforma=()=>{let lines=[];const draw=()=>{const target=$('pfLines');if(!target)return;target.innerHTML=lines.map((line,i)=>`<div class="grid gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-12"><label class="sm:col-span-7 text-[11px] font-bold">Article<select onchange="procPickProformaItem(${i},this.value)" class="mt-1 w-full rounded-lg border p-2"><option value="">Choisir un article…</option>${(state.data.items||[]).map(x=>`<option value="${x.id}" ${Number(line.item_id)===Number(x.id)?'selected':''}>${esc(x.designation)}${x.reference?' · '+esc(x.reference):''}</option>`).join('')}</select></label><label class="sm:col-span-3 text-[11px] font-bold">Quantité<input type="number" min="0.001" step="0.001" value="${line.quantite||1}" oninput="procEditProformaLine(${i},this.value)" class="mt-1 w-full rounded-lg border p-2"></label><button type="button" onclick="procRemoveProformaLine(${i})" class="text-xs font-bold text-rose-700">Retirer</button></div>`).join('')||'<p class="py-4 text-center text-xs text-slate-400">Ajoute les articles à chiffrer.</p>'};window.procPickProformaItem=(i,id)=>{lines[i].item_id=Number(id);draw()};window.procEditProformaLine=(i,value)=>lines[i].quantite=value;window.procRemoveProformaLine=i=>{lines.splice(i,1);draw()};window.procAddProformaLine=()=>{lines.push({quantite:1});draw()};modal('Nouvelle demande de proforma',`${select('Fournisseur *','pfSupplier',(state.data.suppliers||[]).filter(s=>s.actif).map(s=>`<option value="${s.id}">${esc(s.designation)}</option>`).join(''))}<div class="grid gap-3 sm:grid-cols-2">${control('Date de demande','pfDate','date',`value="${today}" required`)}${control('Réponse souhaitée avant le','pfDeadline','date')}</div><div class="flex items-center justify-between"><b class="text-sm">Articles à chiffrer</b><button type="button" onclick="procAddProformaLine()" class="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold">＋ Ajouter un article</button></div><div id="pfLines" class="max-h-[45vh] space-y-2 overflow-y-auto"></div>${control('Notes ou conditions demandées','pfNotes')}`,async()=>api('/proformas',{method:'POST',body:JSON.stringify({supplier_id:$('pfSupplier').value,date_demande:$('pfDate').value,date_limite:$('pfDeadline').value,notes:$('pfNotes').value,lignes:lines})}));draw()};
+ window.procProformaStatus=async(id,statut)=>{try{await api(`/proformas/${id}/status`,{method:'POST',body:JSON.stringify({statut})});await show('proformas')}catch(e){notify(e.message)}};
+ window.procProformaResponse=id=>{const p=(state.data.proformas||[]).find(x=>Number(x.id)===Number(id));if(!p)return;modal(`Réponse · ${esc(p.numero)}`,`<p class="rounded-xl bg-sky-50 p-3 text-xs text-sky-800">Saisis le prix unitaire proposé pour chaque article. Le montant total sera calculé automatiquement.</p>${(p.lignes_detail||[]).map(l=>`<label class="grid grid-cols-[1fr_150px] items-center gap-3 border-b py-2 text-xs"><span><b>${esc(l.designation)}</b><small class="block text-slate-500">${Number(l.quantite).toLocaleString('fr-FR')} ${esc(l.unite)} · ${esc(l.reference||'')}</small></span><input class="pf-quote-price rounded-lg border px-2 py-2" type="number" min="0" step="0.01" data-line="${l.id}" value="${l.prix_reponse??''}" placeholder="DA / unité" required></label>`).join('')}`,async()=>api(`/proformas/${id}/response`,{method:'POST',body:JSON.stringify({lignes:[...document.querySelectorAll('.pf-quote-price')].map(x=>({ligne_id:x.dataset.line,prix_unitaire:x.value}))})}))};
+ window.procProformaConvert=async id=>{const p=(state.data.proformas||[]).find(x=>Number(x.id)===Number(id));if(!p||!window.confirm(`Créer une commande d’achat pour ${p.fournisseur} à partir de la proforma ${p.numero} ?`))return;try{const result=await api(`/proformas/${id}/convert`,{method:'POST',body:'{}'});notify(`Commande créée : ${result.numero}`);await show('proformas')}catch(e){notify(e.message)}};
+ window.procPrintProforma=id=>{const p=(state.data.proformas||[]).find(x=>Number(x.id)===Number(id));if(!p)return;const w=window.open('','_blank','width=900,height=750');if(!w)return notify('Autorise l’ouverture de la fenêtre d’impression.');w.document.write(`<!doctype html><html lang="fr"><meta charset="utf-8"><title>Demande ${esc(p.numero)}</title><style>body{font:14px Arial,sans-serif;color:#17202a;margin:35px}h1{margin:0 0 8px;color:#14532d}small{color:#64748b}.meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:24px 0}.box{border:1px solid #cbd5e1;border-radius:8px;padding:12px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #94a3b8;padding:10px;text-align:left}th{background:#eaf2ec}footer{margin-top:32px;text-align:right}@media print{button{display:none}}</style><h1>Demande de proforma</h1><b>${esc(p.numero)}</b><div class="meta"><div class="box"><b>Fournisseur</b><br>${esc(p.fournisseur)}</div><div class="box"><b>Date de demande</b><br>${esc(p.date_demande)}<br><b>Réponse souhaitée avant</b> : ${esc(p.date_limite||'—')}</div></div><p>Nous vous prions de bien vouloir nous transmettre votre proforma pour les articles suivants :</p><table><thead><tr><th>Référence</th><th>Désignation</th><th>Quantité demandée</th><th>Unité</th></tr></thead><tbody>${(p.lignes_detail||[]).map(l=>`<tr><td>${esc(l.reference||'')}</td><td>${esc(l.designation)}</td><td>${Number(l.quantite).toLocaleString('fr-FR')}</td><td>${esc(l.unite)}</td></tr>`).join('')}</tbody></table>${p.notes?`<p><b>Notes / conditions :</b> ${esc(p.notes)}</p>`:''}<footer>Service des approvisionnements</footer>${'<scr'+'ipt>window.onload=()=>window.print()</scr'+'ipt>'}</html>`);w.document.close()};
  window.procOpenCount=()=>{const wh=warehouseOptions();modal('Inventaire physique',`${select('Entrepôt à compter','countWh',wh)}<div id="countLots" class="max-h-[56vh] space-y-2 overflow-y-auto rounded-xl border p-3 text-xs">Sélectionne un entrepôt.</div>${control('Notes','countNotes')}`,async()=>{const rows=[...document.querySelectorAll('.count-qty')].map(input=>({lot_id:input.dataset.lot,quantite_comptee:input.value}));if(!rows.length)throw Error('Aucun lot à compter dans cet entrepôt.');return api('/inventory-counts',{method:'POST',body:JSON.stringify({entrepot:$('countWh').value,lignes:rows,notes:$('countNotes').value})})});$('countWh').onchange=()=>{const lots=(state.data.countable_lots||[]).filter(l=>l.entrepot===$('countWh').value);$('countLots').innerHTML=lots.length?lots.map(l=>`<label class="grid grid-cols-[1fr_100px] items-center gap-3 border-b py-2"><span><b>${esc(l.designation)}</b> · ${esc(l.numero_lot)} <small class="text-slate-500">théorique ${Number(l.quantite_actuelle).toLocaleString('fr-FR')} ${esc(l.unite_article)}</small></span><input class="count-qty rounded-lg border px-2 py-1.5" type="number" min="0" step="0.001" data-lot="${l.lot_id}" value="${l.quantite_actuelle}"></label>`).join(''):'Aucun lot dans cet entrepôt.'}};
  window.procOpenTransfer=()=>{const lots=state.data.countable_lots||[];modal('Transfert entre entrepôts',`<div class="grid gap-3 sm:grid-cols-2">${select('Entrepôt source','trSource',warehouseOptions())}${select('Entrepôt destination','trDest',warehouseOptions())}${select('Emplacement de départ','trSourceLoc',locationOptions(),false)}${select('Emplacement d’arrivée','trDestLoc',locationOptions(),false)}</div><div class="my-3 flex items-center justify-between"><b class="text-sm">Lots à transférer</b><button type="button" onclick="procAddTransferLine()" class="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold">＋ Ajouter un lot</button></div><div id="transferLines" class="space-y-2"></div>${control('Motif','trReason')}`,async()=>{const src=$('trSource').value,dst=$('trDest').value;if(src===dst)throw Error('Les entrepôts source et destination doivent être différents.');const rows=[...document.querySelectorAll('#transferLines .transfer-line')].map(x=>({lot_id:x.querySelector('.x-lot').value,quantite:x.querySelector('.x-qty').value}));return api('/transfers',{method:'POST',body:JSON.stringify({entrepot_source:src,entrepot_destination:dst,emplacement_source:$('trSourceLoc').value,emplacement_destination:$('trDestLoc').value,lignes:rows,motif:$('trReason').value})})});window.procAddTransferLine=()=>{const block=document.createElement('div');block.className='transfer-line rounded-xl bg-slate-50 p-2';block.innerHTML=addLineControls(lots.filter(l=>l.entrepot===$('trSource').value).map(l=>`<option value="${l.lot_id}" data-stock="${l.quantite_actuelle}">${esc(l.designation)} · ${esc(l.numero_lot)} · ${Number(l.quantite_actuelle).toLocaleString('fr-FR')}</option>`).join(''));$('transferLines').appendChild(block)};$('trSource').onchange=()=>{$('transferLines').innerHTML=''}};
  window.procOpenReturn=()=>{const suppliers=state.data.suppliers||[],invoices=state.data.invoices||[];modal('Retourner des articles au fournisseur',`${select('Fournisseur','retSupplier',suppliers.map(s=>`<option value="${s.id}">${esc(s.designation)}</option>`).join(''))}${select('Imputer l’avoir sur la facture (facultatif)','retInvoice','',false)}<div class="my-3 flex items-center justify-between"><b class="text-sm">Lots à retourner</b><button type="button" onclick="procAddReturnLine()" class="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold">＋ Ajouter un lot</button></div><div id="returnLines" class="space-y-2"></div>${control('Motif','retReason')}`,async()=>{const rows=[...document.querySelectorAll('#returnLines .return-line')].map(x=>({lot_id:x.querySelector('.x-lot').value,quantite:x.querySelector('.x-qty').value}));return api('/returns',{method:'POST',body:JSON.stringify({supplier_id:$('retSupplier').value,invoice_id:$('retInvoice').value||null,lignes:rows,motif:$('retReason').value})})});const fill=()=>{$('retInvoice').innerHTML='<option value="">Avoir non imputé</option>'+invoices.filter(f=>Number(f.supplier_id)===Number($('retSupplier').value)).map(f=>`<option value="${f.id}">${esc(f.numero_facture)} · solde ${money(f.solde)}</option>`).join('');$('returnLines').innerHTML=''};$('retSupplier').onchange=fill;fill();window.procAddReturnLine=()=>{const id=Number($('retSupplier').value);const lots=(state.data.countable_lots||[]).filter(l=>Number(l.origine_fournisseur)===id&&Number(l.quantite_actuelle)>0);const block=document.createElement('div');block.className='return-line rounded-xl bg-slate-50 p-2';block.innerHTML=addLineControls(lots.map(l=>`<option value="${l.lot_id}" data-stock="${l.quantite_actuelle}">${esc(l.designation)} · ${esc(l.numero_lot)} · ${Number(l.quantite_actuelle).toLocaleString('fr-FR')}</option>`).join(''));$('returnLines').appendChild(block)}};
@@ -741,7 +910,7 @@ PROCUREMENT_ADVANCED_SCRIPT = r'''<script>
  window.procRunReport=async()=>{try{const q=new URLSearchParams({date_debut:$('rStart').value,date_fin:$('rEnd').value,supplier_id:$('rSupplier').value,item_id:$('rItem').value,entrepot:$('rWarehouse').value});const r=await api('/reports?'+q);const cards=[['Commandes',money(r.commandes.total)],['Réceptions',money(r.receptions.total)],['Paiements période',money(r.paiements.total)],['Avoirs période',money(r.avoirs.total)]];$('procReportResult').innerHTML=`<div class="flex justify-end"><button onclick="window.print()" class="rounded-xl border px-3 py-2 text-xs font-bold"><i class="ph-bold ph-printer"></i> Imprimer</button></div><div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">${cards.map(x=>`<article class="rounded-xl border p-3"><span class="text-xs text-slate-500">${x[0]}</span><b class="mt-1 block text-lg">${x[1]}</b></article>`).join('')}</div><h3 class="font-extrabold">Consommation par article</h3>${table(['Article','Référence','Quantité','Valeur achat'],r.consommation.map(x=>`<tr class="border-t"><td class="p-3 font-bold">${esc(x.designation)}</td><td class="p-3">${esc(x.reference||'')}</td><td class="p-3">${Number(x.quantite).toLocaleString('fr-FR')} ${esc(x.unite)}</td><td class="p-3">${money(x.valeur)}</td></tr>`).join(''),'Aucune sortie sur la période.')}<h3 class="font-extrabold">Soldes par fournisseur</h3>${table(['Fournisseur','Facturé','Payé','Avoirs','Solde'],r.soldes_fournisseurs.map(x=>`<tr class="border-t"><td class="p-3 font-bold">${esc(x.designation)}</td><td class="p-3">${money(x.facture)}</td><td class="p-3">${money(x.paye)}</td><td class="p-3">${money(x.avoirs)}</td><td class="p-3 font-extrabold">${money(x.solde)}</td></tr>`).join(''),'Aucun fournisseur.')}<h3 class="font-extrabold">Valeur et péremption par entrepôt</h3>${table(['Entrepôt','Produits','Valeur du stock','Lots périmés','Quantité périmée'],r.entrepots.map(x=>`<tr class="border-t"><td class="p-3 font-bold">${esc(x.entrepot)}</td><td class="p-3">${x.produits}</td><td class="p-3">${money(x.valeur)}</td><td class="p-3">${x.lots_perimes}</td><td class="p-3">${Number(x.quantite_perimee).toLocaleString('fr-FR')}</td></tr>`).join(''),'Aucun entrepôt.')}`}catch(e){notify(e.message)}};
  const baseReport=window.procRunReport;window.procRunReport=async()=>{await baseReport();try{const q=new URLSearchParams({date_debut:$('rStart').value,date_fin:$('rEnd').value,supplier_id:$('rSupplier').value,item_id:$('rItem').value,entrepot:$('rWarehouse').value});const r=await api('/reports?'+q);$('procReportResult').insertAdjacentHTML('beforeend',`<h3 class="font-extrabold">Consommation par service</h3>${table(['Service','Article','Quantité','Valeur achat'],r.consommation_services.map(x=>`<tr class="border-t"><td class="p-3 font-bold">${esc(x.service)}</td><td class="p-3">${esc(x.designation)}</td><td class="p-3">${Number(x.quantite).toLocaleString('fr-FR')} ${esc(x.unite)}</td><td class="p-3">${money(x.valeur)}</td></tr>`).join(''),'Aucune consommation par service.')}`)}catch(e){notify(e.message)}};
  const nav=document.querySelector('.proc-tab')?.parentElement;
- if(nav){[['counts','Inventaires'],['transfers','Transferts'],['returns','Retours / avoirs'],['alerts','Réapprovisionnement'],['trace','Traçabilité lots'],['reports','Rapports']].forEach(([id,label])=>{if(nav.querySelector(`[data-proc-tab="${id}"]`))return;const b=document.createElement('button');b.type='button';b.dataset.procTab=id;b.className='proc-tab rounded-xl px-4 py-2.5 text-xs font-bold text-slate-500 hover:bg-slate-100';b.textContent=label;b.addEventListener('click',()=>window.procTab(id));nav.appendChild(b)})}
+ if(nav){[['proformas','Demandes de proforma'],['counts','Inventaires'],['transfers','Transferts'],['returns','Retours / avoirs'],['alerts','Réapprovisionnement'],['trace','Traçabilité lots'],['reports','Rapports']].forEach(([id,label])=>{if(nav.querySelector(`[data-proc-tab="${id}"]`))return;const b=document.createElement('button');b.type='button';b.dataset.procTab=id;b.className='proc-tab rounded-xl px-4 py-2.5 text-xs font-bold text-slate-500 hover:bg-slate-100';b.textContent=label;b.addEventListener('click',()=>window.procTab(id));nav.appendChild(b)})}
  window.procTab('orders');
 })();
 </script>'''
