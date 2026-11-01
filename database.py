@@ -801,6 +801,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS quantite_par_unite NUMERIC(14,3) NOT NULL DEFAULT 1;
     ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS emplacement TEXT NOT NULL DEFAULT '';
     ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS entrepot TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_lots ADD COLUMN IF NOT EXISTS fournisseur_origine_id INT REFERENCES stock_suppliers(id) ON DELETE SET NULL;
     CREATE INDEX IF NOT EXISTS idx_stock_lots_item_expiry
         ON stock_lots (item_id, date_peremption, created_at);
     CREATE TABLE IF NOT EXISTS stock_documents (
@@ -860,6 +861,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS supplier_order_id INT REFERENCES stock_supplier_orders(id) ON DELETE SET NULL;
     CREATE TABLE IF NOT EXISTS stock_supplier_order_lines (
         id SERIAL PRIMARY KEY,
         order_id INT NOT NULL REFERENCES stock_supplier_orders(id) ON DELETE CASCADE,
@@ -869,6 +871,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         quantite_recue NUMERIC(14,3) NOT NULL DEFAULT 0 CHECK (quantite_recue >= 0),
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stock_document_lines ADD COLUMN IF NOT EXISTS supplier_order_line_id INT REFERENCES stock_supplier_order_lines(id) ON DELETE SET NULL;
     CREATE INDEX IF NOT EXISTS idx_stock_supplier_orders_date ON stock_supplier_orders(date_commande DESC, id DESC);
     CREATE TABLE IF NOT EXISTS stock_supplier_invoices (
         id SERIAL PRIMARY KEY,
@@ -890,6 +893,65 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_stock_supplier_payments_invoice ON stock_supplier_payments(invoice_id, date_paiement DESC);
+    CREATE TABLE IF NOT EXISTS stock_supplier_returns (
+        id SERIAL PRIMARY KEY,
+        supplier_id INT NOT NULL REFERENCES stock_suppliers(id) ON DELETE RESTRICT,
+        invoice_id INT REFERENCES stock_supplier_invoices(id) ON DELETE SET NULL,
+        document_id INT NOT NULL UNIQUE REFERENCES stock_documents(id) ON DELETE RESTRICT,
+        numero TEXT NOT NULL UNIQUE,
+        montant_avoir NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (montant_avoir >= 0),
+        motif TEXT NOT NULL DEFAULT '',
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS stock_inventory_counts (
+        id SERIAL PRIMARY KEY,
+        numero TEXT NOT NULL UNIQUE,
+        entrepot TEXT NOT NULL,
+        statut TEXT NOT NULL DEFAULT 'Validé' CHECK (statut IN ('Brouillon','Validé','Annulé')),
+        notes TEXT NOT NULL DEFAULT '',
+        adjustment_in_document_id INT REFERENCES stock_documents(id) ON DELETE SET NULL,
+        adjustment_out_document_id INT REFERENCES stock_documents(id) ON DELETE SET NULL,
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        validated_at TIMESTAMP WITH TIME ZONE
+    );
+    CREATE TABLE IF NOT EXISTS stock_inventory_count_lines (
+        id SERIAL PRIMARY KEY,
+        count_id INT NOT NULL REFERENCES stock_inventory_counts(id) ON DELETE CASCADE,
+        lot_id INT REFERENCES stock_lots(id) ON DELETE SET NULL,
+        item_id INT NOT NULL REFERENCES stock_items(id) ON DELETE RESTRICT,
+        numero_lot TEXT NOT NULL DEFAULT '',
+        quantite_theorique NUMERIC(14,3) NOT NULL DEFAULT 0,
+        quantite_comptee NUMERIC(14,3) NOT NULL DEFAULT 0 CHECK (quantite_comptee >= 0),
+        ecart NUMERIC(14,3) NOT NULL DEFAULT 0,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS stock_transfers (
+        id SERIAL PRIMARY KEY,
+        numero TEXT NOT NULL UNIQUE,
+        entrepot_source TEXT NOT NULL,
+        emplacement_source TEXT NOT NULL DEFAULT '',
+        entrepot_destination TEXT NOT NULL,
+        emplacement_destination TEXT NOT NULL DEFAULT '',
+        source_document_id INT NOT NULL REFERENCES stock_documents(id) ON DELETE RESTRICT,
+        destination_document_id INT NOT NULL REFERENCES stock_documents(id) ON DELETE RESTRICT,
+        motif TEXT NOT NULL DEFAULT '',
+        created_by INT REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS stock_transfer_lines (
+        id SERIAL PRIMARY KEY,
+        transfer_id INT NOT NULL REFERENCES stock_transfers(id) ON DELETE CASCADE,
+        source_lot_id INT NOT NULL REFERENCES stock_lots(id) ON DELETE RESTRICT,
+        destination_lot_id INT NOT NULL REFERENCES stock_lots(id) ON DELETE RESTRICT,
+        item_id INT NOT NULL REFERENCES stock_items(id) ON DELETE RESTRICT,
+        quantite NUMERIC(14,3) NOT NULL CHECK (quantite > 0),
+        numero_lot TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_returns_supplier_date ON stock_supplier_returns(supplier_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_stock_inventory_count_warehouse_date ON stock_inventory_counts(entrepot, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_stock_transfers_date ON stock_transfers(created_at DESC);
     CREATE TABLE IF NOT EXISTS stock_document_attachments (
         id SERIAL PRIMARY KEY,
         document_id INT NOT NULL REFERENCES stock_documents(id) ON DELETE CASCADE,
