@@ -105,10 +105,11 @@ class StaffManager:
         """Récupère la liste de tout le personnel ordonnée par nom."""
         with get_db_cursor() as cursor:
             cursor.execute("""
-                SELECT id, nom, prenom, type_personnel, service_nom, specialite, 
-                       telephone, email, avatar, notes, actif 
-                FROM clinic_staff 
-                ORDER BY nom ASC, prenom ASC;
+                SELECT s.id, s.nom, s.prenom, s.type_personnel, s.service_nom, s.specialite,
+                       s.telephone, s.email, s.avatar, s.notes, s.actif,s.linked_user_id,
+                       u.prenom AS compte_prenom,u.nom AS compte_nom,u.login AS compte_login
+                FROM clinic_staff s LEFT JOIN users u ON u.id=s.linked_user_id
+                ORDER BY s.nom ASC, s.prenom ASC;
             """)
             rows = cursor.fetchall()
 
@@ -126,6 +127,8 @@ class StaffManager:
                 "avatar": r["avatar"] or AVATAR_PAR_DEFAUT,
                 "notes": r["notes"] or "",
                 "actif": r["actif"],
+                "linked_user_id": r["linked_user_id"],
+                "linked_user_label": (f"{r['compte_prenom']} {r['compte_nom']} · {r['compte_login']}" if r["linked_user_id"] else ""),
             })
         return staff_list
 
@@ -156,6 +159,13 @@ class StaffManager:
             cursor.execute("SELECT nom FROM clinic_staff_roles ORDER BY nom ASC")
             custom = [row["nom"] for row in cursor.fetchall()]
         return list(dict.fromkeys(TYPES_PERSONNEL + custom))
+
+    def get_available_accounts(self) -> List[Dict[str, Any]]:
+        """Retourne les comptes Cliniva actifs pouvant être associés au staff."""
+        with get_db_cursor() as cursor:
+            cursor.execute("""SELECT id,prenom,nom,login,role FROM users
+                WHERE status='Actif' ORDER BY nom,prenom,login""")
+            return [dict(row) for row in cursor.fetchall()]
 
     def add_option(self, kind: str, value: str) -> Dict[str, Any]:
         """Ajoute une fonction ou une spécialité au catalogue persistant."""
@@ -191,6 +201,11 @@ class StaffManager:
         notes = data.get("notes", "").strip()
         raw_avatar = data.get("avatar", "")
         avatar = self.save_avatar_file(raw_avatar) if raw_avatar else AVATAR_PAR_DEFAUT
+        raw_linked_user_id = data.get("linked_user_id")
+        try:
+            linked_user_id = int(raw_linked_user_id) if raw_linked_user_id not in (None, "", 0, "0") else None
+        except (TypeError, ValueError):
+            return {"success": False, "message": "Le compte Cliniva sélectionné est invalide."}
 
         if not nom or not prenom or not type_personnel:
             return {
@@ -199,21 +214,25 @@ class StaffManager:
             }
 
         with get_db_cursor() as cursor:
+            if linked_user_id is not None:
+                cursor.execute("SELECT id FROM users WHERE id=%s AND status='Actif'", (linked_user_id,))
+                if not cursor.fetchone():
+                    return {"success": False, "message": "Le compte Cliniva choisi est introuvable ou inactif."}
             if staff_id:
                 query = """
                     UPDATE clinic_staff SET 
                         nom = %s, prenom = %s, type_personnel = %s, service_nom = %s, 
-                        specialite = %s, telephone = %s, email = %s, avatar = %s, notes = %s
+                        specialite = %s, telephone = %s, email = %s, avatar = %s, notes = %s, linked_user_id = %s
                     WHERE id = %s;
                 """
-                cursor.execute(query, (nom, prenom, type_personnel, service_nom, specialite, telephone, email, avatar, notes, staff_id))
+                cursor.execute(query, (nom, prenom, type_personnel, service_nom, specialite, telephone, email, avatar, notes, linked_user_id, staff_id))
             else:
                 query = """
                     INSERT INTO clinic_staff 
-                    (nom, prenom, type_personnel, service_nom, specialite, telephone, email, avatar, notes)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    (nom, prenom, type_personnel, service_nom, specialite, telephone, email, avatar, notes, linked_user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                 """
-                cursor.execute(query, (nom, prenom, type_personnel, service_nom, specialite, telephone, email, avatar, notes))
+                cursor.execute(query, (nom, prenom, type_personnel, service_nom, specialite, telephone, email, avatar, notes, linked_user_id))
 
         return {"success": True, "message": "Membre du personnel enregistré avec succès !"}
 
@@ -239,6 +258,7 @@ async def api_get_staff():
             "services": staff_manager.get_available_services(),
             "specialites": staff_manager.get_available_specialites(),
             "types_personnel": staff_manager.get_available_types(),
+            "accounts": staff_manager.get_available_accounts(),
         }
     except Exception as exc:
         logger.error("Erreur API Staff: %s", exc, exc_info=True)
@@ -420,6 +440,14 @@ def render_html() -> str:
                     </div>
                 </div>
 
+                <div class="rounded-2xl border border-sky-200 bg-sky-50/70 p-4 dark:border-sky-400/20 dark:bg-sky-400/[.05]">
+                    <label for="staffLinkedUser" class="block text-[11px] font-bold text-slate-700 dark:text-slate-200">Compte Cliniva associé <span class="font-normal text-slate-500">(facultatif)</span></label>
+                    <select id="staffLinkedUser" class="mt-1.5 w-full text-xs p-2.5 rounded-xl border border-slate-200 dark:border-white/10 outline-none focus:border-brand-neon bg-white dark:bg-black/30 text-slate-800 dark:text-white">
+                        <option value="">Aucun · liaison automatique par nom et prénom</option>
+                    </select>
+                    <p class="mt-2 text-[10px] leading-4 text-slate-500 dark:text-slate-400">Choisissez un compte si son nom de connexion diffère de l’identité du membre du staff. Ce compte recevra ses demandes de validation par e-mail à l’adresse indiquée ci-dessus.</p>
+                </div>
+
                 <!-- 6. NOTES ET OBSERVATIONS -->
                 <div>
                     <label class="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">Notes Internes & Observations</label>
@@ -451,6 +479,7 @@ def render_html() -> str:
             let availableServices = [];
             let availableSpecialites = [];
             let availableTypes = [];
+            let availableAccounts = [];
             const defaultAvatar = "{AVATAR_PAR_DEFAUT}";
 
             // Couleurs des badges par type de fonction
@@ -478,6 +507,7 @@ def render_html() -> str:
                     availableServices = data.services || [];
                     availableSpecialites = data.specialites || [];
                     availableTypes = data.types_personnel || [];
+                    availableAccounts = data.accounts || [];
 
                     document.getElementById('totalStaffCount').innerText = data.total_count || staffData.length;
                     renderStaffTable(staffData);
@@ -529,6 +559,12 @@ def render_html() -> str:
                 }});
                 sSpe.innerHTML = speOptions;
                 sSpe.value = selectedSpecialite;
+
+                const linkedUser = document.getElementById('staffLinkedUser');
+                const selectedLinkedUser = linkedUser.value;
+                linkedUser.innerHTML = '<option value="">Aucun · liaison automatique par nom et prénom</option>' +
+                    availableAccounts.map(account => `<option value="${{account.id}}">${{account.prenom}} ${{account.nom}} · ${{account.login}} · ${{account.role}}</option>`).join('');
+                linkedUser.value = selectedLinkedUser;
             }};
 
             window.openStaffOption = function(kind) {{
@@ -670,6 +706,7 @@ def render_html() -> str:
                 document.getElementById('staffSpecialite').value = st.specialite !== '-' ? st.specialite : '';
                 document.getElementById('staffTel').value = st.telephone !== '-' ? st.telephone : '';
                 document.getElementById('staffEmail').value = st.email !== '-' ? st.email : '';
+                document.getElementById('staffLinkedUser').value = st.linked_user_id || '';
                 document.getElementById('staffNotes').value = st.notes || '';
                 document.getElementById('staffAvatarData').value = st.avatar;
                 document.getElementById('staffAvatarPreview').src = st.avatar || defaultAvatar;
@@ -690,6 +727,7 @@ def render_html() -> str:
                     specialite: document.getElementById('staffSpecialite').value,
                     telephone: document.getElementById('staffTel').value,
                     email: document.getElementById('staffEmail').value,
+                    linked_user_id: document.getElementById('staffLinkedUser').value || null,
                     notes: document.getElementById('staffNotes').value,
                     avatar: document.getElementById('staffAvatarData').value || document.getElementById('staffAvatarPreview').src
                 }};

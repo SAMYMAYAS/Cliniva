@@ -317,6 +317,7 @@ def init_database() -> None:
 ALTER TABLE users ADD COLUMN IF NOT EXISTS specialites_autorisees JSONB DEFAULT '[]'::jsonb;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS plannings_rdv_autorises JSONB;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
+ALTER TABLE clinic_staff ADD COLUMN IF NOT EXISTS linked_user_id INT REFERENCES users(id) ON DELETE SET NULL;
         
         -- 1. Table des sessions actives
     CREATE TABLE IF NOT EXISTS user_sessions (
@@ -901,6 +902,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         request_id INT NOT NULL REFERENCES stock_proforma_requests(id) ON DELETE CASCADE,
         approver_id INT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
         assigned_by INT REFERENCES users(id) ON DELETE SET NULL,
+        approver_label TEXT NOT NULL DEFAULT '',
         email_destinataire TEXT NOT NULL DEFAULT '',
         token_hash TEXT NOT NULL DEFAULT '',
         statut TEXT NOT NULL DEFAULT 'En attente' CHECK (statut IN ('En attente','Validée','Refusée')),
@@ -909,6 +911,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         decided_at TIMESTAMP WITH TIME ZONE,
         UNIQUE(request_id, approver_id)
     );
+    ALTER TABLE stock_proforma_approvals ADD COLUMN IF NOT EXISTS approver_label TEXT NOT NULL DEFAULT '';
     ALTER TABLE stock_proforma_approvals ADD COLUMN IF NOT EXISTS email_destinataire TEXT NOT NULL DEFAULT '';
     ALTER TABLE stock_proforma_approvals ADD COLUMN IF NOT EXISTS token_hash TEXT NOT NULL DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_stock_proforma_approvals_user
