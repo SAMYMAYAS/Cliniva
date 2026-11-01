@@ -117,8 +117,9 @@ def procurement_data(request: Request):
             LEFT JOIN stock_proforma_request_lines l ON l.request_id=p.id
             GROUP BY p.id,s.designation,o.numero ORDER BY p.date_demande DESC,p.id DESC""")
         proformas = [dict(row) for row in cur.fetchall()]
-        cur.execute("""SELECT l.request_id,l.id,l.item_id,l.designation,l.quantite,l.unite,l.prix_reponse,
-                i.reference FROM stock_proforma_request_lines l JOIN stock_items i ON i.id=l.item_id
+        cur.execute("""SELECT l.request_id,l.id,l.item_id,COALESCE(i.designation,l.designation) AS designation,
+                l.quantite,l.unite,l.prix_reponse,l.is_custom,COALESCE(i.reference,l.reference) AS reference
+            FROM stock_proforma_request_lines l LEFT JOIN stock_items i ON i.id=l.item_id
             ORDER BY l.id""")
         proforma_lines = [dict(row) for row in cur.fetchall()]
         cur.execute("""SELECT d.id,d.numero,d.created_at,d.fournisseur_id,s.designation AS fournisseur,
@@ -285,15 +286,24 @@ async def proforma_request_create(request: Request):
     normalized = []
     seen: set[int] = set()
     for index, raw in enumerate(rows, 1):
+        custom = bool(raw.get("is_custom"))
+        designation = str(raw.get("designation") or "").strip()[:240]
+        reference = str(raw.get("reference") or "").strip()[:120]
+        unit = str(raw.get("unite") or "").strip()[:80]
         try:
-            item_id = int(raw.get("item_id"))
+            item_id = int(raw.get("item_id") or 0) or None
             quantity = Decimal(str(raw.get("quantite") or "").replace(",", "."))
         except (TypeError, ValueError, InvalidOperation) as exc:
             raise HTTPException(status_code=400, detail=f"Article ou quantité invalide à la ligne {index}.") from exc
-        if item_id in seen or not quantity.is_finite() or quantity <= 0:
+        if (not quantity.is_finite() or quantity <= 0 or
+                (custom and (not designation or not unit)) or (not custom and not item_id)):
             raise HTTPException(status_code=400, detail=f"Article dupliqué ou quantité invalide à la ligne {index}.")
-        seen.add(item_id)
-        normalized.append((item_id, quantity))
+        if item_id and item_id in seen:
+            raise HTTPException(status_code=400, detail=f"Article dupliqué à la ligne {index}.")
+        if item_id:
+            seen.add(item_id)
+        normalized.append({"item_id": item_id, "quantity": quantity, "custom": custom,
+                           "designation": designation, "reference": reference, "unit": unit})
     demand_date = _date(data.get("date_demande"), "demande", True)
     deadline = _date(data.get("date_limite"), "date limite")
     if deadline and deadline < demand_date:
@@ -305,21 +315,25 @@ async def proforma_request_create(request: Request):
         if not supplier:
             raise HTTPException(status_code=404, detail="Fournisseur actif introuvable.")
         prepared = []
-        for index, (item_id, quantity) in enumerate(normalized, 1):
-            cur.execute("SELECT designation,unite FROM stock_items WHERE id=%s AND actif=TRUE", (item_id,))
+        for index, line in enumerate(normalized, 1):
+            if line["custom"]:
+                prepared.append(line)
+                continue
+            cur.execute("SELECT designation,reference,unite FROM stock_items WHERE id=%s AND actif=TRUE", (line["item_id"],))
             item = cur.fetchone()
             if not item:
                 raise HTTPException(status_code=400, detail=f"Article actif introuvable à la ligne {index}.")
-            prepared.append((item_id, item["designation"], quantity, item["unite"]))
+            prepared.append({**line,"designation":item["designation"],"reference":item["reference"],"unit":item["unite"]})
         cur.execute("SELECT nextval(pg_get_serial_sequence('stock_proforma_requests','id')) AS id")
         request_id = int(cur.fetchone()["id"])
         number = f"DPF-{date.today():%Y%m%d}-{request_id:05d}"
         cur.execute("""INSERT INTO stock_proforma_requests(id,numero,supplier_id,date_demande,date_limite,statut,notes,created_by)
             VALUES(%s,%s,%s,%s,%s,'À envoyer',%s,%s)""",
             (request_id, number, supplier_id, demand_date, deadline, notes, user.get("id")))
-        for item_id, designation, quantity, unit in prepared:
-            cur.execute("""INSERT INTO stock_proforma_request_lines(request_id,item_id,designation,quantite,unite)
-                VALUES(%s,%s,%s,%s,%s)""", (request_id, item_id, designation, quantity, unit))
+        for line in prepared:
+            cur.execute("""INSERT INTO stock_proforma_request_lines(request_id,item_id,reference,designation,quantite,unite,is_custom)
+                VALUES(%s,%s,%s,%s,%s,%s,%s)""", (request_id, line["item_id"], line["reference"], line["designation"],
+                line["quantity"], line["unit"], line["custom"]))
     track_action(request, "STOCK_PROFORMA_REQUEST", f"Demande de proforma {number} créée · {supplier['designation']}")
     return {"success": True, "numero": number}
 
@@ -395,11 +409,12 @@ async def proforma_request_convert(proforma_id: int, request: Request):
             raise HTTPException(status_code=404, detail="Demande de proforma introuvable.")
         if proforma["statut"] not in {"Reçue", "Acceptée"}:
             raise HTTPException(status_code=409, detail="Enregistre d’abord la réponse fournisseur et accepte la proforma.")
-        cur.execute("""SELECT l.item_id,l.designation,l.quantite,l.unite,l.prix_reponse,i.actif
-            FROM stock_proforma_request_lines l JOIN stock_items i ON i.id=l.item_id
+        cur.execute("""SELECT l.id AS line_id,l.item_id,l.reference,l.designation,l.quantite,l.unite,l.prix_reponse,
+                COALESCE(i.actif,FALSE) AS actif
+            FROM stock_proforma_request_lines l LEFT JOIN stock_items i ON i.id=l.item_id
             WHERE l.request_id=%s ORDER BY l.id""", (proforma_id,))
         lines = cur.fetchall()
-        if not lines or any(line["prix_reponse"] is None or not line["actif"] for line in lines):
+        if not lines or any(line["prix_reponse"] is None or (line["item_id"] and not line["actif"]) for line in lines):
             raise HTTPException(status_code=409, detail="La proforma doit avoir un prix pour chaque article actif.")
         cur.execute("SELECT nextval(pg_get_serial_sequence('stock_supplier_orders','id')) AS id")
         order_id = int(cur.fetchone()["id"])
@@ -408,9 +423,28 @@ async def proforma_request_convert(proforma_id: int, request: Request):
             VALUES(%s,%s,%s,CURRENT_DATE,'Commandée',%s,%s)""",
             (order_id, order_number, proforma["supplier_id"], f"Commande créée depuis la proforma {proforma['numero']}", user.get("id")))
         for line in lines:
+            item_id = line["item_id"]
+            if not item_id:
+                cur.execute("""SELECT id FROM stock_items
+                    WHERE LOWER(BTRIM(designation))=LOWER(BTRIM(%s)) AND LOWER(unite)=LOWER(%s) AND actif=TRUE
+                    ORDER BY id LIMIT 1""", (line["designation"], line["unite"]))
+                existing = cur.fetchone()
+                if existing:
+                    item_id = int(existing["id"])
+                else:
+                    reference = str(line["reference"] or "").strip()
+                    if reference:
+                        cur.execute("SELECT 1 FROM stock_items WHERE reference=%s", (reference,))
+                        if cur.fetchone():
+                            reference = ""
+                    cur.execute("""INSERT INTO stock_items(reference,designation,categorie,unite,suivi_peremption,actif,notes,created_by)
+                        VALUES(%s,%s,'Autre',%s,FALSE,TRUE,%s,%s) RETURNING id""",
+                        (reference,line["designation"],line["unite"],f"Créé depuis la demande de proforma {proforma['numero']}",user.get("id")))
+                    item_id = int(cur.fetchone()["id"])
+                cur.execute("UPDATE stock_proforma_request_lines SET item_id=%s WHERE id=%s", (item_id,line["line_id"]))
             cur.execute("""INSERT INTO stock_supplier_order_lines(order_id,item_id,designation,quantite,unite,prix_unitaire)
                 VALUES(%s,%s,%s,%s,%s,%s)""",
-                (order_id, line["item_id"], line["designation"], line["quantite"], line["unite"], line["prix_reponse"]))
+                (order_id, item_id, line["designation"], line["quantite"], line["unite"], line["prix_reponse"]))
         cur.execute("""UPDATE stock_proforma_requests SET statut='Convertie',converted_order_id=%s,
             updated_at=CURRENT_TIMESTAMP WHERE id=%s""", (order_id, proforma_id))
     track_action(request, "STOCK_PROFORMA_CONVERT", f"Proforma {proforma['numero']} convertie en commande {order_number}")
@@ -898,7 +932,7 @@ PROCUREMENT_ADVANCED_SCRIPT = r'''<script>
  const baseTab=window.procTab;window.procTab=name=>{if(['orders','receipts','invoices','payments','suppliers','proformas','counts','transfers','returns','alerts','trace','reports'].includes(name))show(name);else baseTab(name)};
  window.procReceive=id=>{const order=(state.data.orders||[]).find(x=>Number(x.id)===Number(id));if(order)runReceive(order)};
  const addLineControls=(lotOptions)=>`<div class="grid gap-2 sm:grid-cols-12"><label class="sm:col-span-8 text-[11px] font-bold">Lot<select class="x-lot mt-1 w-full rounded-lg border p-2" required>${lotOptions}</select></label><label class="sm:col-span-3 text-[11px] font-bold">Quantité<input class="x-qty mt-1 w-full rounded-lg border p-2" type="number" min="0.001" step="0.001" required></label><button type="button" onclick="this.parentElement.remove()" class="text-rose-700">Retirer</button></div>`;
- window.procOpenProforma=()=>{let lines=[];const draw=()=>{const target=$('pfLines');if(!target)return;const rows=lines.map((line,i)=>`<tr class="border-t"><td class="px-3 py-2"><select aria-label="Article ${i+1}" onchange="procPickProformaItem(${i},this.value)" class="w-full min-w-[280px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"><option value="">Choisir un article…</option>${(state.data.items||[]).map(x=>`<option value="${x.id}" ${Number(line.item_id)===Number(x.id)?'selected':''}>${esc(x.designation)}${x.reference?' · '+esc(x.reference):''}</option>`).join('')}</select></td><td class="px-3 py-2"><input aria-label="Quantité demandée ligne ${i+1}" type="number" min="0.001" step="0.001" value="${line.quantite||1}" oninput="procEditProformaLine(${i},this.value)" class="w-full min-w-[110px] rounded-lg border border-slate-200 px-3 py-2 text-sm"></td><td class="px-3 py-2 text-right"><button type="button" onclick="procRemoveProformaLine(${i})" class="rounded-lg px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-50">Retirer</button></td></tr>`).join('');target.innerHTML=`<div class="overflow-x-auto rounded-xl border border-slate-200"><table class="w-full min-w-[560px] text-left text-sm"><thead class="bg-slate-100 text-[10px] uppercase tracking-wide text-slate-600"><tr><th class="px-3 py-3">Article</th><th class="px-3 py-3">Quantité</th><th class="px-3 py-3 text-right">Action</th></tr></thead><tbody>${rows||`<tr><td colspan="3" class="p-6 text-center text-xs text-slate-400">Ajoute les articles à chiffrer.</td></tr>`}</tbody></table></div>`};window.procPickProformaItem=(i,id)=>{lines[i].item_id=Number(id);draw()};window.procEditProformaLine=(i,value)=>lines[i].quantite=value;window.procRemoveProformaLine=i=>{lines.splice(i,1);draw()};window.procAddProformaLine=()=>{lines.push({quantite:1});draw()};modal('Nouvelle demande de proforma',`${select('Fournisseur *','pfSupplier',(state.data.suppliers||[]).filter(s=>s.actif).map(s=>`<option value="${s.id}">${esc(s.designation)}</option>`).join(''))}<div class="grid gap-3 sm:grid-cols-2">${control('Date de demande','pfDate','date',`value="${today}" required`)}${control('Réponse souhaitée avant le','pfDeadline','date')}</div><div class="flex items-center justify-between"><b class="text-sm">Articles à chiffrer</b><button type="button" onclick="procAddProformaLine()" class="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold">＋ Ajouter un article</button></div><div id="pfLines" class="max-h-[45vh] space-y-2 overflow-y-auto"></div>${control('Notes ou conditions demandées','pfNotes')}`,async()=>api('/proformas',{method:'POST',body:JSON.stringify({supplier_id:$('pfSupplier').value,date_demande:$('pfDate').value,date_limite:$('pfDeadline').value,notes:$('pfNotes').value,lignes:lines})}));draw()};
+ window.procOpenProforma=()=>{let lines=[];const draw=()=>{const target=$('pfLines');if(!target)return;const rows=lines.map((line,i)=>`<tr class="border-t"><td class="px-3 py-2">${line.is_custom?`<div class="grid gap-2 sm:grid-cols-3"><input aria-label="Désignation article libre ${i+1}" value="${esc(line.designation||'')}" placeholder="Désignation" oninput="procEditProformaCustom(${i},'designation',this.value)" class="min-w-[180px] rounded-lg border px-3 py-2 text-sm"><input aria-label="Référence article libre ${i+1}" value="${esc(line.reference||'')}" placeholder="Référence (facultative)" oninput="procEditProformaCustom(${i},'reference',this.value)" class="min-w-[130px] rounded-lg border px-3 py-2 text-sm"><input aria-label="Unité article libre ${i+1}" value="${esc(line.unite||'')}" placeholder="Unité" oninput="procEditProformaCustom(${i},'unite',this.value)" class="min-w-[100px] rounded-lg border px-3 py-2 text-sm"></div>`:`<select aria-label="Article ${i+1}" onchange="procPickProformaItem(${i},this.value)" class="w-full min-w-[280px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"><option value="">Choisir un article…</option><option value="__custom__">＋ Article non répertorié…</option>${(state.data.items||[]).map(x=>`<option value="${x.id}" ${Number(line.item_id)===Number(x.id)?'selected':''}>${esc(x.designation)}${x.reference?' · '+esc(x.reference):''}</option>`).join('')}</select>`}</td><td class="px-3 py-2"><input aria-label="Quantité demandée ligne ${i+1}" type="number" min="0.001" step="0.001" value="${line.quantite||1}" oninput="procEditProformaLine(${i},this.value)" class="w-full min-w-[110px] rounded-lg border border-slate-200 px-3 py-2 text-sm"></td><td class="px-3 py-2 text-right"><button type="button" onclick="procRemoveProformaLine(${i})" class="rounded-lg px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-50">Retirer</button></td></tr>`).join('');target.innerHTML=`<div class="overflow-x-auto rounded-xl border border-slate-200"><table class="w-full min-w-[620px] text-left text-sm"><thead class="bg-slate-100 text-[10px] uppercase tracking-wide text-slate-600"><tr><th class="px-3 py-3">Article / désignation</th><th class="px-3 py-3">Quantité</th><th class="px-3 py-3 text-right">Action</th></tr></thead><tbody>${rows||`<tr><td colspan="3" class="p-6 text-center text-xs text-slate-400">Ajoute les articles à chiffrer.</td></tr>`}</tbody></table></div>`};window.procPickProformaItem=(i,id)=>{if(id==='__custom__')lines[i]={is_custom:true,designation:'',reference:'',unite:'',quantite:lines[i].quantite||1};else{const item=(state.data.items||[]).find(x=>Number(x.id)===Number(id));lines[i]={item_id:Number(id),designation:item?.designation||'',reference:item?.reference||'',unite:item?.unite||'',quantite:lines[i].quantite||1}}draw()};window.procEditProformaLine=(i,value)=>lines[i].quantite=value;window.procEditProformaCustom=(i,key,value)=>lines[i][key]=value;window.procRemoveProformaLine=i=>{lines.splice(i,1);draw()};window.procAddProformaLine=()=>{lines.push({quantite:1});draw()};modal('Nouvelle demande de proforma',`${select('Fournisseur *','pfSupplier',(state.data.suppliers||[]).filter(s=>s.actif).map(s=>`<option value="${s.id}">${esc(s.designation)}</option>`).join(''))}<div class="grid gap-3 sm:grid-cols-2">${control('Date de demande','pfDate','date',`value="${today}" required`)}${control('Réponse souhaitée avant le','pfDeadline','date')}</div><div class="flex items-center justify-between"><b class="text-sm">Articles à chiffrer</b><button type="button" onclick="procAddProformaLine()" class="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold">＋ Ajouter un article</button></div><div id="pfLines" class="max-h-[45vh] space-y-2 overflow-y-auto"></div>${control('Notes ou conditions demandées','pfNotes')}`,async()=>api('/proformas',{method:'POST',body:JSON.stringify({supplier_id:$('pfSupplier').value,date_demande:$('pfDate').value,date_limite:$('pfDeadline').value,notes:$('pfNotes').value,lignes:lines})}));draw()};
  window.procProformaStatus=async(id,statut)=>{try{await api(`/proformas/${id}/status`,{method:'POST',body:JSON.stringify({statut})});await show('proformas')}catch(e){notify(e.message)}};
  window.procProformaResponse=id=>{const p=(state.data.proformas||[]).find(x=>Number(x.id)===Number(id));if(!p)return;modal(`Réponse · ${esc(p.numero)}`,`<p class="rounded-xl bg-sky-50 p-3 text-xs text-sky-800">Saisis le prix unitaire proposé pour chaque article. Le montant total sera calculé automatiquement.</p>${(p.lignes_detail||[]).map(l=>`<label class="grid grid-cols-[1fr_150px] items-center gap-3 border-b py-2 text-xs"><span><b>${esc(l.designation)}</b><small class="block text-slate-500">${Number(l.quantite).toLocaleString('fr-FR')} ${esc(l.unite)} · ${esc(l.reference||'')}</small></span><input class="pf-quote-price rounded-lg border px-2 py-2" type="number" min="0" step="0.01" data-line="${l.id}" value="${l.prix_reponse??''}" placeholder="DA / unité" required></label>`).join('')}`,async()=>api(`/proformas/${id}/response`,{method:'POST',body:JSON.stringify({lignes:[...document.querySelectorAll('.pf-quote-price')].map(x=>({ligne_id:x.dataset.line,prix_unitaire:x.value}))})}))};
  window.procProformaConvert=async id=>{const p=(state.data.proformas||[]).find(x=>Number(x.id)===Number(id));if(!p||!window.confirm(`Créer une commande d’achat pour ${p.fournisseur} à partir de la proforma ${p.numero} ?`))return;try{const result=await api(`/proformas/${id}/convert`,{method:'POST',body:'{}'});notify(`Commande créée : ${result.numero}`);await show('proformas')}catch(e){notify(e.message)}};

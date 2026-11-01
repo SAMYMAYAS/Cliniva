@@ -889,13 +889,18 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
     CREATE TABLE IF NOT EXISTS stock_proforma_request_lines (
         id SERIAL PRIMARY KEY,
         request_id INT NOT NULL REFERENCES stock_proforma_requests(id) ON DELETE CASCADE,
-        item_id INT NOT NULL REFERENCES stock_items(id) ON DELETE RESTRICT,
+        item_id INT REFERENCES stock_items(id) ON DELETE SET NULL,
+        reference TEXT NOT NULL DEFAULT '',
         designation TEXT NOT NULL,
         quantite NUMERIC(14,3) NOT NULL CHECK (quantite > 0),
         unite TEXT NOT NULL DEFAULT '',
+        is_custom BOOLEAN NOT NULL DEFAULT FALSE,
         prix_reponse NUMERIC(14,2) CHECK (prix_reponse IS NULL OR prix_reponse >= 0),
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stock_proforma_request_lines ALTER COLUMN item_id DROP NOT NULL;
+    ALTER TABLE stock_proforma_request_lines ADD COLUMN IF NOT EXISTS reference TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_proforma_request_lines ADD COLUMN IF NOT EXISTS is_custom BOOLEAN NOT NULL DEFAULT FALSE;
     CREATE INDEX IF NOT EXISTS idx_stock_proforma_supplier_date
         ON stock_proforma_requests(supplier_id, date_demande DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_stock_proforma_lines_request
