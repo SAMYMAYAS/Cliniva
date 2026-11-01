@@ -5,10 +5,13 @@ from decimal import Decimal, InvalidOperation
 from html import escape
 import asyncio
 import base64
+import hashlib
 from io import BytesIO
 from pathlib import Path
 import re
+import secrets
 from typing import Any
+from urllib.parse import parse_qs
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -134,7 +137,7 @@ def procurement_data(request: Request):
     with get_db_cursor() as cur:
         cur.execute("SELECT id, designation, actif, contact, telephone, email, email_2, email_3 FROM stock_suppliers ORDER BY designation")
         suppliers = [dict(row) for row in cur.fetchall()]
-        cur.execute("""SELECT u.id,u.prenom,u.nom,u.role,
+        cur.execute("""SELECT u.id,u.prenom,u.nom,u.role,MIN(NULLIF(trim(s.email),'')) AS email,
                 string_agg(DISTINCT NULLIF(s.type_personnel,''), ', ' ORDER BY NULLIF(s.type_personnel,'')) AS fonction_staff,
                 string_agg(DISTINCT NULLIF(s.service_nom,''), ', ' ORDER BY NULLIF(s.service_nom,'')) AS service_staff
             FROM clinic_staff s JOIN users u
@@ -423,68 +426,163 @@ async def proforma_request_share(proforma_id: int, request: Request):
     if not approver_ids or len(approver_ids) > 20:
         raise HTTPException(status_code=400, detail="Sélectionne de 1 à 20 approbateurs internes.")
     with get_db_cursor() as cur:
-        cur.execute("SELECT numero,statut FROM stock_proforma_requests WHERE id=%s FOR UPDATE", (proforma_id,))
+        cur.execute("""SELECT p.numero,p.statut,p.montant_propose,p.offre_path,p.offre_nom,p.offre_mime,s.designation AS fournisseur
+            FROM stock_proforma_requests p JOIN stock_suppliers s ON s.id=p.supplier_id
+            WHERE p.id=%s FOR UPDATE OF p""", (proforma_id,))
         proforma = cur.fetchone()
         if not proforma:
             raise HTTPException(status_code=404, detail="Demande de proforma introuvable.")
         if proforma["statut"] != "Reçue":
             raise HTTPException(status_code=409, detail="Saisis d’abord l’offre fournisseur avant de la partager pour validation.")
-        cur.execute("""SELECT u.id,u.prenom,u.nom FROM users u
+        if not proforma.get("offre_path"):
+            raise HTTPException(status_code=400, detail="Joins d’abord le fichier de l’offre fournisseur à la demande.")
+        offer_path = Path(proforma["offre_path"]).resolve()
+        offer_root = (Path(DOCS_DIR) / "approvisionnement" / "offres").resolve()
+        if offer_root not in offer_path.parents or not offer_path.is_file():
+            raise HTTPException(status_code=404, detail="Le fichier de l’offre fournisseur est introuvable.")
+        if offer_path.stat().st_size > 12 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Le fichier de l’offre dépasse la limite de 12 Mo pour l’envoi par e-mail.")
+        offer_attachment = (Path(proforma["offre_nom"] or offer_path.name).name,
+                            offer_path.read_bytes(), proforma["offre_mime"] or "application/octet-stream")
+        cur.execute("""SELECT u.id,u.prenom,u.nom,MIN(NULLIF(trim(s.email),'')) AS email
+            FROM users u JOIN clinic_staff s ON s.actif=TRUE
+              AND lower(trim(s.nom))=lower(trim(u.nom)) AND lower(trim(s.prenom))=lower(trim(u.prenom))
             WHERE u.id=ANY(%s) AND u.status='Actif'
               AND (u.role='Administrateur' OR COALESCE(u.permissions->>'stock_view','false')='true'
                    OR COALESCE(u.permissions->>'stock_manage','false')='true')
-              AND EXISTS (SELECT 1 FROM clinic_staff s WHERE s.actif=TRUE
-                  AND lower(trim(s.nom))=lower(trim(u.nom)) AND lower(trim(s.prenom))=lower(trim(u.prenom)))""", (approver_ids,))
+            GROUP BY u.id,u.prenom,u.nom""", (approver_ids,))
         selected = cur.fetchall()
         if len(selected) != len(approver_ids):
             raise HTTPException(status_code=400, detail="Un approbateur est inactif ou n’a pas accès au stock.")
+        for approver in selected:
+            email = str(approver.get("email") or "").strip()
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+                raise HTTPException(status_code=400, detail=f"Ajoute une adresse e-mail valide au collaborateur {approver['prenom']} {approver['nom']} dans le staff.")
+        try:
+            smtp_configuration = get_stock_smtp_configuration()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Configuration SMTP stock indisponible : {exc}") from exc
+        if not smtp_configuration.get("enabled"):
+            raise HTTPException(status_code=503, detail="Configure et active d’abord le SMTP dédié à la gestion de stock.")
         cur.execute("SELECT COUNT(*) AS decisions FROM stock_proforma_approvals WHERE request_id=%s AND statut<>'En attente'", (proforma_id,))
         if int(cur.fetchone()["decisions"] or 0):
             raise HTTPException(status_code=409, detail="Une décision interne existe déjà ; crée une nouvelle demande pour relancer une validation.")
         cur.execute("DELETE FROM stock_proforma_approvals WHERE request_id=%s", (proforma_id,))
+        email_jobs = []
         for approver in selected:
-            cur.execute("""INSERT INTO stock_proforma_approvals(request_id,approver_id,assigned_by)
-                VALUES(%s,%s,%s)""", (proforma_id, approver["id"], user.get("id")))
-            if int(approver["id"]) != int(user.get("id") or 0):
-                cur.execute("""INSERT INTO cliniva_notifications(user_id,categorie,titre,message)
-                    VALUES(%s,'approvisionnement',%s,%s)""",
-                    (approver["id"], f"Validation d’offre · {proforma['numero']}",
-                     f"Une offre fournisseur vous a été assignée pour validation : {proforma['numero']}. Ouvrez le module Approvisionnement."))
+            token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            cur.execute("""INSERT INTO stock_proforma_approvals(request_id,approver_id,assigned_by,email_destinataire,token_hash)
+                VALUES(%s,%s,%s,%s,%s)""", (proforma_id, approver["id"], user.get("id"), approver["email"].strip(), token_hash))
+            email_jobs.append({"email": approver["email"].strip(), "prenom": approver["prenom"], "nom": approver["nom"], "token": token})
+    base_url = str(request.base_url).rstrip("/")
+    failures = []
+    for job in email_jobs:
+        action_url = f"{base_url}/api/approvisionnement/approval/{job['token']}"
+        approve_url = f"{action_url}?decision=Valid%C3%A9e"
+        refuse_url = f"{action_url}?decision=Refus%C3%A9e"
+        subject = f"Validation requise · Offre {proforma['numero']} · Cliniva"
+        content = (f"Bonjour {job['prenom']} {job['nom']},\n\nUne offre fournisseur de {proforma['fournisseur']} "
+                   f"({proforma['numero']}, {proforma['montant_propose']} DA) attend votre décision.\n\n"
+                   f"Valider : {approve_url}\nRefuser : {refuse_url}\n\n"
+                   "Le lien ouvre une page de confirmation. Chaque approbateur sélectionné doit répondre avant la création de la commande.")
+        body_html = (f"<p>Bonjour <strong>{escape(job['prenom'])} {escape(job['nom'])}</strong>,</p>"
+            f"<p>Une offre fournisseur attend votre décision :</p><p><strong>{escape(proforma['fournisseur'])}</strong><br>"
+            f"Référence : {escape(proforma['numero'])}<br>Montant proposé : <strong>{escape(str(proforma['montant_propose']))} DA</strong></p>"
+            f"<p style=\"margin:24px 0\"><a href=\"{escape(approve_url, quote=True)}\" style=\"display:inline-block;margin:0 8px 8px 0;padding:13px 20px;border-radius:9px;background:#16803c;color:#fff;text-decoration:none;font-weight:700\">Valider l’offre</a>"
+            f"<a href=\"{escape(refuse_url, quote=True)}\" style=\"display:inline-block;padding:13px 20px;border-radius:9px;background:#fff1f2;color:#be123c;text-decoration:none;font-weight:700\">Refuser l’offre</a></p>"
+            "<p style=\"font-size:12px;color:#64748b\">Le lien affiche une confirmation avant d’enregistrer votre décision. Tous les approbateurs sélectionnés doivent valider pour autoriser la commande.</p>")
+        html = build_cliniva_email_html("Validation d’offre fournisseur", proforma["numero"], body_html,
+                                        f"Une décision est attendue pour {proforma['numero']}")
+        try:
+            await asyncio.to_thread(send_smtp_email, smtp_configuration, [job["email"]], subject, content, html,
+                                    [offer_attachment])
+        except Exception as exc:
+            failures.append(f"{job['email']}: {exc}")
+    if failures:
+        raise HTTPException(status_code=502, detail=f"L’envoi des e-mails de validation a échoué ({len(email_jobs)-len(failures)}/{len(email_jobs)} envoyé(s)). Corrige le SMTP ou les adresses puis relance le partage. Détail : {'; '.join(failures)}")
     track_action(request, "STOCK_PROFORMA_SHARE", f"Offre {proforma['numero']} partagée avec {len(selected)} approbateur(s)")
-    return {"success": True, "approbateurs": len(selected), "regle": "Tous les approbateurs sélectionnés doivent valider."}
+    return {"success": True, "approbateurs": len(selected), "emails_envoyes": len(selected), "regle": "Tous les approbateurs sélectionnés doivent valider par e-mail."}
 
 
 @procurement_router.post("/proformas/{proforma_id}/approvals/{approval_id}")
 async def proforma_request_approval_decide(proforma_id: int, approval_id: int, request: Request):
-    user = _require(request)
-    data = await request.json()
-    decision = str(data.get("decision") or "").strip()
-    comment = str(data.get("commentaire") or "").strip()[:1000]
-    if decision not in {"Validée", "Refusée"}:
-        raise HTTPException(status_code=400, detail="Choisis Valider ou Refuser l’offre.")
+    raise HTTPException(status_code=410, detail="La validation ou le refus d’une offre se fait depuis le lien sécurisé reçu par e-mail.")
+
+
+def _approval_email_page(title: str, details: str, content: str) -> Response:
+    return Response(f'''<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)}</title></head>
+<body style="margin:0;background:#f1f5f3;font-family:Arial,Helvetica,sans-serif;color:#17231b"><main style="max-width:620px;margin:7vh auto;padding:28px;background:#fff;border:1px solid #dce7df;border-radius:18px;box-shadow:0 18px 55px #14271b18"><div style="font-size:12px;font-weight:800;letter-spacing:1px;color:#31713e">CLINIVA · APPROVISIONNEMENT</div><h1 style="font-size:24px;margin:14px 0 6px">{escape(title)}</h1><p style="color:#52625a;line-height:1.6">{details}</p>{content}<p style="border-top:1px solid #e5ece7;padding-top:16px;margin-top:24px;color:#738078;font-size:12px">Ce lien personnel ne peut enregistrer qu’une seule décision.</p></main></body></html>''', media_type="text/html; charset=utf-8")
+
+
+@procurement_router.get("/approval/{token}")
+def proforma_email_approval_page(token: str, request: Request):
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with get_db_cursor() as cur:
-        cur.execute("""SELECT a.id,a.statut,p.numero FROM stock_proforma_approvals a
-            JOIN stock_proforma_requests p ON p.id=a.request_id
-            WHERE a.id=%s AND a.request_id=%s AND a.approver_id=%s FOR UPDATE OF a,p""",
-            (approval_id, proforma_id, user.get("id")))
+        cur.execute("""SELECT a.statut,a.email_destinataire,p.numero,p.montant_propose,s.designation AS fournisseur
+            FROM stock_proforma_approvals a JOIN stock_proforma_requests p ON p.id=a.request_id
+            JOIN stock_suppliers s ON s.id=p.supplier_id WHERE a.token_hash=%s""", (token_hash,))
+        approval = cur.fetchone()
+    if not approval:
+        raise HTTPException(status_code=404, detail="Lien de validation introuvable ou expiré.")
+    details = (f"Offre <strong>{escape(approval['numero'])}</strong> de <strong>{escape(approval['fournisseur'])}</strong> · "
+               f"{escape(str(approval['montant_propose']))} DA.<br>Destinataire : {escape(approval['email_destinataire'])}.")
+    if approval["statut"] != "En attente":
+        return _approval_email_page("Décision déjà enregistrée", details,
+            f"<div style=\"padding:16px;border-radius:12px;background:#ecfdf5;color:#166534;font-weight:700\">Cette offre a déjà reçu votre décision : {escape(approval['statut'])}.</div>")
+    decision = str(request.query_params.get("decision") or "")
+    if decision not in {"Validée", "Refusée"}:
+        url = f"/api/approvisionnement/approval/{token}"
+        content = (f"<p style=\"line-height:1.6\">Choisissez une décision. Une confirmation sera demandée avant son enregistrement.</p>"
+            f"<p><a style=\"display:inline-block;margin:0 8px 8px 0;padding:13px 18px;border-radius:9px;background:#16803c;color:#fff;text-decoration:none;font-weight:700\" href=\"{url}?decision=Valid%C3%A9e\">Valider l’offre</a>"
+            f"<a style=\"display:inline-block;padding:13px 18px;border-radius:9px;background:#fff1f2;color:#be123c;text-decoration:none;font-weight:700\" href=\"{url}?decision=Refus%C3%A9e\">Refuser l’offre</a></p>")
+        return _approval_email_page("Votre décision est requise", details, content)
+    label = "valider" if decision == "Validée" else "refuser"
+    color = "#16803c" if decision == "Validée" else "#be123c"
+    reason_label = "Motif du refus *" if decision == "Refusée" else "Commentaire (facultatif)"
+    reason_required = "required" if decision == "Refusée" else ""
+    content = (f"<p style=\"line-height:1.6\">Confirmez-vous vouloir <strong>{label}</strong> cette offre ?</p>"
+        f"<form method=\"post\" action=\"/api/approvisionnement/approval/{token}/decision\">"
+        f"<input type=\"hidden\" name=\"decision\" value=\"{escape(decision, quote=True)}\">"
+        f"<label style=\"display:block;margin:14px 0;font-size:13px;font-weight:700\">{reason_label}<textarea name=\"commentaire\" {reason_required} maxlength=\"1000\" rows=\"3\" style=\"display:block;box-sizing:border-box;width:100%;margin-top:6px;padding:10px;border:1px solid #cbd5e1;border-radius:9px\"></textarea></label>"
+        f"<button type=\"submit\" style=\"border:0;padding:13px 20px;border-radius:9px;background:{color};color:white;font-weight:800;cursor:pointer\">Confirmer et {label}</button></form>")
+    return _approval_email_page("Confirmer votre décision", details, content)
+
+
+@procurement_router.post("/approval/{token}/decision")
+async def proforma_email_approval_decide(token: str, request: Request):
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    form = parse_qs((await request.body()).decode("utf-8", "replace"), keep_blank_values=True)
+    decision = str((form.get("decision") or [""])[0]).strip()
+    comment = str((form.get("commentaire") or [""])[0]).strip()[:1000]
+    if decision not in {"Validée", "Refusée"}:
+        raise HTTPException(status_code=400, detail="Décision invalide.")
+    if decision == "Refusée" and not comment:
+        return _approval_email_page("Motif obligatoire", "Une raison est nécessaire pour refuser cette offre.",
+            f"<p style=\"color:#be123c;font-weight:700\">Le motif du refus ne peut pas être vide.</p><p><a href=\"/api/approvisionnement/approval/{token}?decision=Refus%C3%A9e\">Revenir au formulaire de refus</a></p>")
+    with get_db_cursor() as cur:
+        cur.execute("""SELECT a.id,a.request_id,a.statut,p.numero FROM stock_proforma_approvals a
+            JOIN stock_proforma_requests p ON p.id=a.request_id WHERE a.token_hash=%s FOR UPDATE OF a,p""", (token_hash,))
         approval = cur.fetchone()
         if not approval:
-            raise HTTPException(status_code=403, detail="Cette offre ne t’a pas été assignée pour validation.")
+            raise HTTPException(status_code=404, detail="Lien de validation introuvable ou expiré.")
         if approval["statut"] != "En attente":
-            raise HTTPException(status_code=409, detail="Tu as déjà pris une décision sur cette offre.")
+            return _approval_email_page("Décision déjà enregistrée", escape(approval["numero"]),
+                f"<div style=\"padding:16px;border-radius:12px;background:#ecfdf5;color:#166534;font-weight:700\">Cette offre a déjà reçu votre décision : {escape(approval['statut'])}.</div>")
         cur.execute("UPDATE stock_proforma_approvals SET statut=%s,commentaire=%s,decided_at=CURRENT_TIMESTAMP WHERE id=%s",
-                    (decision, comment, approval_id))
+                    (decision, comment, approval["id"]))
         if decision == "Refusée":
-            cur.execute("UPDATE stock_proforma_requests SET statut='Refusée',updated_at=CURRENT_TIMESTAMP WHERE id=%s", (proforma_id,))
+            cur.execute("UPDATE stock_proforma_requests SET statut='Refusée',updated_at=CURRENT_TIMESTAMP WHERE id=%s", (approval["request_id"],))
         else:
             cur.execute("""SELECT COUNT(*) FILTER(WHERE statut='En attente') AS pending,
                     COUNT(*) FILTER(WHERE statut='Refusée') AS refusees
-                FROM stock_proforma_approvals WHERE request_id=%s""", (proforma_id,))
+                FROM stock_proforma_approvals WHERE request_id=%s""", (approval["request_id"],))
             decisions = cur.fetchone()
             if int(decisions["pending"] or 0) == 0 and int(decisions["refusees"] or 0) == 0:
-                cur.execute("UPDATE stock_proforma_requests SET statut='Acceptée',updated_at=CURRENT_TIMESTAMP WHERE id=%s", (proforma_id,))
-    track_action(request, "STOCK_PROFORMA_APPROVAL", f"Offre {approval['numero']} : {decision}")
-    return {"success": True, "statut": decision}
+                cur.execute("UPDATE stock_proforma_requests SET statut='Acceptée',updated_at=CURRENT_TIMESTAMP WHERE id=%s", (approval["request_id"],))
+    result = "validée" if decision == "Validée" else "refusée"
+    return _approval_email_page("Décision enregistrée", escape(approval["numero"]),
+        f"<div style=\"padding:16px;border-radius:12px;background:#ecfdf5;color:#166534;font-weight:700\">Votre décision a bien été enregistrée : offre {result}.</div>")
 
 
 @procurement_router.post("/proformas/{proforma_id}/offer")
@@ -1336,14 +1434,14 @@ PROCUREMENT_WORKFLOW_SCRIPT = r'''<script>
  const openModal=(title,html,submit)=>{ $('procModalTitle').textContent=title;$('procFields').innerHTML=html;$('procForm').onsubmit=async event=>{event.preventDefault();const button=event.submitter;if(button)button.disabled=true;try{await submit();window.procClose();await refreshWorkflow();notify('Enregistrement effectué.')}catch(error){notify(error.message)}finally{if(button)button.disabled=false}};$('procModal').classList.remove('hidden');$('procModal').classList.add('flex')};
  const refreshWorkflow=async()=>{workflowData=await api('/data');const active=document.querySelector('.proc-tab.bg-brand-neon')?.dataset.procTab;if(active==='proformas')renderProformas();else if(active==='payments')renderPayments();else if(active==='receipts')renderReceipts();return workflowData};
  const statusBadge=status=>`<span class="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-extrabold text-slate-700">${esc(status)}</span>`;
- const renderProformas=()=>{const rows=(workflowData.proformas||[]).map(p=>{const approvals=p.approbations||[],pending=approvals.filter(a=>a.statut==='En attente'),mine=pending.find(a=>Number(a.approver_id)===currentUserId),approvalText=approvals.length?approvals.map(a=>`${esc(a.prenom)} ${esc(a.nom)} · ${esc(a.statut)}`).join('<br>'):'Pas encore partagée';return `<tr class="border-t align-top"><td class="p-3 font-extrabold">${esc(p.numero)}<small class="block font-normal text-slate-500">${Number(p.lignes||0)} article(s)</small></td><td class="p-3">${esc(p.fournisseur)}</td><td class="p-3">${esc(p.date_demande)}</td><td class="p-3 font-bold">${money(p.montant_propose)}</td><td class="p-3">${statusBadge(p.statut)}<small class="mt-2 block text-[10px] leading-4 text-slate-500">${approvalText}</small></td><td class="p-3"><div class="flex min-w-[225px] flex-wrap gap-1.5">${p.statut==='À envoyer'?`<button onclick="procWorkflowStatus(${p.id},'Envoyée')" class="rounded-lg bg-emerald-50 px-2.5 py-2 text-[11px] font-bold text-emerald-800">Marquer envoyée</button>`:''}${(['À envoyer','Envoyée','Reçue'].includes(p.statut)&&!approvals.length)?`<button onclick="procProformaResponse(${p.id})" class="rounded-lg bg-sky-50 px-2.5 py-2 text-[11px] font-bold text-sky-800">Saisir l’offre</button><button onclick="procWorkflowAttachOffer(${p.id})" class="rounded-lg border px-2.5 py-2 text-[11px] font-bold"><i class="ph-bold ph-paperclip mr-1"></i>Joindre l’offre</button>`:''}${p.offre_nom?`<a href="/api/approvisionnement/proformas/${p.id}/offer" target="_blank" rel="noopener" class="rounded-lg bg-violet-50 px-2.5 py-2 text-[11px] font-bold text-violet-800"><i class="ph-bold ph-file-pdf mr-1"></i>Voir document</a>`:''}${p.statut==='Reçue'?`<button onclick="procWorkflowShare(${p.id})" class="rounded-lg bg-amber-50 px-2.5 py-2 text-[11px] font-bold text-amber-900"><i class="ph-bold ph-users-three mr-1"></i>Partager pour validation</button>`:''}${mine?`<button onclick="procWorkflowDecide(${p.id},${mine.id})" class="rounded-lg bg-emerald-600 px-2.5 py-2 text-[11px] font-bold text-white"><i class="ph-bold ph-stamp mr-1"></i>Examiner l’offre</button>`:''}${p.statut==='Acceptée'?`<button onclick="procProformaConvert(${p.id})" class="rounded-lg bg-emerald-50 px-2.5 py-2 text-[11px] font-bold text-emerald-800">Créer la commande</button>`:''}<button onclick="procPrintProforma(${p.id})" class="rounded-lg border px-2.5 py-2 text-[11px] font-bold"><i class="ph-bold ph-file-pdf mr-1"></i>Demande PDF</button></div></td></tr>`}).join('');$('procContent').innerHTML=`<div class="mb-4"><h2 class="font-extrabold">Parcours d’achat · demandes de proforma</h2><p class="text-xs leading-5 text-slate-500">Saisis l’offre reçue, joins son document, puis partage-la aux approbateurs. La commande est déverrouillée après validation de tous les approbateurs sélectionnés.</p></div>${table(['Demande','Fournisseur','Date','Offre proposée','État / validations internes','Actions'],rows,'Aucune demande de proforma.')}`};
+ const renderProformas=()=>{const rows=(workflowData.proformas||[]).map(p=>{const approvals=p.approbations||[],pending=approvals.filter(a=>a.statut==='En attente'),mine=null,approvalText=approvals.length?approvals.map(a=>`${esc(a.prenom)} ${esc(a.nom)} · ${esc(a.statut)}`).join('<br>'):'Pas encore partagée';return `<tr class="border-t align-top"><td class="p-3 font-extrabold">${esc(p.numero)}<small class="block font-normal text-slate-500">${Number(p.lignes||0)} article(s)</small></td><td class="p-3">${esc(p.fournisseur)}</td><td class="p-3">${esc(p.date_demande)}</td><td class="p-3 font-bold">${money(p.montant_propose)}</td><td class="p-3">${statusBadge(p.statut)}<small class="mt-2 block text-[10px] leading-4 text-slate-500">${approvalText}</small></td><td class="p-3"><div class="flex min-w-[225px] flex-wrap gap-1.5">${p.statut==='À envoyer'?`<button onclick="procWorkflowStatus(${p.id},'Envoyée')" class="rounded-lg bg-emerald-50 px-2.5 py-2 text-[11px] font-bold text-emerald-800">Marquer envoyée</button>`:''}${(['À envoyer','Envoyée','Reçue'].includes(p.statut)&&!approvals.length)?`<button onclick="procProformaResponse(${p.id})" class="rounded-lg bg-sky-50 px-2.5 py-2 text-[11px] font-bold text-sky-800">Saisir l’offre</button><button onclick="procWorkflowAttachOffer(${p.id})" class="rounded-lg border px-2.5 py-2 text-[11px] font-bold"><i class="ph-bold ph-paperclip mr-1"></i>Joindre l’offre</button>`:''}${p.offre_nom?`<a href="/api/approvisionnement/proformas/${p.id}/offer" target="_blank" rel="noopener" class="rounded-lg bg-violet-50 px-2.5 py-2 text-[11px] font-bold text-violet-800"><i class="ph-bold ph-file-pdf mr-1"></i>Voir document</a>`:''}${p.statut==='Reçue'?`<button onclick="procWorkflowShare(${p.id})" class="rounded-lg bg-amber-50 px-2.5 py-2 text-[11px] font-bold text-amber-900"><i class="ph-bold ph-users-three mr-1"></i>Partager pour validation</button>`:''}${mine?`<button onclick="procWorkflowDecide(${p.id},${mine.id})" class="rounded-lg bg-emerald-600 px-2.5 py-2 text-[11px] font-bold text-white"><i class="ph-bold ph-stamp mr-1"></i>Examiner l’offre</button>`:''}${p.statut==='Acceptée'?`<button onclick="procProformaConvert(${p.id})" class="rounded-lg bg-emerald-50 px-2.5 py-2 text-[11px] font-bold text-emerald-800">Créer la commande</button>`:''}<button onclick="procPrintProforma(${p.id})" class="rounded-lg border px-2.5 py-2 text-[11px] font-bold"><i class="ph-bold ph-file-pdf mr-1"></i>Demande PDF</button></div></td></tr>`}).join('');$('procContent').innerHTML=`<div class="mb-4"><h2 class="font-extrabold">Parcours d’achat · demandes de proforma</h2><p class="text-xs leading-5 text-slate-500">Saisis l’offre reçue, joins son document, puis partage-la aux approbateurs. La commande est déverrouillée après validation de tous les approbateurs sélectionnés.</p></div>${table(['Demande','Fournisseur','Date','Offre proposée','État / validations internes','Actions'],rows,'Aucune demande de proforma.')}`};
  const renderPayments=()=>{const rows=(workflowData.payments||[]).map(p=>`<tr class="border-t"><td class="p-3">${esc(p.date_paiement)}</td><td class="p-3">${esc(p.fournisseur)}</td><td class="p-3 font-bold">${esc(p.numero_facture)}</td><td class="p-3 font-extrabold text-emerald-700">${money(p.montant)}</td><td class="p-3">${esc(p.mode_paiement||'—')}</td><td class="p-3">${esc(p.reference||'—')}</td><td class="p-3">${p.justificatif_nom?`<a class="font-bold text-sky-700 underline" target="_blank" rel="noopener" href="/api/approvisionnement/payments/${p.id}/receipt">${esc(p.justificatif_nom)}</a>`:'—'}</td></tr>`).join('');$('procContent').innerHTML=`<h2 class="mb-1 font-extrabold">Historique des paiements fournisseurs</h2><p class="mb-4 text-xs text-slate-500">Chaque règlement conserve son mode, sa référence et son justificatif éventuel.</p>${table(['Date','Fournisseur','Facture','Montant','Mode','N° chèque / réf. virement','Reçu'],rows,'Aucun paiement enregistré.')}`;};
  const renderReceipts=()=>{const rows=(workflowData.receipts||[]).map(r=>`<tr class="border-t"><td class="p-3 font-extrabold">${esc(r.numero)}${r.commande?`<small class="block text-slate-500">${esc(r.commande)}</small>`:''}</td><td class="p-3">${esc(r.bon_livraison||'—')}${r.attachment_id?`<a class="ml-2 text-sky-700 underline" target="_blank" rel="noopener" href="/api/gestion-stock/attachments/${r.attachment_id}/file">Voir le bon</a>`:''}</td><td class="p-3">${esc(r.fournisseur)}</td><td class="p-3">${esc(String(r.created_at||'').slice(0,16))}</td><td class="p-3 font-bold">${money(r.montant)}</td><td class="p-3">${r.facture_liee?'<span class="text-emerald-700">Facture liée</span>':`<button onclick="procOpenInvoice(${r.id})" class="rounded-lg bg-sky-50 px-3 py-2 text-xs font-bold text-sky-800">Créer la facture</button>`}</td></tr>`).join('');$('procContent').innerHTML=`<h2 class="mb-1 font-extrabold">Livraisons et bons de livraison</h2><p class="mb-4 text-xs text-slate-500">La réception physique crée le bon d’entrée et les lots en stock ; le numéro du bon fournisseur reste associé à la réception.</p>${table(['Bon d’entrée Cliniva / commande','Bon de livraison fournisseur','Fournisseur','Réception','Valeur reçue','Facturation'],rows,'Aucune livraison réceptionnée.')}`;};
  window.procWorkflowStatus=async(id,statut)=>{try{await api(`/proformas/${id}/status`,{method:'POST',body:JSON.stringify({statut})});await refreshWorkflow();notify('État de la demande actualisé.')}catch(error){notify(error.message)}};
  const fileData=async file=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve({name:file.name,data_url:String(reader.result||'')});reader.onerror=()=>reject(Error('Lecture du fichier impossible.'));reader.readAsDataURL(file)});
  window.procWorkflowAttachOffer=id=>openModal('Joindre l’offre fournisseur',`<p class="rounded-xl border border-sky-100 bg-sky-50 p-3 text-xs text-sky-900">Archive l’offre reçue avec la demande. Formats PDF, JPG ou PNG · 12 Mo maximum.</p><label class="block text-xs font-bold text-slate-600">Document de l’offre<input id="workflowOfferFile" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required class="mt-2 block w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm"></label>`,async()=>{const file=$('workflowOfferFile').files?.[0];if(!file)throw Error('Sélectionne le document de l’offre.');if(file.size>12*1024*1024)throw Error('Le fichier dépasse 12 Mo.');await api(`/proformas/${id}/offer`,{method:'POST',body:JSON.stringify({offre:await fileData(file)})})});
  window.procWorkflowShare=id=>{const approvers=workflowData.approvers||[];if(!approvers.length)return notify('Aucun utilisateur actif autorisé à consulter le stock.');openModal('Partager l’offre pour validation interne',`<p class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-950">Tous les approbateurs sélectionnés doivent valider l’offre avant la création de la commande. Au moins un approbateur est requis.</p><label class="block text-xs font-bold text-slate-600">Approbateurs du Staff<select id="workflowApprovers" multiple required size="${Math.min(approvers.length,7)}" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">${approvers.map(u=>`<option value="${u.id}">${esc(u.prenom)} ${esc(u.nom)} · ${esc(u.role)}</option>`).join('')}</select><small class="mt-1 block font-normal text-slate-500">Maintiens Ctrl pour sélectionner plusieurs personnes.</small></label>`,async()=>{const ids=[...$('workflowApprovers').selectedOptions].map(option=>Number(option.value));if(!ids.length)throw Error('Sélectionne au moins un approbateur.');await api(`/proformas/${id}/share`,{method:'POST',body:JSON.stringify({approver_ids:ids})})})};
- window.procWorkflowShare=id=>{const approvers=workflowData.approvers||[];if(!approvers.length)return notify('Aucun collaborateur actif du staff avec accès au stock n’est disponible pour la validation.');const rows=approvers.map(u=>`<tr class="border-t"><td class="p-3"><input type="checkbox" class="workflow-approver-check h-4 w-4 accent-emerald-600" value="${u.id}" aria-label="Sélectionner ${esc(u.prenom)} ${esc(u.nom)}"></td><td class="p-3 font-bold">${esc(u.prenom)} ${esc(u.nom)}</td><td class="p-3">${esc(u.fonction_staff||u.role||'—')}</td><td class="p-3">${esc(u.service_staff||'—')}</td><td class="p-3"><span class="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-800">Compte actif</span></td></tr>`).join('');openModal('Ajouter les collaborateurs approbateurs',`<p class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-950">Choisis dans le staff les collaborateurs qui valideront cette offre. Tous les collaborateurs sélectionnés doivent approuver avant la création de la commande.</p><label class="block text-xs font-bold text-slate-600">Rechercher un collaborateur<input id="workflowApproverSearch" type="search" placeholder="Nom, fonction ou service" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm" oninput="document.querySelectorAll('#workflowApproverRows tr').forEach(r=>r.hidden=!r.textContent.toLocaleLowerCase().includes(this.value.toLocaleLowerCase()))"></label><div class="overflow-x-auto rounded-2xl border border-slate-200"><table class="w-full min-w-[620px] text-left text-sm"><thead class="bg-slate-100 text-[10px] uppercase tracking-wide text-slate-600"><tr><th class="p-3"><input type="checkbox" aria-label="Sélectionner tous les collaborateurs visibles" onchange="document.querySelectorAll('#workflowApproverRows tr:not([hidden]) .workflow-approver-check').forEach(c=>c.checked=this.checked)"></th><th class="p-3">Collaborateur</th><th class="p-3">Fonction / rôle</th><th class="p-3">Service</th><th class="p-3">Accès</th></tr></thead><tbody id="workflowApproverRows">${rows}</tbody></table></div><p class="text-xs text-slate-500">La validation nécessite un compte utilisateur actif avec accès au module Gestion de stock.</p>`,async()=>{const ids=[...document.querySelectorAll('.workflow-approver-check:checked')].map(option=>Number(option.value));if(!ids.length)throw Error('Sélectionne au moins un collaborateur du staff.');await api(`/proformas/${id}/share`,{method:'POST',body:JSON.stringify({approver_ids:ids})})})};
+ window.procWorkflowShare=id=>{const approvers=workflowData.approvers||[];if(!approvers.length)return notify('Aucun collaborateur actif du staff avec accès au stock n’est disponible pour la validation.');const rows=approvers.map(u=>`<tr class="border-t"><td class="p-3"><input type="checkbox" class="workflow-approver-check h-4 w-4 accent-emerald-600" value="${u.id}" ${u.email?'':'disabled'} aria-label="Sélectionner ${esc(u.prenom)} ${esc(u.nom)}"></td><td class="p-3 font-bold">${esc(u.prenom)} ${esc(u.nom)}</td><td class="p-3">${esc(u.fonction_staff||u.role||'—')}</td><td class="p-3">${esc(u.service_staff||'—')}</td><td class="p-3">${esc(u.email||'E-mail absent du staff')}</td><td class="p-3">${u.email?'<span class="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-800">Prêt</span>':'<span class="rounded-full bg-amber-50 px-2 py-1 text-[10px] font-bold text-amber-800">E-mail requis</span>'}</td></tr>`).join('');openModal('Ajouter les collaborateurs approbateurs',`<p class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-950">Choisis dans le staff les collaborateurs qui valideront cette offre. Tous les collaborateurs sélectionnés doivent approuver avant la création de la commande.</p><label class="block text-xs font-bold text-slate-600">Rechercher un collaborateur<input id="workflowApproverSearch" type="search" placeholder="Nom, fonction ou service" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm" oninput="document.querySelectorAll('#workflowApproverRows tr').forEach(r=>r.hidden=!r.textContent.toLocaleLowerCase().includes(this.value.toLocaleLowerCase()))"></label><div class="overflow-x-auto rounded-2xl border border-slate-200"><table class="w-full min-w-[820px] text-left text-sm"><thead class="bg-slate-100 text-[10px] uppercase tracking-wide text-slate-600"><tr><th class="p-3"><input type="checkbox" aria-label="Sélectionner tous les collaborateurs visibles" onchange="document.querySelectorAll('#workflowApproverRows tr:not([hidden]) .workflow-approver-check').forEach(c=>c.checked=this.checked)"></th><th class="p-3">Collaborateur</th><th class="p-3">Fonction / rôle</th><th class="p-3">Service</th><th class="p-3">E-mail</th><th class="p-3">Accès</th></tr></thead><tbody id="workflowApproverRows">${rows}</tbody></table></div><p class="text-xs text-slate-500">La validation nécessite un compte utilisateur actif avec accès au module Gestion de stock.</p>`,async()=>{const ids=[...document.querySelectorAll('.workflow-approver-check:checked')].map(option=>Number(option.value));if(!ids.length)throw Error('Sélectionne au moins un collaborateur du staff.');await api(`/proformas/${id}/share`,{method:'POST',body:JSON.stringify({approver_ids:ids})})})};
  window.procWorkflowDecide=(requestId,approvalId)=>openModal('Décision sur l’offre fournisseur',`<p class="rounded-xl bg-sky-50 p-3 text-xs text-sky-900">Ta décision sera enregistrée dans l’historique de validation interne.</p><label class="block text-xs font-bold text-slate-600">Décision<select id="workflowDecision" required class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5"><option value="Validée">Valider l’offre</option><option value="Refusée">Refuser l’offre</option></select></label><label class="block text-xs font-bold text-slate-600">Commentaire<textarea id="workflowDecisionComment" rows="3" maxlength="1000" class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5" placeholder="Commentaire ou motif"></textarea></label>`,async()=>api(`/proformas/${requestId}/approvals/${approvalId}`,{method:'POST',body:JSON.stringify({decision:$('workflowDecision').value,commentaire:$('workflowDecisionComment').value})}));
  window.procOpenPayment=id=>{const invoice=(workflowData.invoices||[]).find(item=>Number(item.id)===Number(id));if(!invoice)return notify('Facture fournisseur introuvable.');openModal(`Paiement · ${esc(invoice.numero_facture)}`,`<div class="rounded-xl bg-amber-50 p-3 text-sm text-amber-950">Solde restant : <b>${money(invoice.solde)}</b></div><div class="grid gap-3 sm:grid-cols-2"><label class="text-xs font-bold text-slate-600">Date de paiement<input id="workflowPayDate" type="date" required value="${new Date().toISOString().slice(0,10)}" class="mt-1.5 w-full rounded-xl border px-3 py-2.5"></label><label class="text-xs font-bold text-slate-600">Montant payé (DA)<input id="workflowPayAmount" type="number" min="0.01" max="${Number(invoice.solde||0)}" step="0.01" required class="mt-1.5 w-full rounded-xl border px-3 py-2.5"></label></div><div class="grid gap-3 sm:grid-cols-2"><label class="text-xs font-bold text-slate-600">Mode de paiement<select id="workflowPayMode" required class="mt-1.5 w-full rounded-xl border px-3 py-2.5"><option>Chèque bancaire</option><option>Comptant</option><option>Virement bancaire</option></select></label><label class="text-xs font-bold text-slate-600">N° du chèque / référence du virement<input id="workflowPayReference" maxlength="160" class="mt-1.5 w-full rounded-xl border px-3 py-2.5" placeholder="Référence bancaire"></label></div><label class="block text-xs font-bold text-slate-600">Reçu ou justificatif (PDF, JPG, PNG · 12 Mo maximum)<input id="workflowPayReceipt" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" class="mt-2 block w-full rounded-xl border p-3 text-sm"></label><label class="block text-xs font-bold text-slate-600">Notes<textarea id="workflowPayNotes" rows="2" maxlength="1000" class="mt-1.5 w-full rounded-xl border px-3 py-2.5"></textarea></label>`,async()=>{const file=$('workflowPayReceipt').files?.[0];if(file&&file.size>12*1024*1024)throw Error('Le justificatif dépasse 12 Mo.');const payload={date_paiement:$('workflowPayDate').value,montant:$('workflowPayAmount').value,mode_paiement:$('workflowPayMode').value,reference:$('workflowPayReference').value,notes:$('workflowPayNotes').value};if(file)payload.justificatif=await fileData(file);await api(`/invoices/${id}/payments`,{method:'POST',body:JSON.stringify(payload)})})};
  const baseTab=window.procTab;window.procTab=name=>{baseTab(name);if(['proformas','payments','receipts'].includes(name))refreshWorkflow().catch(error=>notify(error.message))};

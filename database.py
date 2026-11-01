@@ -901,12 +901,16 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         request_id INT NOT NULL REFERENCES stock_proforma_requests(id) ON DELETE CASCADE,
         approver_id INT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
         assigned_by INT REFERENCES users(id) ON DELETE SET NULL,
+        email_destinataire TEXT NOT NULL DEFAULT '',
+        token_hash TEXT NOT NULL DEFAULT '',
         statut TEXT NOT NULL DEFAULT 'En attente' CHECK (statut IN ('En attente','Validée','Refusée')),
         commentaire TEXT NOT NULL DEFAULT '',
         assigned_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         decided_at TIMESTAMP WITH TIME ZONE,
         UNIQUE(request_id, approver_id)
     );
+    ALTER TABLE stock_proforma_approvals ADD COLUMN IF NOT EXISTS email_destinataire TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_proforma_approvals ADD COLUMN IF NOT EXISTS token_hash TEXT NOT NULL DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_stock_proforma_approvals_user
         ON stock_proforma_approvals(approver_id, statut, assigned_at DESC);
     CREATE TABLE IF NOT EXISTS stock_proforma_request_lines (
