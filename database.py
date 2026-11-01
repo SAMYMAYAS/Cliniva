@@ -744,6 +744,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         designation TEXT NOT NULL UNIQUE,
         adresse TEXT NOT NULL DEFAULT '',
         email TEXT NOT NULL DEFAULT '',
+        email_2 TEXT NOT NULL DEFAULT '',
+        email_3 TEXT NOT NULL DEFAULT '',
         telephone TEXT NOT NULL DEFAULT '',
         contact TEXT NOT NULL DEFAULT '',
         secteur_activite TEXT NOT NULL DEFAULT '',
@@ -752,11 +754,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stock_suppliers ADD COLUMN IF NOT EXISTS email_2 TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_suppliers ADD COLUMN IF NOT EXISTS email_3 TEXT NOT NULL DEFAULT '';
     CREATE TABLE IF NOT EXISTS stock_settings (
         id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
         jours_alerte_peremption INT NOT NULL DEFAULT 90 CHECK (jours_alerte_peremption BETWEEN 1 AND 3650),
+        email_alertes TEXT NOT NULL DEFAULT '',
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stock_settings ADD COLUMN IF NOT EXISTS email_alertes TEXT NOT NULL DEFAULT '';
     INSERT INTO stock_settings (id, jours_alerte_peremption) VALUES (1, 90)
         ON CONFLICT (id) DO NOTHING;
     INSERT INTO stock_categories (nom) VALUES
