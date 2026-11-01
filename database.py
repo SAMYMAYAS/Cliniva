@@ -825,6 +825,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         validated_at TIMESTAMP WITH TIME ZONE
     );
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS fournisseur TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS numero_bon_livraison TEXT NOT NULL DEFAULT '';
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS fournisseur_id INT REFERENCES stock_suppliers(id) ON DELETE SET NULL;
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS agent_reception TEXT NOT NULL DEFAULT '';
     ALTER TABLE stock_documents ADD COLUMN IF NOT EXISTS agent_preleveur TEXT NOT NULL DEFAULT '';
@@ -892,6 +893,22 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stock_proforma_requests ADD COLUMN IF NOT EXISTS offre_path TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_proforma_requests ADD COLUMN IF NOT EXISTS offre_nom TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_proforma_requests ADD COLUMN IF NOT EXISTS offre_mime TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS stock_proforma_approvals (
+        id SERIAL PRIMARY KEY,
+        request_id INT NOT NULL REFERENCES stock_proforma_requests(id) ON DELETE CASCADE,
+        approver_id INT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        assigned_by INT REFERENCES users(id) ON DELETE SET NULL,
+        statut TEXT NOT NULL DEFAULT 'En attente' CHECK (statut IN ('En attente','Validée','Refusée')),
+        commentaire TEXT NOT NULL DEFAULT '',
+        assigned_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        decided_at TIMESTAMP WITH TIME ZONE,
+        UNIQUE(request_id, approver_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_proforma_approvals_user
+        ON stock_proforma_approvals(approver_id, statut, assigned_at DESC);
     CREATE TABLE IF NOT EXISTS stock_proforma_request_lines (
         id SERIAL PRIMARY KEY,
         request_id INT NOT NULL REFERENCES stock_proforma_requests(id) ON DELETE CASCADE,
@@ -932,6 +949,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS default_livret_cover TEXT DEFAULT '';
         created_by INT REFERENCES users(id) ON DELETE SET NULL,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stock_supplier_payments ADD COLUMN IF NOT EXISTS justificatif_path TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_supplier_payments ADD COLUMN IF NOT EXISTS justificatif_nom TEXT NOT NULL DEFAULT '';
+    ALTER TABLE stock_supplier_payments ADD COLUMN IF NOT EXISTS justificatif_mime TEXT NOT NULL DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_stock_supplier_payments_invoice ON stock_supplier_payments(invoice_id, date_paiement DESC);
     CREATE TABLE IF NOT EXISTS stock_supplier_returns (
         id SERIAL PRIMARY KEY,
