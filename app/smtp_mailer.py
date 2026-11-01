@@ -33,11 +33,11 @@ def decrypt_smtp_password(ciphertext: str) -> str:
         raise RuntimeError("Le mot de passe SMTP ne peut pas être déchiffré sur ce compte Windows. Réenregistre-le depuis Cliniva.") from exc
 
 
-def get_smtp_configuration() -> dict:
-    """Priorité à la configuration Cliniva chiffrée, puis aux variables d'environnement."""
+def get_smtp_configuration(section: str = "notification_smtp") -> dict:
+    """Charge la configuration SMTP demandée; seul le SMTP général utilise les variables d'environnement."""
     try:
         from main import load_app_configuration
-        saved_raw = load_app_configuration().get("notification_smtp")
+        saved_raw = load_app_configuration().get(section)
         saved = saved_raw or {}
     except Exception:
         saved_raw = None
@@ -55,6 +55,8 @@ def get_smtp_configuration() -> dict:
             "starttls": bool(saved.get("starttls", True)),
             "ssl": bool(saved.get("ssl", False)),
         }
+    if section != "notification_smtp":
+        return {"enabled": False}
     host = os.getenv("CLINIVA_SMTP_HOST", "").strip()
     sender = os.getenv("CLINIVA_SMTP_FROM", os.getenv("CLINIVA_SMTP_USER", "")).strip()
     if host and sender:
@@ -67,6 +69,11 @@ def get_smtp_configuration() -> dict:
             "ssl": os.getenv("CLINIVA_SMTP_SSL", "").strip().lower() in {"1", "true", "oui"} or port == 465,
         }
     return {"enabled": False}
+
+
+def get_stock_smtp_configuration() -> dict:
+    """SMTP réservé aux courriels du stock, sans repli sur le compte général."""
+    return get_smtp_configuration("stock_smtp")
 
 
 def build_cliniva_email_html(title: str, subtitle: str, content_html: str, preheader: str = "") -> str:

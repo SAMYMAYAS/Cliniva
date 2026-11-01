@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from app.auth import get_current_user, track_action
-from app.smtp_mailer import build_cliniva_email_html, get_smtp_configuration, send_smtp_email
+from app.smtp_mailer import build_cliniva_email_html, get_stock_smtp_configuration, send_smtp_email
 from database import get_db_cursor
 
 procurement_router = APIRouter(prefix="/api/approvisionnement", tags=["Approvisionnement fournisseurs"])
@@ -471,7 +471,7 @@ async def proforma_request_email(proforma_id: int, request: Request):
                 LEFT JOIN stock_items i ON i.id=l.item_id WHERE l.request_id=%s ORDER BY l.id""", (proforma_id,))
         lines = [dict(line) for line in cur.fetchall()]
     try:
-        configuration = get_smtp_configuration()
+        configuration = get_stock_smtp_configuration()
         pdf = _build_proforma_pdf(proforma, lines)
         subject = f"Demande de proforma {proforma['numero']} · Cliniva"
         content = (f"Bonjour,\n\nVeuillez trouver en pièce jointe notre demande de proforma {proforma['numero']}.\n\n"

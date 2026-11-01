@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from app.auth import get_current_user, track_action
+from app.smtp_mailer import build_cliniva_email_html, encrypt_smtp_password, get_stock_smtp_configuration, send_smtp_email
 from database import DOCS_DIR, get_db_cursor
 
 stock_router = APIRouter(prefix="/api/gestion-stock", tags=["Gestion Stock"])
@@ -1031,6 +1032,94 @@ async def stock_settings_save(request: Request):
     return {"success": True, "jours_alerte_peremption": days, "email_alertes": stock_email}
 
 
+@stock_router.get("/smtp-settings")
+def stock_smtp_settings_get(request: Request):
+    user = get_current_user(request)
+    _require(user, "stock_manage")
+    from main import load_app_configuration
+    settings = load_app_configuration().get("stock_smtp") or {}
+    return {
+        "enabled": bool(settings.get("enabled", False)),
+        "host": str(settings.get("host") or ""),
+        "port": int(settings.get("port") or 587),
+        "user": str(settings.get("user") or ""),
+        "from": str(settings.get("from") or ""),
+        "starttls": bool(settings.get("starttls", True)),
+        "ssl": bool(settings.get("ssl", False)),
+        "password_configured": bool(settings.get("password_ciphertext")),
+    }
+
+
+@stock_router.post("/smtp-settings")
+async def stock_smtp_settings_save(request: Request):
+    user = get_current_user(request)
+    _require(user, "stock_manage")
+    data = await request.json()
+    host = str(data.get("host") or "").strip()
+    sender = str(data.get("from") or "").strip()
+    username = str(data.get("user") or "").strip()
+    try:
+        port = int(data.get("port") or 587)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Le port SMTP du stock doit être un nombre.") from exc
+    if not 1 <= port <= 65535:
+        raise HTTPException(status_code=400, detail="Le port SMTP doit être compris entre 1 et 65535.")
+    if sender and (len(sender) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", sender)):
+        raise HTTPException(status_code=400, detail="L’adresse d’expédition du stock est invalide.")
+    if data.get("enabled") and (not host or not sender):
+        raise HTTPException(status_code=400, detail="Renseigne le serveur SMTP et l’adresse d’expédition du stock avant de l’activer.")
+    from main import load_app_configuration, _persist_config_updates
+    current = load_app_configuration().get("stock_smtp") or {}
+    password = str(data.get("password") or "")
+    ciphertext = "" if data.get("clear_password") else str(current.get("password_ciphertext") or "")
+    if password:
+        try:
+            ciphertext = encrypt_smtp_password(password)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if data.get("enabled") and username and not ciphertext:
+        raise HTTPException(status_code=400, detail="Le mot de passe du compte SMTP stock est requis.")
+    saved = {
+        "enabled": bool(data.get("enabled")), "host": host, "port": port,
+        "user": username, "from": sender,
+        "starttls": bool(data.get("starttls", True)),
+        "ssl": bool(data.get("ssl", False)), "password_ciphertext": ciphertext,
+    }
+    if saved["ssl"]:
+        saved["starttls"] = False
+    _persist_config_updates({"stock_smtp": saved})
+    track_action(request, "STOCK_SMTP_SAVE", "Configuration SMTP dédiée à la gestion de stock mise à jour")
+    return {"success": True, "password_configured": bool(ciphertext)}
+
+
+@stock_router.post("/smtp-test")
+async def stock_smtp_test(request: Request):
+    user = get_current_user(request)
+    _require(user, "stock_manage")
+    data = await request.json()
+    recipient = str(data.get("email") or "").strip()
+    if len(recipient) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", recipient):
+        raise HTTPException(status_code=400, detail="Saisis une adresse de destination valide pour le test SMTP stock.")
+    configuration = get_stock_smtp_configuration()
+    if not configuration.get("enabled"):
+        raise HTTPException(status_code=400, detail="Enregistre et active d’abord le SMTP dédié au stock.")
+    try:
+        await asyncio.to_thread(
+            send_smtp_email, configuration, [recipient],
+            "Test du SMTP · Gestion de stock Cliniva",
+            "Bonjour,\n\nCe message confirme que le compte e-mail dédié à la gestion de stock fonctionne.\n",
+            build_cliniva_email_html(
+                "Test du SMTP stock", "Compte de messagerie dédié à la gestion de stock",
+                '<p>Ce message confirme que Cliniva peut envoyer des courriels avec le compte SMTP du stock.</p>',
+                "Le test du SMTP stock a réussi.",
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Échec du test SMTP stock : {exc}") from exc
+    track_action(request, "STOCK_SMTP_TEST", f"Courriel de test SMTP stock envoyé à {recipient}")
+    return {"success": True, "message": f"Courriel de test envoyé à {recipient}."}
+
+
 @stock_router.get("/orders/available")
 def stock_available_orders(request: Request):
     user = get_current_user(request)
@@ -1499,7 +1588,8 @@ function fmt(v){return Number(v||0).toLocaleString('fr-FR',{maximumFractionDigit
  window.stockSaveGoogleKey=async()=>{const key=$('stockSerpApiKey').value.trim();if(!key){toast('Colle d’abord la clé API SerpApi.',true);return;}try{await api('/photo-search/google-settings',{method:'POST',body:JSON.stringify({api_key:key})});$('stockSerpApiKey').value='';window.stockCloseGoogleConfig();toast('Google Images est configuré.');if(window.stockPhotoSearchSource==='google')window.stockRunInternetPhotoSearch();}catch(error){toast(error.message,true);}};
  window.stockClearGoogleKey=async()=>{if(!confirm('Effacer la clé SerpApi enregistrée sur ce serveur ?'))return;try{await api('/photo-search/google-settings',{method:'POST',body:JSON.stringify({clear:true})});$('stockSerpApiKey').value='';$('stockSerpApiStatus').textContent='Clé effacée.';toast('Clé Google effacée.');}catch(error){toast(error.message,true);}};
  const field=(label,id,type='text',value='',extra='')=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<input id="${id}" type="${type}" value="${esc(value)}" ${extra} class="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium outline-none focus:border-brand-neon dark:border-white/10 dark:bg-black/30 dark:text-white"></label>`;
- window.stockOpenAlertSettings=(returnToKpi=false)=>{const days=Number(data.parametres?.jours_alerte_peremption||90),email=data.parametres?.email_alertes||'';stockOpenModal('Paramètres des alertes',`<div class="space-y-4"><div class="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-xs leading-relaxed text-sky-900 dark:border-sky-400/20 dark:bg-sky-400/10 dark:text-sky-100"><b class="mb-1 block">Seuil de stock</b>Le seuil « Sous le seuil » se règle pour chaque article dans sa fiche, selon son unité de stock.</div><div class="rounded-2xl border border-slate-200 p-4 dark:border-white/10">${field('Alerter lorsque la péremption approche (jours)','stockExpiryWarningDays','number',days,'min="1" max="3650" step="1" required')}<p class="mt-2 text-[11px] text-slate-500">La valeur choisie pilote l’indicateur et la liste des lots bientôt périmés.</p></div>${field('E-mail dédié aux alertes de stock','stockAlertEmail','email',email,'maxlength="254"')}<p class="text-[11px] text-slate-500">Adresse réservée aux notifications de la gestion de stock.</p></div>`,async()=>{const days=Number($('stockExpiryWarningDays').value);if(!Number.isInteger(days)||days<1||days>3650){toast('Saisis une période comprise entre 1 et 3650 jours.',true);return;}await api('/settings',{method:'POST',body:JSON.stringify({jours_alerte_peremption:days,email_alertes:$('stockAlertEmail').value.trim()})});stockCloseModal();toast('Paramètres des alertes enregistrés.');await refresh();if(returnToKpi)window.stockShowKpi('expiring');});};
+ window.stockOpenAlertSettings=async(returnToKpi=false)=>{try{const days=Number(data.parametres?.jours_alerte_peremption||90),email=data.parametres?.email_alertes||'',smtp=await api('/smtp-settings'),checkbox=(label,id,checked)=>`<label class="inline-flex items-center gap-2 text-xs font-semibold text-slate-700 dark:text-slate-200"><input id="${id}" type="checkbox" ${checked?'checked':''} class="h-4 w-4 accent-emerald-600">${label}</label>`;stockOpenModal('Paramètres des alertes et du SMTP stock',`<div class="max-h-[72vh] space-y-5 overflow-y-auto pr-1"><div class="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-xs leading-relaxed text-sky-900 dark:border-sky-400/20 dark:bg-sky-400/10 dark:text-sky-100"><b class="mb-1 block">Seuil de stock</b>Le seuil « Sous le seuil » se règle pour chaque article dans sa fiche, selon son unité de stock.</div><div class="rounded-2xl border border-slate-200 p-4 dark:border-white/10">${field('Alerter lorsque la péremption approche (jours)','stockExpiryWarningDays','number',days,'min="1" max="3650" step="1" required')}<p class="mt-2 text-[11px] text-slate-500">La valeur choisie pilote l’indicateur et la liste des lots bientôt périmés.</p></div><div class="rounded-2xl border border-amber-200 bg-amber-50/60 p-4 dark:border-amber-400/20 dark:bg-amber-400/[.05]"><h3 class="mb-1 text-sm font-extrabold text-amber-950 dark:text-amber-100"><i class="ph-bold ph-envelope-simple mr-2"></i>Adresse destinataire des alertes</h3><p class="mb-3 text-[11px] text-slate-600 dark:text-slate-300">Boîte qui recevra les notifications de stock.</p>${field('E-mail dédié aux alertes de stock','stockAlertEmail','email',email,'maxlength="254"')}</div><div class="rounded-2xl border border-emerald-200 bg-white p-4 dark:border-emerald-400/20 dark:bg-[#121c15]"><div class="mb-4"><h3 class="text-sm font-extrabold text-slate-900 dark:text-white"><i class="ph-bold ph-paper-plane-tilt mr-2 text-emerald-600"></i>Compte SMTP réservé au stock</h3><p class="mt-1 text-[11px] text-slate-500">Indépendant du SMTP général des notifications. Les demandes de proforma utiliseront ce compte.</p></div><div class="mb-4 rounded-xl border border-slate-100 bg-slate-50 p-3 dark:border-white/10 dark:bg-black/20">${checkbox('Activer l’envoi SMTP stock','stockSmtpEnabled',smtp.enabled)}</div><div class="grid gap-3 sm:grid-cols-2">${field('Serveur SMTP','stockSmtpHost','text',smtp.host,'placeholder="smtp.exemple.com"')}${field('Port','stockSmtpPort','number',smtp.port||587,'min="1" max="65535"')}${field('Adresse d’expédition','stockSmtpFrom','email',smtp.from,'placeholder="stock@exemple.com"')}${field('Identifiant SMTP','stockSmtpUser','text',smtp.user,'autocomplete="off"')}${field('Mot de passe SMTP','stockSmtpPassword','password','','placeholder="Laisser vide pour conserver le mot de passe"')}</div><div class="mt-3 flex flex-wrap gap-4">${checkbox('STARTTLS (587)','stockSmtpStarttls',smtp.starttls!==false)}${checkbox('SSL (465)','stockSmtpSsl',smtp.ssl)}${checkbox('Effacer le mot de passe enregistré','stockSmtpClearPassword',false)}</div>${smtp.password_configured?'<p class="mt-2 text-[10px] text-emerald-700 dark:text-emerald-300"><i class="ph-bold ph-lock-key mr-1"></i>Mot de passe enregistré et protégé par Windows.</p>':''}<div class="mt-4 flex flex-wrap items-end gap-2 border-t border-slate-100 pt-3 dark:border-white/10"><label class="min-w-[220px] flex-1 text-[11px] font-bold text-slate-600 dark:text-slate-300">Adresse de destination pour le test<input id="stockSmtpTestEmail" type="email" value="${esc(email)}" placeholder="vous@exemple.com" class="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm dark:border-white/10 dark:bg-black/30 dark:text-white"></label><button type="button" onclick="stockTestSmtp()" class="inline-flex items-center gap-2 rounded-xl bg-sky-600 px-4 py-2.5 text-xs font-extrabold text-white hover:bg-sky-700"><i class="ph-bold ph-paper-plane-right"></i>Tester le SMTP stock</button></div></div></div>`,async()=>{const period=Number($('stockExpiryWarningDays').value);if(!Number.isInteger(period)||period<1||period>3650){toast('Saisis une période comprise entre 1 et 3650 jours.',true);return;}const smtpPayload={enabled:$('stockSmtpEnabled').checked,host:$('stockSmtpHost').value.trim(),port:$('stockSmtpPort').value,from:$('stockSmtpFrom').value.trim(),user:$('stockSmtpUser').value.trim(),password:$('stockSmtpPassword').value,starttls:$('stockSmtpStarttls').checked,ssl:$('stockSmtpSsl').checked,clear_password:$('stockSmtpClearPassword').checked};await api('/smtp-settings',{method:'POST',body:JSON.stringify(smtpPayload)});await api('/settings',{method:'POST',body:JSON.stringify({jours_alerte_peremption:period,email_alertes:$('stockAlertEmail').value.trim()})});stockCloseModal();toast('Paramètres du stock et compte SMTP enregistrés.');await refresh();if(returnToKpi)window.stockShowKpi('expiring');});}catch(error){toast(error.message||'Impossible de charger le SMTP stock.',true);}};
+ window.stockTestSmtp=async()=>{const recipient=$('stockSmtpTestEmail')?.value.trim();if(!recipient){toast('Indique une adresse de destination pour le test SMTP.',true);return;}try{const result=await api('/smtp-test',{method:'POST',body:JSON.stringify({email:recipient})});toast(result.message||'Courriel de test envoyé.');}catch(error){toast(error.message||'Échec du test SMTP stock.',true);}};
  const catalogField=(label,id,values,selected,kind)=>`<label class="block text-xs font-bold text-slate-600 dark:text-slate-300">${label}<div class="mt-2 flex gap-2"><select id="${id}" class="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium dark:border-white/10 dark:bg-black/30 dark:text-white">${values.map(v=>`<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(v)}</option>`).join('')}</select>${canManage?`<button type="button" onclick="stockManageCatalog('${kind}')" class="shrink-0 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-200" title="Gérer ${label.toLowerCase()}"><i class="ph-bold ph-sliders-horizontal mr-1"></i>Gérer</button>`:''}</div></label>`;
  const photoField=(path='')=>`<section class="sm:col-span-2 overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white shadow-sm dark:border-white/10 dark:from-white/[.04] dark:to-[#121c15]"><div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 px-4 py-3.5 dark:border-white/10"><div class="flex items-center gap-3"><span class="grid h-10 w-10 place-items-center rounded-xl bg-emerald-100 text-emerald-800 dark:bg-emerald-400/10 dark:text-emerald-300"><i class="ph-bold ph-image-square text-xl"></i></span><div><h4 class="text-sm font-extrabold text-slate-800 dark:text-white">Photo de l’article</h4><p class="mt-0.5 text-[11px] text-slate-500">Une image claire aide à reconnaître rapidement le produit.</p></div></div><span class="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">Facultatif</span></div><div id="stockPhotoDropzone" class="group relative m-4 grid min-h-48 place-items-center overflow-hidden rounded-2xl border-2 border-dashed border-slate-300 bg-white transition hover:border-emerald-400 hover:bg-emerald-50/40 dark:border-white/15 dark:bg-black/20 dark:hover:border-emerald-400/60 dark:hover:bg-emerald-400/[.04]"><div id="siPhotoPlaceholder" class="${path?'hidden':''} pointer-events-none flex flex-col items-center px-5 py-8 text-center"><span class="grid h-14 w-14 place-items-center rounded-2xl bg-emerald-50 text-emerald-700 shadow-sm transition group-hover:scale-105 dark:bg-emerald-400/10 dark:text-emerald-300"><i class="ph-bold ph-upload-simple text-2xl"></i></span><b class="mt-3 text-sm font-bold text-slate-700 dark:text-slate-200">Dépose la photo ici</b><span class="mt-1 text-xs text-slate-400">ou choisis une image depuis ton ordinateur</span></div><img id="siPhotoPreview" src="${path?`/api/gestion-stock/items/${path}/photo`:''}" class="${path?'':'hidden'} pointer-events-none max-h-64 w-full object-contain p-3" alt="Aperçu de la photo de l’article"><input id="siPhoto" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" onchange="stockPreviewPhoto(event)" class="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0" aria-label="Choisir ou déposer une photo de l’article"><span class="pointer-events-none absolute bottom-3 right-3 z-0 rounded-lg bg-slate-900/75 px-2.5 py-1.5 text-[10px] font-bold text-white opacity-0 transition group-hover:opacity-100"><i class="ph-bold ph-arrows-out-simple mr-1"></i>Cliquer pour remplacer</span></div><div class="flex flex-wrap items-center justify-between gap-3 px-4 pb-4"><div class="flex min-w-0 items-center gap-2 text-[11px] text-slate-500"><i class="ph-bold ph-info text-emerald-600"></i><span>JPG, PNG ou WebP · 8 Mo maximum</span><span id="siPhotoFileName" class="hidden max-w-48 truncate rounded-full bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-800 dark:bg-emerald-400/10 dark:text-emerald-200"></span></div>${path?'<label class="inline-flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 dark:hover:bg-rose-400/10"><input id="siRemovePhoto" type="checkbox" class="h-4 w-4 rounded accent-rose-600">Retirer cette photo</label>':''}</div></section>`;
  function stockItemFormData(id=null){const d=new FormData();if(id)d.append('id',id);['designation','reference','categorie','unite','seuil_alerte','notes'].forEach(k=>{const fieldId={designation:'siName',reference:'siReference',categorie:'siCategory',unite:'siUnit',seuil_alerte:'siThreshold',notes:'siNotes'}[k];d.append(k,$(fieldId).value);});d.append('suivi_peremption',$('siExpiry').checked?'true':'false');d.append('supprimer_photo',$('siRemovePhoto')?.checked?'true':'false');d.append('photo_credit',$('siPhotoCredit')?.value||'');d.append('photo_license',$('siPhotoLicense')?.value||'');d.append('photo_source_url',$('siPhotoSource')?.value||'');const file=$('siPhoto').files?.[0];if(file)d.append('photo',file,file.name);return d;}
