@@ -61,43 +61,63 @@ def _value(dataset, tag, default=None):
     return element.value if hasattr(element, "value") else (element if element is not None else default)
 
 
+def _consensus_print_total(manifest: dict[str, Any], incoming_ocr: dict[str, Any]) -> int | None:
+    """Écarte les faux totaux OCR en retenant la valeur la plus répétée du job."""
+    totals: list[int] = []
+    for entry in manifest.get("images", []):
+        if not isinstance(entry, dict):
+            continue
+        data = entry.get("ocr") if isinstance(entry.get("ocr"), dict) else {}
+        value = data.get("total_images") or entry.get("total_images")
+        if str(value or "").isdigit() and 0 < int(value) <= 999:
+            totals.append(int(value))
+    value = str(incoming_ocr.get("total_images") or "").strip()
+    if value.isdigit() and 0 < int(value) <= 999:
+        totals.append(int(value))
+    if not totals:
+        return None
+    counts = {value: totals.count(value) for value in set(totals)}
+    # En cas d’égalité, retenir le plus petit total plausible : les faux
+    # positifs OCR tendent à ajouter un chiffre venant des annotations voisines.
+    return min(counts, key=lambda number: (-counts[number], number))
+
+
 def _extract_print_image_numbers(frame) -> tuple[str, str]:
     """Lit le compteur centré sous le bandeau (ex. 1 / 5) comme dans pri.py."""
     import cv2
     import pytesseract
 
     height, width = frame.shape[:2]
-    crops = (
-        frame[int(height * .055):int(height * .090), int(width * .40):int(width * .60)],
-        frame[int(height * .050):int(height * .095), int(width * .35):int(width * .65)],
-        frame[int(height * .055):int(height * .095), :],
-    )
-    for crop in crops:
-        if crop.size == 0:
-            continue
-        resized = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 else resized
-        _, threshold = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
-        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        padded = [cv2.copyMakeBorder(item, 35, 35, 35, 35,
-                                     cv2.BORDER_CONSTANT, value=255)
-                  for item in (threshold, otsu, gray)]
-        for processed in padded:
-            for psm in (7, 8, 6, 11, 3):
-                raw = pytesseract.image_to_string(
-                    processed, lang="eng",
-                    config=f"--psm {psm} -c tessedit_char_whitelist=0123456789/\\|-lISsO "
-                ).strip()
-                clean = (raw.replace("l", "1").replace("I", "1").replace("|", "/")
-                         .replace("\\", "/").replace("S", "5").replace("s", "5")
-                         .replace("O", "0").replace("o", "0"))
-                found = re.search(r"\b(\d{1,2})\s*[/\-]\s*(\d{1,2})\b", clean)
-                if not found:
-                    found = re.search(r"\b(\d{1,2})\s+(\d{1,2})\b", clean)
-                if found:
-                    current, total = map(int, found.groups())
-                    if 0 < current <= total <= 999:
-                        return str(current), str(total)
+    # Ne lit que le compteur situé au centre sous le bandeau. Les anciens
+    # cadrages larges incluaient aussi les chiffres des annotations médicales
+    # et pouvaient transformer « 4 / 4 » en « 4 / 7 ».
+    crop = frame[int(height * .057):int(height * .088),
+                 int(width * .43):int(width * .57)]
+    if crop.size == 0:
+        return "", ""
+    resized = cv2.resize(crop, None, fx=8, fy=8, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 else resized
+    normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    _, fixed = cv2.threshold(normalized, 200, 255, cv2.THRESH_BINARY_INV)
+    _, otsu = cv2.threshold(normalized, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    for processed in (fixed, otsu):
+        padded = cv2.copyMakeBorder(processed, 30, 30, 40, 40,
+                                    cv2.BORDER_CONSTANT, value=255)
+        for psm in (7, 8):
+            raw = pytesseract.image_to_string(
+                padded, lang="eng",
+                config=f"--oem 1 --psm {psm} -c tessedit_char_whitelist=0123456789/|-lISsO"
+            ).strip()
+            clean = (raw.replace("l", "1").replace("I", "1").replace("|", "/")
+                     .replace("\\", "/").replace("S", "5").replace("s", "5")
+                     .replace("O", "0").replace("o", "0"))
+            found = re.search(r"(?<!\d)(\d{1,3})\s*[/\-]\s*(\d{1,3})(?!\d)", clean)
+            if not found:
+                found = re.search(r"(?<!\d)(\d{1,3})\s+(\d{1,3})(?!\d)", clean)
+            if found:
+                current, total = map(int, found.groups())
+                if 0 < current <= total <= 999:
+                    return str(current), str(total)
     return "", ""
 
 
@@ -419,20 +439,17 @@ class DicomPrintServer:
                         "center": center, "order_number": accession_number,
                         "passage_number": passage_number, "total_images": total_count,
                         "images": []}
-        elif total_count and total_count != manifest.get("total_images"):
-            manifest["total_images"] = total_count
-            new_folder = date_folder / _safe_folder_label(f"{patient_name} - {total_count} images")
-            if folder != new_folder and not new_folder.exists():
-                folder.rename(new_folder)
-                folder = new_folder
-
         manifest["patient_name"] = patient_name or manifest.get("patient_name") or "Patient inconnu"
         manifest["patient_id"] = patient_id or manifest.get("patient_id", "")
         manifest["exam_date"] = exam_date or manifest.get("exam_date", "")
         manifest["order_number"] = accession_number or manifest.get("order_number", "")
         manifest["center"] = center or manifest.get("center", "")
         manifest["passage_number"] = passage_number or manifest.get("passage_number", "")
-        manifest["total_images"] = total_count or manifest.get("total_images")
+        # Le total OCR d’une page peut être confondu avec un chiffre voisin
+        # (par ex. 4/4 lu 4/7). Le total du dossier est donc décidé par vote
+        # entre les compteurs lus sur toutes ses pages, pas par la dernière page.
+        consensus_total = _consensus_print_total(manifest, ocr)
+        manifest["total_images"] = consensus_total or manifest.get("total_images")
         if any(str(ocr.get(key) or "").strip() for key in (
                 "patient_name", "center", "order_number", "passage_number", "total_images")):
             manifest["ocr_version"] = 3
@@ -454,9 +471,21 @@ class DicomPrintServer:
         image.save(target, format="PNG")
 
         image_entry = {"name": target.name, "current_image": current_index,
-                       "total_images": manifest.get("total_images"),
+                       "total_images": total_count or manifest.get("total_images"),
                        "received_at": now.strftime("%Y-%m-%d %H:%M:%S"), "ocr": ocr}
         manifest.setdefault("images", []).append(image_entry)
+        consensus_total = _consensus_print_total(manifest, {})
+        if consensus_total:
+            manifest["total_images"] = consensus_total
+            for entry in manifest["images"]:
+                if isinstance(entry, dict):
+                    entry["total_images"] = consensus_total
+            corrected_folder = folder.parent / _safe_folder_label(
+                f"{manifest['patient_name']} - {consensus_total} images")
+            if corrected_folder != folder and not corrected_folder.exists():
+                folder.rename(corrected_folder)
+                folder = corrected_folder
+                target = folder / target.name
         manifest["received_images"] = len(list(folder.glob("Image_*.png")))
         manifest["updated_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
         (folder / "cliniva_print.json").write_text(
