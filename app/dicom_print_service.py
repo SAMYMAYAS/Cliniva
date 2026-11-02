@@ -14,8 +14,6 @@ import shutil
 import threading
 import base64
 import json
-import time
-from uuid import uuid4
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -189,10 +187,6 @@ class DicomPrintServer:
         self._config = {"ae_title": "MY_PRINT_SCP", "host": "0.0.0.0", "port": 104,
                         "storage_dir": str(Path.home() / "DicomPrints")}
         self._last_error = ""
-        self._print_context_lock = threading.RLock()
-        self._association_print_jobs: dict[int, str] = {}
-        self._film_session_jobs: dict[str, tuple[str, float]] = {}
-        self._image_box_jobs: dict[str, tuple[str, float]] = {}
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -237,40 +231,6 @@ class DicomPrintServer:
             from pydicom.dataset import Dataset
             from pydicom.sequence import Sequence
 
-            # Les métadonnées de session DICOM Print identifient un job même
-            # lorsque la station ouvre plusieurs associations pour ses pages.
-            with self._print_context_lock:
-                self._association_print_jobs.clear()
-                self._film_session_jobs.clear()
-                self._image_box_jobs.clear()
-
-            def _association_key(event) -> int:
-                return id(event.assoc)
-
-            def _purge_print_contexts(now: float) -> None:
-                cutoff = now - 8 * 60 * 60
-                for registry in (self._film_session_jobs, self._image_box_jobs):
-                    for uid, (_job_id, touched) in list(registry.items()):
-                        if touched < cutoff:
-                            registry.pop(uid, None)
-
-            def _print_job_for_image(event) -> str:
-                request = event.request
-                image_box_uid = str(getattr(request, "AffectedSOPInstanceUID", "") or "")
-                now = time.monotonic()
-                with self._print_context_lock:
-                    _purge_print_contexts(now)
-                    mapped = self._image_box_jobs.get(image_box_uid) if image_box_uid else None
-                    job_id = mapped[0] if mapped else self._association_print_jobs.get(_association_key(event))
-                    if not job_id:
-                        # Sans Film Session/Film Box exploitable, isole au moins
-                        # toutes les images de cette association dans un job.
-                        job_id = uuid4().hex
-                        self._association_print_jobs[_association_key(event)] = job_id
-                    if image_box_uid and mapped:
-                        self._image_box_jobs[image_box_uid] = (job_id, now)
-                    return job_id
-
             def echo(_event):
                 logger.info("C-ECHO reçu")
                 return 0x0000
@@ -294,34 +254,6 @@ class DicomPrintServer:
                     instance_uid = generate_uid()
                 response.SOPInstanceUID = instance_uid
                 response.AffectedSOPInstanceUID = instance_uid
-                request_class = getattr(request, "AffectedSOPClassUID", None)
-                association_id = _association_key(event)
-                now = time.monotonic()
-                with self._print_context_lock:
-                    _purge_print_contexts(now)
-                    if request_class == BasicFilmSession:
-                        # Une nouvelle instance Film Session démarre un job
-                        # distinct, même si patient/date/accession sont identiques.
-                        job_id = uuid4().hex
-                        self._film_session_jobs[str(instance_uid)] = (job_id, now)
-                        self._association_print_jobs[association_id] = job_id
-                    elif request_class == BasicFilmBox:
-                        film_session_sequence = (_value(attributes, (0x2010, 0x0500), None)
-                                                 or getattr(attributes, "ReferencedFilmSessionSequence", None))
-                        film_session_uid = ""
-                        if film_session_sequence:
-                            try:
-                                film_session_uid = str(getattr(film_session_sequence[0],
-                                                               "ReferencedSOPInstanceUID", "") or "")
-                            except (IndexError, TypeError):
-                                film_session_uid = ""
-                        session = self._film_session_jobs.get(film_session_uid) if film_session_uid else None
-                        job_id = (session[0] if session else
-                                  self._association_print_jobs.get(association_id) or uuid4().hex)
-                        self._association_print_jobs[association_id] = job_id
-                    else:
-                        job_id = self._association_print_jobs.get(association_id) or uuid4().hex
-                        self._association_print_jobs[association_id] = job_id
                 if request.AffectedSOPClassUID == BasicFilmBox:
                     color = event.context.abstract_syntax == BasicColorPrintManagementMeta
                     image_box_class = BasicColorImageBox if color else BasicGrayscaleImageBox
@@ -330,8 +262,6 @@ class DicomPrintServer:
                     from pydicom.uid import generate_uid
                     reference.ReferencedSOPInstanceUID = generate_uid()
                     response.ReferencedImageBoxSequence = Sequence([reference])
-                    with self._print_context_lock:
-                        self._image_box_jobs[str(reference.ReferencedSOPInstanceUID)] = (job_id, now)
                 return 0x0000, response
 
             def set_image(event):
@@ -342,13 +272,8 @@ class DicomPrintServer:
                     return 0x0110, Dataset()
                 pixels = sequence.value[0]
                 try:
-                    # Sérialise l’association session → dossier et l’écriture
-                    # du manifeste pour éviter les collisions entre N-SET simultanés.
-                    with self._print_context_lock:
-                        print_job_id = _print_job_for_image(event)
-                        saved_path = self._save_print_image(pixels, attributes, storage_dir,
-                                                            print_job_id=print_job_id)
-                    logger.info("Image DICOM Print reçue (job %s) : %s", print_job_id, saved_path)
+                    saved_path = self._save_print_image(pixels, attributes, storage_dir)
+                    logger.info("Image DICOM Print reçue : %s", saved_path)
                     return 0x0000, Dataset()
                 except Exception:
                     logger.exception("Échec de sauvegarde de l’image reçue par DICOM Print")
@@ -363,13 +288,6 @@ class DicomPrintServer:
                 logger.info("N-DELETE reçu : ressources du film libérées")
                 return 0x0000
 
-            def association_released(event):
-                with self._print_context_lock:
-                    self._association_print_jobs.pop(_association_key(event), None)
-
-            def association_aborted(event):
-                association_released(event)
-
             ae = AE(ae_title=ae_title.encode("ascii"))
             for context in (Verification, BasicGrayscalePrintManagementMeta,
                             BasicColorPrintManagementMeta, BasicFilmSession,
@@ -378,11 +296,6 @@ class DicomPrintServer:
             handlers = [(evt.EVT_C_ECHO, echo), (evt.EVT_N_GET, printer_status),
                         (evt.EVT_N_CREATE, create), (evt.EVT_N_SET, set_image),
                         (evt.EVT_N_ACTION, action), (evt.EVT_N_DELETE, delete)]
-            for event_name, handler in (("EVT_RELEASED", association_released),
-                                        ("EVT_ABORTED", association_aborted)):
-                event_type = getattr(evt, event_name, None)
-                if event_type is not None:
-                    handlers.append((event_type, handler))
             try:
                 self._server = ae.start_server((host, port), block=False, evt_handlers=handlers)
             except Exception as exc:
@@ -393,8 +306,7 @@ class DicomPrintServer:
             return self.status()
 
     @staticmethod
-    def _save_print_image(pixel_dataset, attributes, storage_dir: Path,
-                          print_job_id: str = "") -> Path:
+    def _save_print_image(pixel_dataset, attributes, storage_dir: Path) -> Path:
         import numpy as np
         from PIL import Image
 
@@ -462,8 +374,8 @@ class DicomPrintServer:
         exam_date = _normalize_exam_date(exam_date_raw)
         date_folder = storage_dir / _safe_folder_label(exam_date, now.strftime("%Y-%m-%d"))
         date_folder.mkdir(parents=True, exist_ok=True)
-        print_job_id = str(print_job_id or uuid4().hex)
-        group_key = print_job_id
+        identity_value = accession_number or patient_id or patient_name
+        group_key = "|".join((exam_date, identity_value.casefold(), patient_id.casefold()))
         total_text = str(ocr.get("total_images") or "").strip()
         total_count = int(total_text) if total_text.isdigit() and int(total_text) > 0 else None
 
@@ -477,7 +389,16 @@ class DicomPrintServer:
                 candidate_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if candidate_manifest.get("print_job_id") == print_job_id:
+            same_patient = (
+                (patient_id and str(candidate_manifest.get("patient_id") or "").casefold() == patient_id.casefold())
+                or (patient_name.casefold() != "patient inconnu"
+                    and str(candidate_manifest.get("patient_name") or "").casefold() == patient_name.casefold())
+            )
+            same_order_or_missing = (
+                str(candidate_manifest.get("order_number") or "").casefold() == accession_number.casefold()
+                or not accession_number or not candidate_manifest.get("order_number")
+            )
+            if candidate_manifest.get("group_key") == group_key or (same_patient and same_order_or_missing):
                 folder, manifest = candidate, candidate_manifest
                 break
 
@@ -493,8 +414,7 @@ class DicomPrintServer:
                 folder = date_folder / _safe_folder_label(f"{label} ({duplicate_number})")
                 duplicate_number += 1
             folder.mkdir(parents=True, exist_ok=True)
-            manifest = {"group_key": group_key, "print_job_id": print_job_id,
-                        "patient_name": patient_name,
+            manifest = {"group_key": group_key, "patient_name": patient_name,
                         "patient_id": patient_id, "exam_date": exam_date,
                         "center": center, "order_number": accession_number,
                         "passage_number": passage_number, "total_images": total_count,
@@ -507,7 +427,6 @@ class DicomPrintServer:
                 folder = new_folder
 
         manifest["patient_name"] = patient_name or manifest.get("patient_name") or "Patient inconnu"
-        manifest["print_job_id"] = print_job_id
         manifest["patient_id"] = patient_id or manifest.get("patient_id", "")
         manifest["exam_date"] = exam_date or manifest.get("exam_date", "")
         manifest["order_number"] = accession_number or manifest.get("order_number", "")
@@ -549,7 +468,6 @@ class DicomPrintServer:
                  f"Date de l’examen : {manifest.get('exam_date') or 'Non reconnue'}",
                  f"Numéro d’ordre / Accession Number : {manifest.get('order_number') or 'Non reconnu'}",
                  f"Passage : {manifest.get('passage_number') or 'Non reconnu'}",
-                 f"Session d’impression : {manifest.get('print_job_id') or 'Non reconnue'}",
                  f"Images reçues : {manifest['received_images']}/{manifest.get('total_images') or '?'}",
                  f"Dernière page reconnue : {current_index}/{manifest.get('total_images') or '?'}",
                  f"Dernière réception : {manifest['updated_at']}"]
@@ -667,7 +585,6 @@ class DicomPrintServer:
                         f"Date de l’examen : {manifest.get('exam_date') or 'Non reconnue'}",
                         f"Numéro d’ordre / Accession Number : {manifest.get('order_number') or 'Non reconnu'}",
                         f"Passage : {manifest.get('passage_number') or 'Non reconnu'}",
-                        f"Session d’impression : {manifest.get('print_job_id') or 'Non reconnue'}",
                         f"Images reçues : {manifest['received_images']}/{manifest.get('total_images') or '?'}",
                     ]
                     (folder / "Informations_examen.txt").write_text(
@@ -689,7 +606,6 @@ class DicomPrintServer:
                 "exam_date": manifest.get("exam_date") or folder.parent.name,
                 "order_number": manifest.get("order_number") or "",
                 "passage_number": manifest.get("passage_number") or "",
-                "print_job_id": manifest.get("print_job_id") or "",
                 "total_images": manifest.get("total_images"),
                 "received_images": len(images),
                 "modified": datetime.fromtimestamp(modified).strftime("%d/%m/%Y %H:%M:%S"),
