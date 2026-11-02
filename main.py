@@ -481,6 +481,14 @@ class ClientDicomServicesBridge:
             logger.exception("Impossible de lire l’état du second serveur DICOM Print")
             return {"running": False, "config": {}, "last_error": "État indisponible"}
 
+    def dicom_print_a3_jobs(self, limit: int = 100) -> list[Dict[str, Any]]:
+        try:
+            with self._lock:
+                return self._a3_service().recent_print_jobs(limit)
+        except Exception:
+            logger.exception("Impossible de lire l’historique d’impression DICOM A3")
+            return []
+
     def dicom_print_a3_printers(self) -> list[Dict[str, Any]]:
         try:
             with self._lock:

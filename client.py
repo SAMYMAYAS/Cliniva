@@ -346,6 +346,14 @@ class ClientHardwareBridge:
             state = self._dicom_print_a3_service().status()
             return {**state, "machine": socket.gethostname()}
 
+    def dicom_print_a3_jobs(self, limit: int = 100) -> list[dict]:
+        try:
+            with self._dicom_print_lock:
+                return self._dicom_print_a3_service().recent_print_jobs(limit)
+        except Exception:
+            logger.exception("Impossible de lire l’historique d’impression DICOM A3")
+            return []
+
     def dicom_print_a3_printers(self) -> list[dict]:
         try:
             with self._dicom_print_lock:

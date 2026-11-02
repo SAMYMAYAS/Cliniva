@@ -14,6 +14,7 @@ import shutil
 import threading
 import base64
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,132 @@ class DicomPrintServer:
             return {"running": self._server is not None, "config": dict(self._config),
                     "last_error": self._last_error}
 
+    def recent_print_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Historique local des travaux reçus et transmis au spouleur Windows."""
+        with self._lock:
+            root = Path(self._config["storage_dir"]).expanduser()
+        history_path = root / "cliniva_a3_print_jobs.json"
+        try:
+            jobs = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
+            if not isinstance(jobs, list):
+                jobs = []
+        except (OSError, ValueError):
+            logger.exception("Historique des impressions A3 illisible : %s", history_path)
+            jobs = []
+
+        # Tant qu’un travail est visible dans la file Windows, refléter son état
+        # courant. Sa disparition après soumission signifie seulement que le
+        # spouleur a terminé ou retiré le travail, pas une preuve de sortie papier.
+        pending = [job for job in jobs if job.get("spooler_job_id") and
+                   job.get("print_state") in {"En file d’attente", "En cours d’impression"}]
+        if pending and os.name == "nt":
+            by_printer: dict[str, list[dict[str, Any]]] = {}
+            for job in pending:
+                by_printer.setdefault(str(job.get("printer") or ""), []).append(job)
+            changed = False
+            try:
+                import win32print
+                for printer_name, printer_jobs in by_printer.items():
+                    if not printer_name:
+                        continue
+                    handle = win32print.OpenPrinter(printer_name)
+                    try:
+                        queue = win32print.EnumJobs(handle, 0, 999, 2)
+                    finally:
+                        win32print.ClosePrinter(handle)
+                    queue_by_id = {int(item.get("JobId") or 0): item for item in queue}
+                    for job in printer_jobs:
+                        queue_item = queue_by_id.get(int(job["spooler_job_id"]))
+                        old_state = job.get("print_state")
+                        if queue_item:
+                            bits = int(queue_item.get("Status") or 0)
+                            if bits & getattr(win32print, "JOB_STATUS_PRINTING", 0x10):
+                                new_state = "En cours d’impression"
+                            elif bits & (getattr(win32print, "JOB_STATUS_ERROR", 0x2) |
+                                         getattr(win32print, "JOB_STATUS_OFFLINE", 0x20) |
+                                         getattr(win32print, "JOB_STATUS_PAPEROUT", 0x40)):
+                                new_state = "Erreur spouleur"
+                            elif bits & getattr(win32print, "JOB_STATUS_PAUSED", 0x1):
+                                new_state = "En pause"
+                            else:
+                                new_state = "En file d’attente"
+                        else:
+                            new_state = "Terminé dans le spouleur"
+                        if new_state != old_state:
+                            job["print_state"] = new_state
+                            job["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            changed = True
+            except Exception:
+                logger.debug("État du spouleur A3 temporairement indisponible", exc_info=True)
+            if changed:
+                self._write_print_jobs(history_path, jobs)
+        return list(reversed(jobs[-max(1, min(int(limit), 500)):]))
+
+    @staticmethod
+    def _write_print_jobs(history_path: Path, jobs: list[dict[str, Any]]) -> None:
+        try:
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = history_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(jobs[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temporary, history_path)
+        except OSError:
+            logger.exception("Impossible d’enregistrer l’historique d’impression A3 : %s", history_path)
+
+    def _update_print_job(self, job_id: str, **values: Any) -> None:
+        with self._lock:
+            root = Path(self._config["storage_dir"]).expanduser()
+            history_path = root / "cliniva_a3_print_jobs.json"
+            try:
+                jobs = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
+            except (OSError, ValueError):
+                jobs = []
+            if not isinstance(jobs, list):
+                jobs = []
+            record = next((item for item in jobs if item.get("id") == job_id), None)
+            if record is None:
+                return
+            record.update(values)
+            record["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._write_print_jobs(history_path, jobs)
+
+    def _create_print_job(self, paths: list[Path], printer_name: str, enabled: bool) -> str:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        folder = paths[0].parent if paths else None
+        manifest: dict[str, Any] = {}
+        if folder:
+            try:
+                manifest_path = folder / "cliniva_print.json"
+                if manifest_path.is_file():
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        job_id = uuid.uuid4().hex
+        root = Path(self._config["storage_dir"]).expanduser()
+        try:
+            relative_folder = str(folder.relative_to(root)) if folder else ""
+        except ValueError:
+            relative_folder = folder.name if folder else ""
+        record = {
+            "id": job_id, "folder": relative_folder or (folder.name if folder else "Dossier inconnu"),
+            "patient_name": manifest.get("patient_name") or (folder.parent.name if folder else "Patient inconnu"),
+            "order_number": manifest.get("order_number") or "", "passage_number": manifest.get("passage_number") or "",
+            "received_images": len(paths), "received_at": now, "updated_at": now,
+            "printer": printer_name or "", "transfer_state": "En attente d’envoi" if enabled else "Non envoyé",
+            "print_state": "En attente" if enabled else "Non lancé (impression automatique désactivée)",
+            "spooler_job_id": None,
+        }
+        history_path = root / "cliniva_a3_print_jobs.json"
+        with self._lock:
+            try:
+                jobs = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
+            except (OSError, ValueError):
+                jobs = []
+            if not isinstance(jobs, list):
+                jobs = []
+            jobs.append(record)
+            self._write_print_jobs(history_path, jobs)
+        return job_id
+
     def start(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             if self._server is not None:
@@ -312,11 +439,17 @@ class DicomPrintServer:
                     paths = self._pending_print_paths.pop(id(event.assoc), [])
                     enabled = bool(self._config.get("auto_print_enabled"))
                     printer_name = str(self._config.get("auto_print_printer") or "").strip()
-                if enabled and paths:
-                    if not printer_name:
+                if paths:
+                    job_id = self._create_print_job(paths, printer_name, enabled)
+                    if enabled and not printer_name:
+                        self._update_print_job(job_id, transfer_state="Échec : imprimante non configurée",
+                                               print_state="Non lancé")
                         logger.error("Impression automatique demandée, mais aucune imprimante A3 n’est configurée.")
-                    else:
-                        threading.Thread(target=self._print_paths_a3, args=(paths, printer_name),
+                    elif enabled:
+                        self._update_print_job(job_id, transfer_state="Transmission en cours",
+                                               print_state="Préparation du travail")
+                        threading.Thread(target=self._print_paths_a3,
+                                         args=(paths, printer_name, lambda **state: self._update_print_job(job_id, **state)),
                                          name="ClinivaDprintAutoPrint", daemon=True).start()
                 return 0x0000, Dataset()
 
@@ -424,12 +557,13 @@ class DicomPrintServer:
             return self.status()
 
     @staticmethod
-    def _print_paths_a3(paths: list[Path], printer_name: str) -> None:
+    def _print_paths_a3(paths: list[Path], printer_name: str, on_update=None) -> None:
         """Imprime les images du N-ACTION dans un seul travail Windows au format A3."""
         if os.name != "nt":
             logger.error("Impression DICOM automatique disponible uniquement sous Windows.")
             return
         dc = None
+        document_started = False
         try:
             import win32con
             import win32gui
@@ -460,7 +594,11 @@ class DicomPrintServer:
             height = win32print.GetDeviceCaps(dc, win32con.VERTRES)
             if width < 1 or height < 1:
                 raise RuntimeError("Le pilote de l’imprimante ne fournit pas de zone A3 imprimable.")
-            win32print.StartDoc(dc, (f"Cliniva DICOM Print - {len(paths)} image(s)", None, None, 0))
+            spooler_job_id = win32print.StartDoc(dc, (f"Cliniva DICOM Print - {len(paths)} image(s)", None, None, 0))
+            document_started = True
+            if on_update:
+                on_update(transfer_state="Envoyé au spouleur Windows", print_state="En file d’attente",
+                          spooler_job_id=int(spooler_job_id))
             for path in sorted(paths, key=lambda item: item.stat().st_mtime_ns):
                 with Image.open(path) as source:
                     image = source.convert("RGB")
@@ -471,13 +609,21 @@ class DicomPrintServer:
                     dib.draw(dc, (left, top, left + image.width, top + image.height))
                     win32print.EndPage(dc)
             win32print.EndDoc(dc)
+            document_started = False
+            if on_update:
+                on_update(transfer_state="Envoyé à l’imprimante", print_state="En file d’attente",
+                          spooler_job_id=int(spooler_job_id))
             logger.info("Impression automatique terminée : %d image(s) sur %s (A3)", len(paths), printer_name)
-        except Exception:
+        except Exception as exc:
             logger.exception("Échec de l’impression automatique DICOM vers %s", printer_name)
+            if on_update:
+                on_update(transfer_state="Échec d’envoi à l’imprimante", print_state="Échec",
+                          error=str(exc))
             if dc is not None:
                 try:
                     import win32print
-                    win32print.AbortDoc(dc)
+                    if document_started:
+                        win32print.AbortDoc(dc)
                 except Exception:
                     pass
         finally:
