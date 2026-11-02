@@ -508,6 +508,16 @@ class ClientDicomServicesBridge:
             logger.warning("Impossible de supprimer le dossier DICOM Print %s : %s", group_id, exc)
             return {"ok": False, "error": str(exc)}
 
+    def dicom_print_merge_groups(self, target_group_id: str,
+                                 source_group_ids: list[str]) -> Dict[str, Any]:
+        try:
+            with self._lock:
+                return self._service().merge_groups(target_group_id, source_group_ids)
+        except Exception as exc:
+            logger.warning("Impossible de fusionner les dossiers DICOM Print dans %s : %s",
+                           target_group_id, exc)
+            return {"ok": False, "error": str(exc)}
+
     def dicom_print_group_image_pdf(self, group_id: str, index: int) -> Dict[str, Any]:
         """Construit un PDF A3 contenant l’image DICOM courante, prêt à télécharger/imprimer."""
         import base64

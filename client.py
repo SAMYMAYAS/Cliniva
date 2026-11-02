@@ -363,6 +363,13 @@ class ClientHardwareBridge:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def dicom_print_merge_groups(self, target_group_id: str, source_group_ids: list[str]) -> dict:
+        try:
+            with self._dicom_print_lock:
+                return self._dicom_print_service().merge_groups(target_group_id, source_group_ids)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def dicom_print_group_image_pdf(self, group_id: str, index: int) -> dict:
         import base64
         import io

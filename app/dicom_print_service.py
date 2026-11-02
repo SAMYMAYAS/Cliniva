@@ -400,9 +400,14 @@ class DicomPrintServer:
         group_key = "|".join((exam_date, identity_value.casefold(), patient_id.casefold()))
         total_text = str(ocr.get("total_images") or "").strip()
         total_count = int(total_text) if total_text.isdigit() and int(total_text) > 0 else None
+        current_text = str(ocr.get("current_image") or "").strip()
+        current_index = int(current_text) if current_text.isdigit() else None
 
-        folder = None
-        manifest: dict[str, Any] = {}
+        # Un patient peut avoir plusieurs travaux d'impression le même jour,
+        # avec le même numéro d'ordre. Ne jamais reprendre un dossier qui a
+        # déjà reçu son quota, ni un ancien dossier lorsqu'un nouveau travail
+        # recommence à la page 1.
+        candidates: list[tuple[datetime, int, int, Path, dict[str, Any]]] = []
         for candidate in date_folder.iterdir():
             manifest_path = candidate / "cliniva_print.json"
             if not candidate.is_dir() or not manifest_path.is_file():
@@ -420,9 +425,48 @@ class DicomPrintServer:
                 str(candidate_manifest.get("order_number") or "").casefold() == accession_number.casefold()
                 or not accession_number or not candidate_manifest.get("order_number")
             )
-            if candidate_manifest.get("group_key") == group_key or (same_patient and same_order_or_missing):
-                folder, manifest = candidate, candidate_manifest
-                break
+            if not (candidate_manifest.get("group_key") == group_key or (same_patient and same_order_or_missing)):
+                continue
+
+            actual_count = len(list(candidate.glob("Image_*.png")))
+            candidate_total = candidate_manifest.get("total_images")
+            try:
+                candidate_total = int(candidate_total) if candidate_total else None
+            except (TypeError, ValueError):
+                candidate_total = None
+            if candidate_total and actual_count >= candidate_total:
+                continue
+
+            image_numbers = [
+                int(match.group(1))
+                for path in candidate.glob("Image_*.png")
+                if (match := re.match(r"Image_(\d+)_", path.name))
+            ]
+            highest_page = max(image_numbers, default=0)
+            # Le compteur OCR constitue une frontière de travail : une nouvelle
+            # page 1 ne doit pas être ajoutée à un dossier déjà commencé.
+            if current_index == 1 and actual_count:
+                continue
+            # Pour les pages suivantes, rattacher au dossier dont la dernière
+            # page précède le mieux la page reçue. Cela évite de revenir sur un
+            # ancien dossier incomplet du même patient.
+            if current_index and current_index > 1 and highest_page >= current_index:
+                continue
+            try:
+                updated = datetime.strptime(
+                    str(candidate_manifest.get("updated_at") or ""), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                updated = datetime.fromtimestamp(candidate.stat().st_mtime)
+            candidates.append((updated, highest_page, candidate.stat().st_mtime_ns,
+                               candidate, candidate_manifest))
+
+        folder = None
+        manifest: dict[str, Any] = {}
+        if candidates:
+            # Continuer le travail le plus récent, puis celui dont la séquence
+            # de pages est la plus avancée.
+            _, _, _, folder, manifest = max(
+                candidates, key=lambda item: (item[0], item[1], item[2]))
 
         if folder is None:
             count_label = str(total_count) if total_count else "nombre inconnu"
@@ -460,8 +504,8 @@ class DicomPrintServer:
         existing_images = sorted(folder.glob("Image_*.png"))
         known_indices = [int(match.group(1)) for path in existing_images
                          if (match := re.match(r"Image_(\d+)_", path.name))]
-        current_text = str(ocr.get("current_image") or "").strip()
-        current_index = int(current_text) if current_text.isdigit() else max(known_indices, default=0) + 1
+        if current_index is None:
+            current_index = max(known_indices, default=0) + 1
         total_for_name = manifest.get("total_images")
         total_part = f"sur_{int(total_for_name):03d}" if total_for_name else "sur_inconnu"
         base = f"Image_{current_index:03d}_{total_part}"
@@ -539,6 +583,129 @@ class DicomPrintServer:
         shutil.rmtree(folder)
         logger.info("Dossier DICOM Print supprimé : %s", folder)
         return {"ok": True, "deleted": str(group_id)}
+
+    def merge_groups(self, target_group_id: str, source_group_ids: list[str]) -> dict[str, Any]:
+        """Fusionne des travaux du même examen dans le dossier cible, par ordre de réception."""
+        if not source_group_ids or len(source_group_ids) > 30:
+            raise ValueError("Sélectionnez entre 1 et 30 dossiers à fusionner.")
+        target_root, target_folder = self._resolve_group(target_group_id)
+        requested = list(dict.fromkeys(str(item) for item in source_group_ids))
+        if len(requested) != len(source_group_ids) or target_group_id in requested:
+            raise ValueError("La sélection de dossiers contient un doublon ou le dossier cible.")
+
+        def read_manifest(folder: Path) -> dict[str, Any]:
+            path = folder / "cliniva_print.json"
+            try:
+                return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            except (OSError, ValueError):
+                return {}
+
+        target_manifest = read_manifest(target_folder)
+        target_patient_id = str(target_manifest.get("patient_id") or "").strip().casefold()
+        target_patient_name = str(target_manifest.get("patient_name") or "").strip().casefold()
+        required = {
+            "order_number": str(target_manifest.get("order_number") or "").strip().casefold(),
+            "passage_number": str(target_manifest.get("passage_number") or "").strip().casefold(),
+            "exam_date": _normalize_exam_date(target_manifest.get("exam_date") or "").casefold()
+            if target_manifest.get("exam_date") else "",
+        }
+        if not all(required.values()) or not (target_patient_id or target_patient_name):
+            raise ValueError("Le dossier cible n’a pas toutes les informations nécessaires pour vérifier l’examen.")
+
+        source_folders: list[tuple[Path, dict[str, Any]]] = []
+        for source_id in requested:
+            source_root, source_folder = self._resolve_group(source_id)
+            if source_root != target_root:
+                raise ValueError("Les dossiers à fusionner doivent appartenir au même récepteur DICOM Print.")
+            source_manifest = read_manifest(source_folder)
+            source_patient_id = str(source_manifest.get("patient_id") or "").strip().casefold()
+            source_patient_name = str(source_manifest.get("patient_name") or "").strip().casefold()
+            same_patient = (
+                target_patient_id == source_patient_id if target_patient_id and source_patient_id
+                else bool(target_patient_name and source_patient_name
+                          and target_patient_name == source_patient_name)
+            )
+            source_values = {
+                "order_number": str(source_manifest.get("order_number") or "").strip().casefold(),
+                "passage_number": str(source_manifest.get("passage_number") or "").strip().casefold(),
+                "exam_date": _normalize_exam_date(source_manifest.get("exam_date") or "").casefold()
+                if source_manifest.get("exam_date") else "",
+            }
+            if not same_patient or source_values != required:
+                raise ValueError("Fusion refusée : patient, numéro d’ordre, passage ou date différents.")
+            source_folders.append((source_folder, source_manifest))
+
+        # Préparer les images de tous les dossiers et les trier par date réelle
+        # de modification du fichier (précision sous-seconde), donc par réception.
+        all_items: list[tuple[int, Path, dict[str, Any], bool]] = []
+        target_entries = {
+            item.get("name"): item for item in target_manifest.get("images", [])
+            if isinstance(item, dict) and item.get("name")
+        }
+        for path in target_folder.glob("Image_*.png"):
+            all_items.append((path.stat().st_mtime_ns, path, dict(target_entries.get(path.name, {})), False))
+        for source_folder, source_manifest in source_folders:
+            entries = {
+                item.get("name"): item for item in source_manifest.get("images", [])
+                if isinstance(item, dict) and item.get("name")
+            }
+            for path in source_folder.glob("Image_*.png"):
+                all_items.append((path.stat().st_mtime_ns, path, dict(entries.get(path.name, {})), True))
+        if not all_items:
+            raise ValueError("Aucune image à fusionner.")
+        all_items.sort(key=lambda item: item[0])
+
+        copied_paths: list[Path] = []
+        merged_entries: list[dict[str, Any]] = []
+        total = len(all_items)
+        try:
+            for position, (_received_ns, path, old_entry, is_source) in enumerate(all_items, start=1):
+                if is_source:
+                    filename = f"Image_fusion_{position:04d}_{_safe_component(path.stem, 'image')}.png"
+                    destination = target_folder / filename
+                    suffix = 2
+                    while destination.exists():
+                        destination = target_folder / f"Image_fusion_{position:04d}_{suffix}.png"
+                        suffix += 1
+                    shutil.copy2(path, destination)
+                    copied_paths.append(destination)
+                else:
+                    destination = path
+                entry = dict(old_entry)
+                entry.update({"name": destination.name, "current_image": position,
+                              "total_images": total, "display_order": position})
+                merged_entries.append(entry)
+
+            target_manifest["images"] = merged_entries
+            target_manifest["received_images"] = total
+            target_manifest["total_images"] = total
+            target_manifest["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            target_manifest["merged_from"] = requested
+            manifest_path = target_folder / "cliniva_print.json"
+            temporary_manifest = target_folder / "cliniva_print.json.tmp"
+            temporary_manifest.write_text(json.dumps(target_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temporary_manifest, manifest_path)
+            info_lines = [
+                "=== INFORMATIONS DE L’EXAMEN (OCR / DICOM) ===",
+                f"Patient : {target_manifest.get('patient_name') or 'Non reconnu'}",
+                f"Centre : {target_manifest.get('center') or 'Non reconnu'}",
+                f"Identifiant patient : {target_manifest.get('patient_id') or 'Non reconnu'}",
+                f"Date de l’examen : {target_manifest.get('exam_date') or 'Non reconnue'}",
+                f"Numéro d’ordre / Accession Number : {target_manifest.get('order_number') or 'Non reconnu'}",
+                f"Passage : {target_manifest.get('passage_number') or 'Non reconnu'}",
+                f"Images reçues : {total}/{total}",
+            ]
+            (target_folder / "Informations_examen.txt").write_text(
+                "\n".join(info_lines) + "\n", encoding="utf-8")
+        except Exception:
+            for copied in copied_paths:
+                copied.unlink(missing_ok=True)
+            raise
+
+        for source_folder, _source_manifest in source_folders:
+            shutil.rmtree(source_folder)
+        logger.info("Dossiers DICOM Print fusionnés dans %s : %s", target_folder, requested)
+        return {"ok": True, "target": target_group_id, "removed": requested, "images": total}
 
     def recent_images(self, limit: int = 100) -> list[dict[str, Any]]:
         """Retourne une ligne par dossier/examen, y compris les anciens dossiers."""
