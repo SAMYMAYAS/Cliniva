@@ -69,37 +69,52 @@ def _extract_print_image_numbers(frame) -> tuple[str, str]:
     import pytesseract
 
     height, width = frame.shape[:2]
-    crops = (
-        frame[int(height * .055):int(height * .090), int(width * .40):int(width * .60)],
-        frame[int(height * .050):int(height * .095), int(width * .35):int(width * .65)],
-        frame[int(height * .055):int(height * .095), :],
-    )
+    # Le compteur est centré dans le bandeau supérieur. Les anciennes
+            # variantes lançaient jusqu’à 45 appels Tesseract par image ; quelques appels
+    # ciblés suffisent généralement et réduisent fortement le délai de réception.
+    crops = [frame[int(height * .045):int(height * .105),
+                    int(width * .30):int(width * .70)]]
     for crop in crops:
         if crop.size == 0:
             continue
-        resized = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        resized = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
         gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 else resized
-        _, threshold = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
-        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        padded = [cv2.copyMakeBorder(item, 35, 35, 35, 35,
-                                     cv2.BORDER_CONSTANT, value=255)
-                  for item in (threshold, otsu, gray)]
-        for processed in padded:
-            for psm in (7, 8, 6, 11, 3):
+        _, inverted_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        _, inverted_fixed = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+        for processed in (inverted_otsu, inverted_fixed):
+            padded = cv2.copyMakeBorder(processed, 24, 24, 32, 32,
+                                        cv2.BORDER_CONSTANT, value=255)
+            for psm in (7,):
                 raw = pytesseract.image_to_string(
-                    processed, lang="eng",
-                    config=f"--psm {psm} -c tessedit_char_whitelist=0123456789/\\|-lISsO "
+                    padded, lang="eng",
+                    config=f"--psm {psm} -c tessedit_char_whitelist=0123456789/|-lISsO"
                 ).strip()
                 clean = (raw.replace("l", "1").replace("I", "1").replace("|", "/")
                          .replace("\\", "/").replace("S", "5").replace("s", "5")
                          .replace("O", "0").replace("o", "0"))
-                found = re.search(r"\b(\d{1,2})\s*[/\-]\s*(\d{1,2})\b", clean)
+                found = re.search(r"(?<!\d)(\d{1,3})\s*[/\-]\s*(\d{1,3})(?!\d)", clean)
                 if not found:
-                    found = re.search(r"\b(\d{1,2})\s+(\d{1,2})\b", clean)
+                    found = re.search(r"(?<!\d)(\d{1,3})\s+(\d{1,3})(?!\d)", clean)
                 if found:
                     current, total = map(int, found.groups())
                     if 0 < current <= total <= 999:
                         return str(current), str(total)
+    # Repli pour les stations qui impriment le compteur un peu à gauche/droite.
+    fallback = frame[int(height * .045):int(height * .105), :]
+    if fallback.size:
+        gray = cv2.cvtColor(fallback, cv2.COLOR_BGR2GRAY) if len(fallback.shape) == 3 else fallback
+        enlarged = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        raw = pytesseract.image_to_string(
+            enlarged, lang="eng", config="--psm 6 -c tessedit_char_whitelist=0123456789/|-lISsO"
+        )
+        clean = (raw.replace("l", "1").replace("I", "1").replace("|", "/")
+                 .replace("\\", "/").replace("S", "5").replace("s", "5")
+                 .replace("O", "0").replace("o", "0"))
+        found = re.search(r"(?<!\d)(\d{1,3})\s*[/\-]\s*(\d{1,3})(?!\d)", clean)
+        if found:
+            current, total = map(int, found.groups())
+            if 0 < current <= total <= 999:
+                return str(current), str(total)
     return "", ""
 
 
@@ -342,12 +357,12 @@ class DicomPrintServer:
                     return 0x0110, Dataset()
                 pixels = sequence.value[0]
                 try:
-                    # Sérialise l’association session → dossier et l’écriture
-                    # du manifeste pour éviter les collisions entre N-SET simultanés.
-                    with self._print_context_lock:
-                        print_job_id = _print_job_for_image(event)
-                        saved_path = self._save_print_image(pixels, attributes, storage_dir,
-                                                            print_job_id=print_job_id)
+                    # La table des sessions est protégée brièvement. Le décodage
+                    # et l’OCR restent hors verrou pour ne pas bloquer les autres
+                    # associations pendant le traitement d’une page.
+                    print_job_id = _print_job_for_image(event)
+                    saved_path = self._save_print_image(pixels, attributes, storage_dir,
+                                                        print_job_id=print_job_id)
                     logger.info("Image DICOM Print reçue (job %s) : %s", print_job_id, saved_path)
                     return 0x0000, Dataset()
                 except Exception:
@@ -469,6 +484,7 @@ class DicomPrintServer:
 
         folder = None
         manifest: dict[str, Any] = {}
+        now_epoch = time.time()
         for candidate in date_folder.iterdir():
             manifest_path = candidate / "cliniva_print.json"
             if not candidate.is_dir() or not manifest_path.is_file():
@@ -478,6 +494,63 @@ class DicomPrintServer:
             except (OSError, ValueError):
                 continue
             if candidate_manifest.get("print_job_id") == print_job_id:
+                folder, manifest = candidate, candidate_manifest
+                break
+
+        # Certaines stations recréent une Film Session (voire une association)
+        # pour chaque page. On rattache alors la page au job encore incomplet
+        # uniquement si les identifiants stables concordent et que son index
+        # n’a pas déjà été reçu. Un job terminé n’est jamais réutilisé.
+        if folder is None:
+            normalized_name = re.sub(r"[^A-Z0-9]", "", patient_name.upper())
+            incoming_order = re.sub(r"\W", "", accession_number.upper())
+            incoming_patient = re.sub(r"\W", "", patient_id.upper())
+            incoming_current = str(ocr.get("current_image") or "").strip()
+            for candidate in sorted(date_folder.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True):
+                manifest_path = candidate / "cliniva_print.json"
+                if not candidate.is_dir() or not manifest_path.is_file():
+                    continue
+                try:
+                    candidate_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if now_epoch - manifest_path.stat().st_mtime > 2 * 60 * 60:
+                    continue
+                candidate_name = re.sub(r"[^A-Z0-9]", "", str(candidate_manifest.get("patient_name") or "").upper())
+                candidate_order = re.sub(r"\W", "", str(candidate_manifest.get("order_number") or "").upper())
+                candidate_patient = re.sub(r"\W", "", str(candidate_manifest.get("patient_id") or "").upper())
+                if incoming_order and candidate_order and incoming_order != candidate_order:
+                    continue
+                if incoming_patient and candidate_patient:
+                    if incoming_patient != candidate_patient:
+                        continue
+                elif normalized_name and candidate_name and normalized_name != candidate_name:
+                    continue
+                elif not incoming_order:
+                    # Sans identifiant patient/ordre, le nom seul est trop
+                    # ambigu pour fusionner deux examens.
+                    continue
+                candidate_total = candidate_manifest.get("total_images")
+                candidate_total = int(candidate_total) if str(candidate_total or "").isdigit() else None
+                incoming_total = total_count
+                same_accession = bool(incoming_order and candidate_order and
+                                       incoming_order == candidate_order)
+                if not same_accession and (
+                        not incoming_total or not candidate_total or incoming_total != candidate_total):
+                    continue
+                received = int(candidate_manifest.get("received_images") or
+                               len(candidate_manifest.get("images") or []))
+                if candidate_total and received >= candidate_total:
+                    continue
+                if not candidate_total and (not same_accession or now_epoch - manifest_path.stat().st_mtime > 10 * 60):
+                    continue
+                known_indices = {
+                    str(item.get("current_image"))
+                    for item in (candidate_manifest.get("images") or [])
+                    if str(item.get("current_image") or "").isdigit()
+                }
+                if incoming_current and incoming_current in known_indices:
+                    continue
                 folder, manifest = candidate, candidate_manifest
                 break
 
@@ -507,7 +580,11 @@ class DicomPrintServer:
                 folder = new_folder
 
         manifest["patient_name"] = patient_name or manifest.get("patient_name") or "Patient inconnu"
-        manifest["print_job_id"] = print_job_id
+        original_job_id = str(manifest.get("print_job_id") or print_job_id)
+        manifest["print_job_id"] = original_job_id
+        session_ids = set(manifest.get("print_session_ids") or [])
+        session_ids.add(print_job_id)
+        manifest["print_session_ids"] = sorted(session_ids)
         manifest["patient_id"] = patient_id or manifest.get("patient_id", "")
         manifest["exam_date"] = exam_date or manifest.get("exam_date", "")
         manifest["order_number"] = accession_number or manifest.get("order_number", "")
