@@ -354,6 +354,18 @@ class ClientHardwareBridge:
             logger.exception("Impossible de lire l’historique d’impression DICOM A3")
             return []
 
+    def dicom_print_a3_group_images(self, group_id: str) -> list[dict]:
+        with self._dicom_print_lock:
+            return self._dicom_print_a3_service().group_images(group_id)
+
+    def dicom_print_a3_group_image(self, group_id: str, index: int) -> dict:
+        with self._dicom_print_lock:
+            return self._dicom_print_a3_service().group_image(group_id, index)
+
+    def dicom_print_a3_group_image_pdf(self, group_id: str, index: int) -> dict:
+        with self._dicom_print_lock:
+            return self._dicom_print_a3_service().group_image_pdf(group_id, index)
+
     def dicom_print_a3_printers(self) -> list[dict]:
         try:
             with self._dicom_print_lock:

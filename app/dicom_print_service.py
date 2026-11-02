@@ -320,13 +320,16 @@ class DicomPrintServer:
         job_id = uuid.uuid4().hex
         root = Path(self._config["storage_dir"]).expanduser()
         try:
-            relative_folder = str(folder.relative_to(root)) if folder else ""
+            relative_folder = folder.relative_to(root).as_posix() if folder else ""
         except ValueError:
             relative_folder = folder.name if folder else ""
         record = {
-            "id": job_id, "folder": relative_folder or (folder.name if folder else "Dossier inconnu"),
+            "id": job_id, "group_id": relative_folder,
+            "folder": relative_folder or (folder.name if folder else "Dossier inconnu"),
             "patient_name": manifest.get("patient_name") or (folder.parent.name if folder else "Patient inconnu"),
+            "center": manifest.get("center") or "", "exam_date": manifest.get("exam_date") or "",
             "order_number": manifest.get("order_number") or "", "passage_number": manifest.get("passage_number") or "",
+            "total_images": manifest.get("total_images"),
             "received_images": len(paths), "received_at": now, "updated_at": now,
             "printer": printer_name or "", "transfer_state": "En attente d’envoi" if enabled else "Non envoyé",
             "print_state": "En attente" if enabled else "Non lancé (impression automatique désactivée)",
@@ -1275,6 +1278,25 @@ class DicomPrintServer:
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return {**image, "data_url": f"data:image/png;base64,{encoded}",
                 "position": int(index) + 1, "count": len(images)}
+
+    def group_image_pdf(self, group_id: str, index: int) -> dict[str, Any]:
+        """Construit un PDF A3 de l’image, pour le téléchargement depuis le carrousel."""
+        import io
+        from PIL import Image
+
+        image_data = self.group_image(group_id, index)
+        raw = base64.b64decode(image_data["data_url"].split(",", 1)[1])
+        with Image.open(io.BytesIO(raw)) as source:
+            page = Image.new("RGB", (3508, 4961), "white")
+            image = source.convert("RGB")
+            image.thumbnail((3388, 4841), Image.Resampling.LANCZOS)
+            page.paste(image, ((3508 - image.width) // 2, (4961 - image.height) // 2))
+            output = io.BytesIO()
+            page.save(output, format="PDF", resolution=300.0)
+        group = next((item for item in self.recent_images() if item.get("id") == group_id), {})
+        return {"name": image_data["name"], "patient_name": group.get("patient_name", ""),
+                "pdf_data_url": "data:application/pdf;base64," +
+                base64.b64encode(output.getvalue()).decode("ascii")}
 
     def group_image_thumbnail(self, group_id: str, index: int) -> dict[str, Any]:
         """Retourne une vignette légère pour le gestionnaire d'images."""
