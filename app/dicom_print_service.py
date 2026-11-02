@@ -69,70 +69,52 @@ def _extract_print_image_numbers(frame) -> tuple[str, str]:
     import pytesseract
 
     height, width = frame.shape[:2]
-    # Le compteur est une très petite ligne centrée juste sous l’en-tête.
-    # Une zone trop large faisait parfois lire les numéros d’ordre/date à sa
-    # place. Deux cadrages centrés permettent de couvrir les variations de mise
-    # en page sans relancer l’OCR sur toute l’image médicale.
-    crops = (
-        frame[int(height * .055):int(height * .095), int(width * .39):int(width * .61)],
-        frame[int(height * .045):int(height * .105), int(width * .32):int(width * .68)],
-    )
-    for crop_index, crop in enumerate(crops):
+    # Le compteur est centré dans le bandeau supérieur. Les anciennes
+            # variantes lançaient jusqu’à 45 appels Tesseract par image ; quelques appels
+    # ciblés suffisent généralement et réduisent fortement le délai de réception.
+    crops = [frame[int(height * .045):int(height * .105),
+                    int(width * .30):int(width * .70)]]
+    for crop in crops:
         if crop.size == 0:
             continue
-        resized = cv2.resize(crop, None, fx=6 if crop_index == 0 else 4,
-                             fy=6 if crop_index == 0 else 4,
-                             interpolation=cv2.INTER_CUBIC)
+        resized = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
         gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 else resized
-        normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-        _, inverted_otsu = cv2.threshold(normalized, 0, 255,
-                                         cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        _, inverted_fixed = cv2.threshold(normalized, 165, 255, cv2.THRESH_BINARY_INV)
+        _, inverted_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        _, inverted_fixed = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
         for processed in (inverted_otsu, inverted_fixed):
             padded = cv2.copyMakeBorder(processed, 24, 24, 32, 32,
                                         cv2.BORDER_CONSTANT, value=255)
-            for psm in (7, 8):
+            for psm in (7,):
                 raw = pytesseract.image_to_string(
                     padded, lang="eng",
-                    config=f"--oem 1 --psm {psm} -c tessedit_char_whitelist=0123456789/|\\-lISsOZBGq"
+                    config=f"--psm {psm} -c tessedit_char_whitelist=0123456789/|-lISsO"
                 ).strip()
                 clean = (raw.replace("l", "1").replace("I", "1").replace("|", "/")
                          .replace("\\", "/").replace("S", "5").replace("s", "5")
-                         .replace("O", "0").replace("o", "0").replace("Z", "2")
-                         .replace("B", "8").replace("G", "6").replace("q", "9"))
-                found = re.search(r"(?<!\d)(\d{1,3})\s*[/\\|:._-]\s*(\d{1,3})(?!\d)", clean)
+                         .replace("O", "0").replace("o", "0"))
+                found = re.search(r"(?<!\d)(\d{1,3})\s*[/\-]\s*(\d{1,3})(?!\d)", clean)
                 if not found:
                     found = re.search(r"(?<!\d)(\d{1,3})\s+(\d{1,3})(?!\d)", clean)
-                if not found:
-                    number_groups = re.findall(r"\d{1,3}", clean)
-                    if len(number_groups) == 2:
-                        found = (None, number_groups)
                 if found:
-                    groups = found.groups() if hasattr(found, "groups") else found[1]
-                    current, total = map(int, groups)
+                    current, total = map(int, found.groups())
                     if 0 < current <= total <= 999:
                         return str(current), str(total)
-        if crop_index == 0:
-            # Certains OCR renvoient seulement le chiffre après la barre
-            # (le total), sans le courant ni le séparateur. La moitié droite
-            # de ce cadrage ne contient que ce chiffre du compteur : on peut
-            # donc conserver le total même si la lecture du couple échoue.
-            right_total_roi = gray[:, int(gray.shape[1] * .50):]
-            _, right_total_binary = cv2.threshold(
-                cv2.normalize(right_total_roi, None, 0, 255, cv2.NORM_MINMAX),
-                165, 255, cv2.THRESH_BINARY_INV)
-            right_total_binary = cv2.copyMakeBorder(
-                right_total_binary, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=255)
-            right_raw = pytesseract.image_to_string(
-                right_total_binary, lang="eng",
-                config="--oem 1 --psm 8 -c tessedit_char_whitelist=0123456789OZBGq"
-            ).strip()
-            right_clean = (right_raw.replace("O", "0").replace("o", "0")
-                           .replace("Z", "2").replace("B", "8")
-                           .replace("G", "6").replace("q", "9"))
-            right_numbers = re.findall(r"\d{1,3}", right_clean)
-            if right_numbers and 0 < int(right_numbers[-1]) <= 999:
-                return "", right_numbers[-1]
+    # Repli pour les stations qui impriment le compteur un peu à gauche/droite.
+    fallback = frame[int(height * .045):int(height * .105), :]
+    if fallback.size:
+        gray = cv2.cvtColor(fallback, cv2.COLOR_BGR2GRAY) if len(fallback.shape) == 3 else fallback
+        enlarged = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        raw = pytesseract.image_to_string(
+            enlarged, lang="eng", config="--psm 6 -c tessedit_char_whitelist=0123456789/|-lISsO"
+        )
+        clean = (raw.replace("l", "1").replace("I", "1").replace("|", "/")
+                 .replace("\\", "/").replace("S", "5").replace("s", "5")
+                 .replace("O", "0").replace("o", "0"))
+        found = re.search(r"(?<!\d)(\d{1,3})\s*[/\-]\s*(\d{1,3})(?!\d)", clean)
+        if found:
+            current, total = map(int, found.groups())
+            if 0 < current <= total <= 999:
+                return str(current), str(total)
     return "", ""
 
 
