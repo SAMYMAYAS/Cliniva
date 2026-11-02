@@ -1,0 +1,17 @@
+{
+  "version": "50c03473ccf31938",
+  "filename": "cliniva-client-50c03473ccf31938.zip",
+  "sha256": "d4c2dccae58f3d2405eb3c3cb560239743a633c589d0e9d54104a36e9985fe6f",
+  "size": 13489,
+  "published_at": "2026-11-02T13:52:29.954144+00:00",
+  "package_url": "/static/client_updates/cliniva-client-50c03473ccf31938.zip",
+  "source_files": 1,
+  "contents": [
+    "client.py"
+  ],
+  "dicom_print_module": {
+    "filename": "client-dicom-print-6ecbd562dcbf2cae.py",
+    "sha256": "6ecbd562dcbf2cae676eb05170a5f3e197b9e2f4b788d5f1bd9fdf37eb2b9aa5",
+    "package_url": "/static/client_updates/client-dicom-print-6ecbd562dcbf2cae.py"
+  }
+}

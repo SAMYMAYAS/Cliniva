@@ -1,0 +1,98 @@
+[
+  {
+    "slice": 1,
+    "contours": 1
+  },
+  {
+    "slice": 2,
+    "contours": 2
+  },
+  {
+    "slice": 3,
+    "contours": 3
+  },
+  {
+    "slice": 4,
+    "contours": 2
+  },
+  {
+    "slice": 5,
+    "contours": 4
+  },
+  {
+    "slice": 6,
+    "contours": 3
+  },
+  {
+    "slice": 7,
+    "contours": 3
+  },
+  {
+    "slice": 8,
+    "contours": 4
+  },
+  {
+    "slice": 9,
+    "contours": 9
+  },
+  {
+    "slice": 10,
+    "contours": 14
+  },
+  {
+    "slice": 11,
+    "contours": 10
+  },
+  {
+    "slice": 12,
+    "contours": 9
+  },
+  {
+    "slice": 13,
+    "contours": 9
+  },
+  {
+    "slice": 14,
+    "contours": 8
+  },
+  {
+    "slice": 15,
+    "contours": 10
+  },
+  {
+    "slice": 16,
+    "contours": 9
+  },
+  {
+    "slice": 17,
+    "contours": 9
+  },
+  {
+    "slice": 18,
+    "contours": 8
+  },
+  {
+    "slice": 19,
+    "contours": 4
+  },
+  {
+    "slice": 20,
+    "contours": 2
+  },
+  {
+    "slice": 21,
+    "contours": 3
+  },
+  {
+    "slice": 22,
+    "contours": 1
+  },
+  {
+    "slice": 23,
+    "contours": 0
+  },
+  {
+    "slice": 24,
+    "contours": 0
+  }
+]

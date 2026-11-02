@@ -1,0 +1,34 @@
+{
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  },
+  "browser": {
+    "mode": "launch",
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "actions": [
+    {
+      "action": "wait_for",
+      "locator": {
+        "selector": ".external-label[data-annotation-id=\"video-v1-s05-01\"]",
+        "kind": "css"
+      },
+      "state": "visible",
+      "step_id": "ready"
+    }
+  ],
+  "capture": {
+    "after_each_step": [],
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot"
+    ]
+  },
+  "environment": {
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    }
+  }
+}

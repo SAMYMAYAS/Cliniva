@@ -1,0 +1,546 @@
+{
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  },
+  "browser": {
+    "mode": "launch",
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "actions": [
+    {
+      "action": "wait_for",
+      "locator": {
+        "selector": ".external-label[data-annotation-id=\"video-v1-s05-01\"]",
+        "kind": "css"
+      },
+      "state": "visible",
+      "step_id": "s0-ready"
+    },
+    {
+      "step_id": "s1-edit-old",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": ".external-label[data-annotation-id=\"video-v1-s05-01\"]"
+      }
+    },
+    {
+      "step_id": "s2-delete-old",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#delete-annotation"
+      }
+    },
+    {
+      "step_id": "s3-restore-old",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#restore-deleted"
+      }
+    },
+    {
+      "step_id": "s4-slice16",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      },
+      "value": {
+        "source": "literal",
+        "value": "16"
+      }
+    },
+    {
+      "step_id": "s5-apply16",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      },
+      "key": "Tab"
+    },
+    {
+      "step_id": "s6-edit-new",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": ".external-label[data-annotation-id=\"screenshot-v1-43-20\"]"
+      }
+    },
+    {
+      "step_id": "s7-new-name",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#label-input"
+      },
+      "value": {
+        "source": "literal",
+        "value": "Pédoncule cérébelleux supérieur · test"
+      }
+    },
+    {
+      "step_id": "s8-save-new",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#annotation-form .primary"
+      }
+    },
+    {
+      "step_id": "s9-reload",
+      "action": "goto",
+      "destination": {
+        "url": "http://127.0.0.1:4177"
+      },
+      "wait_until": "load"
+    },
+    {
+      "step_id": "s10-slice16",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      },
+      "value": {
+        "source": "literal",
+        "value": "16"
+      }
+    },
+    {
+      "step_id": "s11-apply16",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      },
+      "key": "Tab"
+    },
+    {
+      "step_id": "s12-read-after-reload",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": ".external-label[data-annotation-id=\"screenshot-v1-43-20\"]"
+      }
+    },
+    {
+      "step_id": "s13-restore-name",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#label-input"
+      },
+      "value": {
+        "source": "literal",
+        "value": "Pédoncule cérébelleux supérieur"
+      }
+    },
+    {
+      "step_id": "s14-save-restored-name",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#annotation-form .primary"
+      }
+    },
+    {
+      "step_id": "s15-review-source",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#review-list button:first-child"
+      }
+    },
+    {
+      "step_id": "s16-close-review",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#close-review"
+      }
+    },
+    {
+      "step_id": "s17-enable-regions",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#regions"
+      }
+    },
+    {
+      "step_id": "s18-slice13",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      },
+      "value": {
+        "source": "literal",
+        "value": "13"
+      }
+    },
+    {
+      "step_id": "s19-apply13",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      },
+      "key": "Tab"
+    },
+    {
+      "step_id": "s20-opacity-end",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "End"
+    },
+    {
+      "step_id": "s21-quiz",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#quiz"
+      }
+    },
+    {
+      "step_id": "s22-reveal",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": ".external-label[data-annotation-id=\"screenshot-v1-65-00\"]"
+      }
+    },
+    {
+      "step_id": "s23-end-quiz",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#quiz"
+      }
+    },
+    {
+      "step_id": "s24-opacity-home",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "Home"
+    },
+    {
+      "step_id": "s25-opacity0",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s26-opacity1",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s27-opacity2",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s28-opacity3",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s29-opacity4",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s30-opacity5",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s31-opacity6",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s32-opacity7",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s33-opacity8",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s34-opacity9",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s35-opacity10",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s36-opacity11",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s37-opacity12",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s38-opacity13",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s39-opacity14",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s40-opacity15",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s41-opacity16",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s42-opacity17",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s43-opacity18",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s44-opacity19",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s45-opacity20",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s46-opacity21",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s47-opacity22",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s48-opacity23",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s49-opacity24",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s50-opacity25",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s51-opacity26",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s52-opacity27",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s53-opacity28",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s54-opacity29",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s55-opacity30",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s56-opacity31",
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#region-opacity"
+      },
+      "key": "ArrowRight"
+    },
+    {
+      "step_id": "s57-settled",
+      "action": "wait_for_timeout",
+      "duration_ms": 600
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "accessibility"
+    ],
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot"
+    ]
+  },
+  "environment": {
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    }
+  }
+}

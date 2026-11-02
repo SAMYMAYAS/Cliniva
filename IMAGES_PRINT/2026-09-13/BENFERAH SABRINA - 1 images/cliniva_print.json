@@ -1,0 +1,132 @@
+{
+  "group_key": "2026-09-13|166679|pas-139268789",
+  "patient_name": "BENFERAH SABRINA",
+  "patient_id": "Pas-139268789",
+  "exam_date": "2026-09-13",
+  "center": "KACEL MEDICAL GROUPE",
+  "order_number": "166679",
+  "passage_number": "Pas-139268789",
+  "total_images": 5,
+  "images": [
+    {
+      "name": "Image_001_sur_001.png",
+      "current_image": 1,
+      "total_images": 5,
+      "received_at": "2026-11-02 13:41:46",
+      "ocr": {
+        "patient_name": "BENFERAH SABRINA",
+        "patient_id": "Pas-139268789",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "166679",
+        "passage_number": "Pas-139268789",
+        "sex": "",
+        "date_of_birth": "Feb 23 1985",
+        "exam_date": "Sep 13 2026",
+        "current_image": "1",
+        "total_images": "1"
+      },
+      "display_order": 1
+    },
+    {
+      "name": "Image_fusion_0002_Image_001_sur_005.png",
+      "current_image": 2,
+      "total_images": 5,
+      "received_at": "2026-11-02 13:49:46",
+      "ocr": {
+        "patient_name": "BENFERAH SABRINA",
+        "patient_id": "Pas-139268789",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "166679",
+        "passage_number": "Pas-139268789",
+        "sex": "",
+        "date_of_birth": "Feb 23 1985",
+        "exam_date": "Sep 13 2026",
+        "current_image": "1",
+        "total_images": "5"
+      },
+      "display_order": 2
+    },
+    {
+      "name": "Image_fusion_0003_Image_002_sur_005.png",
+      "current_image": 3,
+      "total_images": 5,
+      "received_at": "2026-11-02 13:49:48",
+      "ocr": {
+        "patient_name": "BENFERAH SABRINA",
+        "patient_id": "Pas-139268789",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "166679",
+        "passage_number": "Pas-139268789",
+        "sex": "",
+        "date_of_birth": "Feb 23 1985",
+        "exam_date": "Sep 13 2026",
+        "current_image": "2",
+        "total_images": "5"
+      },
+      "display_order": 3
+    },
+    {
+      "name": "Image_fusion_0004_Image_003_sur_005.png",
+      "current_image": 4,
+      "total_images": 5,
+      "received_at": "2026-11-02 13:49:51",
+      "ocr": {
+        "patient_name": "BENFERAH SABRINA",
+        "patient_id": "Pas-139268789",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "166679",
+        "passage_number": "Pas-139268789",
+        "sex": "",
+        "date_of_birth": "Feb 23 1985",
+        "exam_date": "Sep 13 2026",
+        "current_image": "3",
+        "total_images": "5"
+      },
+      "display_order": 4
+    },
+    {
+      "name": "Image_fusion_0005_Image_004_sur_005.png",
+      "current_image": 5,
+      "total_images": 5,
+      "received_at": "2026-11-02 13:49:53",
+      "ocr": {
+        "patient_name": "BENFERAH SABRINA",
+        "patient_id": "Pas-139268789",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "166679",
+        "passage_number": "Pas-139268789",
+        "sex": "",
+        "date_of_birth": "Feb 23 1985",
+        "exam_date": "Sep 13 2026",
+        "current_image": "4",
+        "total_images": "5"
+      },
+      "display_order": 5
+    },
+    {
+      "name": "Image_fusion_0006_Image_005_sur_005.png",
+      "current_image": 6,
+      "total_images": 5,
+      "received_at": "2026-11-02 13:52:05",
+      "ocr": {
+        "patient_name": "BENFERAH SABRINA",
+        "patient_id": "Pas-139268789",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "166679",
+        "passage_number": "Pas-139268789",
+        "sex": "",
+        "date_of_birth": "Feb 23 1985",
+        "exam_date": "Sep 13 2026",
+        "current_image": "",
+        "total_images": ""
+      },
+      "display_order": 6
+    }
+  ],
+  "ocr_version": 3,
+  "received_images": 6,
+  "updated_at": "2026-11-02 13:52:50",
+  "merged_from": [
+    "2026-09-13/BENFERAH SABRINA - 5 images"
+  ]
+}

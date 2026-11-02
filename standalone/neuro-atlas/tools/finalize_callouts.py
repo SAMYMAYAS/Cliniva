@@ -1,0 +1,8 @@
+from pathlib import Path
+root=Path(__file__).resolve().parent.parent
+p=root/'dist/index.html';s=p.read_text(encoding='utf-8');s=s.replace('<link rel="stylesheet" href="annotations.css">','<link rel="stylesheet" href="annotations.css"><link rel="stylesheet" href="callouts.css">');p.write_text(s,encoding='utf-8')
+p=root/'dist/app.js';s=p.read_text(encoding='utf-8')
+s=s.replace("series:'24 captures IRM axiales fournies',annotations},null,2)","series:'24 captures IRM axiales fournies',annotations,reviewAnswers:reviewState},null,2)")
+s=s.replace("const imported=validateAnnotations(JSON.parse(await file.text()));", "const payload=JSON.parse(await file.text());const imported=validateAnnotations(payload);if(payload.reviewAnswers&&typeof payload.reviewAnswers==='object'&&!Array.isArray(payload.reviewAnswers)){for(const [id,r] of Object.entries(payload.reviewAnswers)){if(id.length<150&&r&&['pending','answered','placed'].includes(r.status)&&typeof r.answer==='string'&&r.answer.length<=120&&typeof r.note==='string'&&r.note.length<=2000)reviewState[id]={status:r.status,answer:r.answer,note:r.note};}saveReviews();renderReviews();}")
+s=s.replace("annotations.push({id:crypto.randomUUID(),slice,x,y,label:entry.answer,category:'Autre',note:`Réponse utilisateur à : ${r.question}. ${entry.note||''}`});", "if(r.annotationId){annotations=annotations.map(a=>a.id===r.annotationId?{...a,x,y,label:entry.answer,note:a.note+'\\nPrécision utilisateur : '+(entry.note||'')}:a);}else annotations.push({id:crypto.randomUUID(),slice,x,y,label:entry.answer,category:'Autre',note:`Réponse utilisateur à : ${r.question}. ${entry.note||''}`});")
+p.write_text(s,encoding='utf-8')

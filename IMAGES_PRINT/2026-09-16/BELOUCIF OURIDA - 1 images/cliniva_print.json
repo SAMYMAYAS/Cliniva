@@ -1,0 +1,33 @@
+{
+  "group_key": "2026-09-16|167086|pas-169375106",
+  "patient_name": "BELOUCIF OURIDA",
+  "patient_id": "Pas-169375106",
+  "exam_date": "2026-09-16",
+  "center": "KACEL MEDICAL GROUPE",
+  "order_number": "167086",
+  "passage_number": "Pas-169375106",
+  "total_images": 1,
+  "images": [
+    {
+      "name": "Image_001_sur_001.png",
+      "current_image": 1,
+      "total_images": 1,
+      "received_at": "2026-11-02 14:02:13",
+      "ocr": {
+        "patient_name": "BELOUCIF OURIDA",
+        "patient_id": "Pas-169375106",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "167086",
+        "passage_number": "Pas-169375106",
+        "sex": "F",
+        "date_of_birth": "Mar 04 1955",
+        "exam_date": "Sep 16 2026",
+        "current_image": "1",
+        "total_images": "1"
+      }
+    }
+  ],
+  "ocr_version": 3,
+  "received_images": 1,
+  "updated_at": "2026-11-02 14:02:13"
+}

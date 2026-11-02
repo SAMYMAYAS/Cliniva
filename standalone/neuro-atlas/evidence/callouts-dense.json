@@ -1,0 +1,33 @@
+{
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  },
+  "browser": {
+    "mode": "launch",
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "actions": [
+    {
+      "action": "click",
+      "locator": {
+        "selector": "button[data-slice=\"13\"]",
+        "kind": "css"
+      },
+      "step_id": "dense_slice"
+    }
+  ],
+  "capture": {
+    "after_each_step": [],
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot"
+    ]
+  },
+  "environment": {
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    }
+  }
+}

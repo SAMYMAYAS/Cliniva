@@ -1,0 +1,100 @@
+{
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  },
+  "browser": {
+    "mode": "launch",
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "actions": [
+    {
+      "action": "wait_for",
+      "step_id": "ready",
+      "state": "visible",
+      "locator": {
+        "kind": "css",
+        "selector": ".marker:first-child"
+      }
+    },
+    {
+      "action": "select_option",
+      "step_id": "arteries",
+      "value": {
+        "source": "literal",
+        "value": "Artères"
+      },
+      "locator": {
+        "kind": "css",
+        "selector": "#category"
+      }
+    },
+    {
+      "action": "click",
+      "step_id": "slice24",
+      "locator": {
+        "kind": "css",
+        "selector": "button[data-slice=\"24\"]"
+      }
+    },
+    {
+      "action": "click",
+      "step_id": "slice1",
+      "locator": {
+        "kind": "css",
+        "selector": "button[data-slice=\"1\"]"
+      }
+    },
+    {
+      "action": "select_option",
+      "step_id": "all_categories",
+      "value": {
+        "source": "literal",
+        "value": ""
+      },
+      "locator": {
+        "kind": "css",
+        "selector": "#category"
+      }
+    },
+    {
+      "action": "click",
+      "step_id": "slice13",
+      "locator": {
+        "kind": "css",
+        "selector": "button[data-slice=\"13\"]"
+      }
+    },
+    {
+      "action": "click",
+      "step_id": "return5",
+      "locator": {
+        "kind": "css",
+        "selector": "button[data-slice=\"5\"]"
+      }
+    },
+    {
+      "action": "click",
+      "step_id": "highlight",
+      "locator": {
+        "kind": "css",
+        "selector": ".annotation-row:nth-child(8) .jump"
+      }
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "accessibility"
+    ],
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot"
+    ]
+  },
+  "environment": {
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    }
+  }
+}

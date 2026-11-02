@@ -1,0 +1,8 @@
+=== INFORMATIONS DE L’EXAMEN (OCR / DICOM) ===
+Patient : ACHOURI RATIBA
+Centre : KACEL MEDICAL GROUPE
+Identifiant patient : PAS-11145214
+Date de l’examen : 2026-09-08
+Numéro d’ordre / Accession Number : Non reconnu
+Passage : PAS-11145214
+Images reçues : 2/?

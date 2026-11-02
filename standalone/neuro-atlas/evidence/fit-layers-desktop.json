@@ -1,0 +1,107 @@
+{
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  },
+  "browser": {
+    "mode": "launch",
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "actions": [
+    {
+      "action": "wait_for",
+      "locator": {
+        "selector": ".external-label[data-annotation-id=\"video-v1-s05-01\"]",
+        "kind": "css"
+      },
+      "state": "visible",
+      "step_id": "ready"
+    },
+    {
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#regions"
+      },
+      "step_id": "regions"
+    },
+    {
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      },
+      "value": {
+        "source": "literal",
+        "value": "13"
+      },
+      "step_id": "slice13"
+    },
+    {
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      },
+      "key": "Tab",
+      "step_id": "apply13"
+    },
+    {
+      "step_id": "settled-mixed",
+      "action": "wait_for_timeout",
+      "duration_ms": 300
+    },
+    {
+      "step_id": "regions-only",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#labels"
+      }
+    },
+    {
+      "step_id": "plain",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#regions"
+      }
+    },
+    {
+      "step_id": "details-only",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#labels"
+      }
+    },
+    {
+      "step_id": "mixed-again",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#regions"
+      }
+    },
+    {
+      "step_id": "settled",
+      "action": "wait_for_timeout",
+      "duration_ms": 300
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "accessibility"
+    ],
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot"
+    ]
+  },
+  "environment": {
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    }
+  }
+}

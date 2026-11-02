@@ -1,0 +1,8 @@
+=== INFORMATIONS DE L’EXAMEN (OCR / DICOM) ===
+Patient : BENFERAH SABRINA
+Centre : KACEL MEDICAL GROUPE
+Identifiant patient : Pas-139268789
+Date de l’examen : 2026-09-13
+Numéro d’ordre / Accession Number : 166679
+Passage : Pas-139268789
+Images reçues : 6/6

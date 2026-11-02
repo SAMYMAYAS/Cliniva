@@ -1,0 +1,36 @@
+{
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  },
+  "browser": {
+    "mode": "launch",
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "actions": [
+    {
+      "action": "wait_for",
+      "step_id": "ready",
+      "state": "visible",
+      "locator": {
+        "kind": "css",
+        "selector": ".marker:first-child"
+      }
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "accessibility"
+    ],
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot"
+    ]
+  },
+  "environment": {
+    "viewport": {
+      "width": 390,
+      "height": 844
+    }
+  }
+}

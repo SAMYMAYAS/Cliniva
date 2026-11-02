@@ -1,0 +1,33 @@
+{
+  "group_key": "2026-09-03|164723|pas-39428664",
+  "patient_name": "BELAICHE ZEKHROUFA",
+  "patient_id": "Pas-39428664",
+  "exam_date": "2026-09-03",
+  "center": "KACEL MEDICAL GROUPE",
+  "order_number": "164723",
+  "passage_number": "Pas-39428664",
+  "total_images": 1,
+  "images": [
+    {
+      "name": "Image_001_sur_001.png",
+      "current_image": 1,
+      "total_images": 1,
+      "received_at": "2026-11-02 14:03:23",
+      "ocr": {
+        "patient_name": "BELAICHE ZEKHROUFA",
+        "patient_id": "Pas-39428664",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "164723",
+        "passage_number": "Pas-39428664",
+        "sex": "F",
+        "date_of_birth": "Sep 21 1947",
+        "exam_date": "Sep 03 2026",
+        "current_image": "1",
+        "total_images": "1"
+      }
+    }
+  ],
+  "ocr_version": 3,
+  "received_images": 1,
+  "updated_at": "2026-11-02 14:03:23"
+}

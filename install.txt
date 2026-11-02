@@ -1,0 +1,54 @@
+Voici les bibliothèques Python utilisées par Cliniva, y compris celles nécessaires aux fonctions PACS, DME, Excel et PDF. La liste actuelle de pip.txt n’inclut pas plusieurs dépendances utilisées par le code.
+
+Depuis le dossier Cliniva, exécute cette commande PowerShell :
+python -m pip install fastapi uvicorn jinja2 pydantic psycopg2-binary pywebview pynetdicom pydicom "pylibjpeg>=2.0" "pylibjpeg-libjpeg>=2.1" "pylibjpeg-openjpeg>=2.0" "pylibjpeg-rle>=2.0" pywin32 numpy Pillow opencv-python pytesseract python-docx docx2pdf qrcode reportlab openpyxl pandas pypdf python-multipart pythonnet
+Quelques composants nécessaires ne s’installent pas avec pip : PostgreSQL et ses outils pg_dump, le runtime Microsoft Edge WebView2, ainsi que Microsoft Word pour la conversion Word vers PDF. Pour l’OCR DICOM Print, il faut aussi installer le moteur Tesseract : pytesseract seul ne suffit pas. Yate est nécessaire uniquement si tu actives le serveur SIP.
+
+tkinter, utilisé par client.py, est fourni avec l’installation standard de Python pour Windows.
+
+  
+21:01
+
+
+
+
+
+
+
+comment installer Microsoft Edge WebView2, ainsi que Microsoft Word pour la conversion Word vers PDF. Pour l’OCR DICOM Print, il faut aussi installer le moteur Tesseract : pytesseract seul ne suffit pas. Yate est nécessaire uniquement si tu actives le serveur SIP.  
+
+
+
+
+
+
+
+21:10
+
+
+
+
+
+
+Durée d’exécution : 35s
+
+
+
+Voici les étapes sur le nouveau PC. Pour ces installations, ferme Cliniva puis redémarre-le après.
+Microsoft Edge WebView2
+1. Ouvre la page Microsoft WebView2.
+2. Dans Evergreen Bootstrapper, clique sur Download, puis lance l’installateur.
+3. Si le runtime n’est pas déjà présent, l’installation le téléchargera. Sous Windows 11, il est parfois déjà installé. Microsoft confirme que le runtime peut être intégré à Windows 11.
+Microsoft Word pour les comptes rendus PDF
+1. Va sur Microsoft 365 Apps et connecte-toi avec un compte qui possède une licence Office.
+2. Clique sur Installer les applications, puis installe Word ou Microsoft 365.
+3. Vérifie que Word s’ouvre sur le bureau et qu’il est activé. Word dans le navigateur ne suffit pas à la conversion Word vers PDF de Cliniva. Procédure Microsoft.
+Tesseract pour l’OCR DICOM Print
+1. Télécharge l’installateur Windows 64 bits depuis la page de téléchargement UB Mannheim. C’est une compilation Windows communautaire recommandée par la documentation de Tesseract; le projet ne fournit pas d’installateur Windows officiel récent.
+2. Pendant l’installation, garde le dossier proposé et installe les données de langue English (eng), utilisées par l’OCR de Cliniva.
+3. Ferme puis rouvre PowerShell et vérifie :
+tesseract --version
+tesseract --list-langs
+La première commande doit afficher une version et la seconde doit inclure eng.
+Yate pour le serveur SIP
+Tu peux ignorer cette installation si tu n’utilises pas le SIP. Sinon, consulte la page de téléchargement Yate, puis configure Cliniva avec le chemin de yate-console.exe après installation — pas celui de yate-service.exe.tion standard de Python pour Windows.

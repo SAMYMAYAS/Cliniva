@@ -1,0 +1,46 @@
+{
+  "capture": {
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot"
+    ]
+  },
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  },
+  "actions": [
+    {
+      "locator": {
+        "kind": "css",
+        "selector": "#scan"
+      },
+      "action": "wait_for",
+      "state": "visible",
+      "step_id": "ready"
+    },
+    {
+      "locator": {
+        "kind": "css",
+        "selector": "button[data-slice=\"12\"]"
+      },
+      "action": "click",
+      "step_id": "slice12"
+    },
+    {
+      "action": "wait_for_timeout",
+      "step_id": "settle",
+      "duration_ms": 200
+    }
+  ],
+  "environment": {
+    "viewport": {
+      "height": 1000,
+      "width": 1440
+    }
+  },
+  "browser": {
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "mode": "launch"
+  }
+}

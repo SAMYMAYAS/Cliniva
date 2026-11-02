@@ -1,0 +1,49 @@
+{
+  "browser": {
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "mode": "launch"
+  },
+  "start_url": {
+    "url": "https://www.imaios.com/fr/e-anatomy/cerveau/irm-axiale-du-cerveau"
+  },
+  "capture": {
+    "at_end": [
+      "dom",
+      "accessibility",
+      "url"
+    ]
+  },
+  "actions": [
+    {
+      "duration_ms": 5000,
+      "step_id": "load",
+      "action": "wait_for_timeout"
+    },
+    {
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "input[type=number]"
+      },
+      "step_id": "slice_12",
+      "value": {
+        "value": "12",
+        "source": "literal"
+      }
+    },
+    {
+      "action": "press",
+      "locator": {
+        "kind": "css",
+        "selector": "input[type=number]"
+      },
+      "step_id": "apply_slice",
+      "key": "Enter"
+    },
+    {
+      "action": "wait_for_timeout",
+      "duration_ms": 500,
+      "step_id": "settle"
+    }
+  ]
+}

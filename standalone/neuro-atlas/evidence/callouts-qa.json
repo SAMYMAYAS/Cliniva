@@ -1,0 +1,129 @@
+{
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  },
+  "browser": {
+    "mode": "launch",
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "actions": [
+    {
+      "step_id": "ready",
+      "locator": {
+        "kind": "css",
+        "selector": ".external-label[data-annotation-id=\"video-v1-s05-01\"]"
+      },
+      "state": "visible",
+      "action": "wait_for"
+    },
+    {
+      "step_id": "open",
+      "locator": {
+        "kind": "css",
+        "selector": ".external-label[data-annotation-id=\"video-v1-s05-01\"]"
+      },
+      "action": "click"
+    },
+    {
+      "step_id": "delete",
+      "locator": {
+        "kind": "css",
+        "selector": "#delete-annotation"
+      },
+      "action": "click"
+    },
+    {
+      "step_id": "restore",
+      "locator": {
+        "kind": "css",
+        "selector": "#restore-deleted"
+      },
+      "action": "click"
+    },
+    {
+      "step_id": "restored",
+      "locator": {
+        "kind": "css",
+        "selector": ".external-label[data-annotation-id=\"video-v1-s05-01\"]"
+      },
+      "state": "visible",
+      "action": "wait_for"
+    },
+    {
+      "step_id": "question",
+      "locator": {
+        "kind": "css",
+        "selector": "#review-list .review-item:first-child"
+      },
+      "action": "click"
+    },
+    {
+      "step_id": "answer",
+      "locator": {
+        "kind": "css",
+        "selector": "#review-answer"
+      },
+      "value": {
+        "source": "literal",
+        "value": "Libellé à confirmer (test)"
+      },
+      "action": "fill"
+    },
+    {
+      "step_id": "save_answer",
+      "locator": {
+        "kind": "css",
+        "selector": "#review-form button[type=submit]"
+      },
+      "action": "click"
+    },
+    {
+      "step_id": "reload",
+      "wait_until": "load",
+      "destination": {
+        "url": "http://127.0.0.1:4177"
+      },
+      "action": "goto"
+    },
+    {
+      "step_id": "back_to_question",
+      "locator": {
+        "kind": "css",
+        "selector": "#review-list .review-item:first-child"
+      },
+      "action": "click"
+    },
+    {
+      "step_id": "place",
+      "locator": {
+        "kind": "css",
+        "selector": "#stage"
+      },
+      "action": "click"
+    },
+    {
+      "step_id": "return5",
+      "locator": {
+        "kind": "css",
+        "selector": "button[data-slice=\"5\"]"
+      },
+      "action": "click"
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "accessibility"
+    ],
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot"
+    ]
+  },
+  "environment": {
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    }
+  }
+}

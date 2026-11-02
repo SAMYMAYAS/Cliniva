@@ -1,0 +1,52 @@
+{
+  "group_key": "2026-09-08|pas-11145214|pas-11145214",
+  "patient_name": "ACHOURI RATIBA",
+  "patient_id": "PAS-11145214",
+  "exam_date": "2026-09-08",
+  "center": "KACEL MEDICAL GROUPE",
+  "order_number": "",
+  "passage_number": "PAS-11145214",
+  "total_images": null,
+  "images": [
+    {
+      "name": "Image_001_sur_inconnu.png",
+      "current_image": 1,
+      "total_images": null,
+      "received_at": "2026-11-02 14:25:47",
+      "ocr": {
+        "patient_name": "ACHOURI RATIBA",
+        "patient_id": "PAS-11145214",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "",
+        "passage_number": "PAS-11145214",
+        "sex": "F",
+        "date_of_birth": "Jun 12 1980",
+        "exam_date": "Sep 08 2026",
+        "current_image": "",
+        "total_images": ""
+      }
+    },
+    {
+      "name": "Image_002_sur_inconnu.png",
+      "current_image": 2,
+      "total_images": null,
+      "received_at": "2026-11-02 14:47:24",
+      "ocr": {
+        "patient_name": "ACHOURI RATIBA",
+        "patient_id": "PAS-11145214",
+        "center": "KACEL MEDICAL GROUPE",
+        "order_number": "",
+        "passage_number": "PAS-11145214",
+        "sex": "F",
+        "date_of_birth": "Jun 12 1980",
+        "exam_date": "Sep 08 2026",
+        "current_image": "",
+        "total_images": ""
+      }
+    }
+  ],
+  "ocr_version": 3,
+  "received_images": 2,
+  "updated_at": "2026-11-02 14:47:24",
+  "total_ocr_attempted_at": "2026-11-02 14:52:52"
+}

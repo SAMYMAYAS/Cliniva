@@ -1,0 +1,114 @@
+{
+  "browser": {
+    "mode": "launch",
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "actions": [
+    {
+      "step_id": "ready",
+      "state": "visible",
+      "action": "wait_for",
+      "locator": {
+        "kind": "css",
+        "selector": "#scan"
+      }
+    },
+    {
+      "step_id": "slice12",
+      "action": "fill",
+      "value": {
+        "source": "literal",
+        "value": "12"
+      },
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      }
+    },
+    {
+      "step_id": "apply",
+      "action": "press",
+      "key": "Tab",
+      "locator": {
+        "kind": "css",
+        "selector": "#slice"
+      }
+    },
+    {
+      "step_id": "zoom",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#zoom-in"
+      }
+    },
+    {
+      "step_id": "annotate",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#annotate"
+      }
+    },
+    {
+      "step_id": "place",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#stage"
+      }
+    },
+    {
+      "step_id": "name",
+      "action": "fill",
+      "value": {
+        "source": "literal",
+        "value": "Repère de test"
+      },
+      "locator": {
+        "kind": "css",
+        "selector": "#label-input"
+      }
+    },
+    {
+      "step_id": "save",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#annotation-form button[type=submit]"
+      }
+    },
+    {
+      "step_id": "quiz",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#quiz"
+      }
+    },
+    {
+      "step_id": "reveal",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": ".marker"
+      }
+    },
+    {
+      "step_id": "settle",
+      "duration_ms": 300,
+      "action": "wait_for_timeout"
+    }
+  ],
+  "capture": {
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot",
+      "url"
+    ]
+  },
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  }
+}

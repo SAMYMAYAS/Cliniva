@@ -1,0 +1,10 @@
+=== INFORMATIONS DE L’EXAMEN (OCR / DICOM) ===
+Patient : BELOUCIF OURIDA
+Centre : KACEL MEDICAL GROUPE
+Identifiant patient : Pas-169375106
+Date de l’examen : 2026-09-16
+Numéro d’ordre / Accession Number : 167086
+Passage : Pas-169375106
+Images reçues : 1/1
+Dernière page reconnue : 1/1
+Dernière réception : 2026-11-02 14:02:13

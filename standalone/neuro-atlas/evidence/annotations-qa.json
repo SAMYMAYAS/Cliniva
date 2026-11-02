@@ -1,0 +1,133 @@
+{
+  "start_url": {
+    "url": "http://127.0.0.1:4177"
+  },
+  "browser": {
+    "mode": "launch",
+    "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  "actions": [
+    {
+      "action": "wait_for",
+      "locator": {
+        "kind": "css",
+        "selector": ".marker:first-child"
+      },
+      "state": "visible",
+      "step_id": "ready"
+    },
+    {
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#search"
+      },
+      "step_id": "search",
+      "value": {
+        "source": "literal",
+        "value": "Couronne radiée"
+      }
+    },
+    {
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": ".marker"
+      },
+      "step_id": "open"
+    },
+    {
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#label-input"
+      },
+      "step_id": "name",
+      "value": {
+        "source": "literal",
+        "value": "Couronne radiée (test sauvegarde)"
+      }
+    },
+    {
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#annotation-form button[type=submit]"
+      },
+      "step_id": "save"
+    },
+    {
+      "action": "goto",
+      "step_id": "reload",
+      "destination": {
+        "url": "http://127.0.0.1:4177"
+      },
+      "wait_until": "load"
+    },
+    {
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#search"
+      },
+      "step_id": "search_restored",
+      "value": {
+        "source": "literal",
+        "value": "test sauvegarde"
+      }
+    },
+    {
+      "action": "wait_for",
+      "locator": {
+        "kind": "css",
+        "selector": ".marker"
+      },
+      "state": "visible",
+      "step_id": "restored"
+    },
+    {
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#search"
+      },
+      "step_id": "clear",
+      "value": {
+        "source": "literal",
+        "value": ""
+      }
+    },
+    {
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "#quiz"
+      },
+      "step_id": "quiz"
+    },
+    {
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": ".marker:first-child"
+      },
+      "step_id": "reveal"
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "accessibility"
+    ],
+    "at_end": [
+      "dom",
+      "accessibility",
+      "screenshot"
+    ]
+  },
+  "environment": {
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    }
+  }
+}

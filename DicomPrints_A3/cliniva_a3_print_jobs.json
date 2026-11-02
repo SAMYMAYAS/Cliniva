@@ -1,0 +1,17 @@
+[
+  {
+    "id": "25328b92e6f34b11b1d310b658955bfd",
+    "folder": "2026-09-08\\ACHOURI RATIBA - nombre inconnu images",
+    "patient_name": "ACHOURI RATIBA",
+    "order_number": "",
+    "passage_number": "PAS-11145214",
+    "received_images": 1,
+    "received_at": "2026-11-02 14:47:24",
+    "updated_at": "2026-11-02 14:47:25",
+    "printer": "Microsoft Print to PDF",
+    "transfer_state": "Échec d’envoi à l’imprimante",
+    "print_state": "Échec",
+    "spooler_job_id": null,
+    "error": "function takes exactly 3 arguments (4 given)"
+  }
+]
