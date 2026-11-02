@@ -173,7 +173,7 @@ logger = logging.getLogger("ClinivaDesktop")
 
 BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
-CONFIG_FILE = "config.json"
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 
 # ============================================================================
@@ -199,6 +199,7 @@ def load_app_configuration() -> Dict[str, Any]:
         "mwl_ae_title": "CLINIVA_MWL",
         "mwl_station_ae_title": "",
         "pacs_auto_start": False,
+        "windows_service_enabled": False,
     }
 
     if not os.path.exists(CONFIG_FILE):
@@ -216,6 +217,7 @@ def load_app_configuration() -> Dict[str, Any]:
                 return default_config
             # Preserve the previous PACS startup preference for existing installs.
             config.setdefault("pacs_auto_start", bool(config.get("pacs_enabled", False)))
+            config.setdefault("windows_service_enabled", False)
             return config
     except Exception as exc:
         logger.warning(
@@ -1771,6 +1773,17 @@ def main() -> None:
     if config.get("server_mode") == "local":
         listen_host = config.get("local_host", "0.0.0.0")
         logger.info("Démarrage du serveur local sur %s:%s...", listen_host, port)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if probe.connect_ex(("127.0.0.1", int(port))) == 0:
+                logger.error(
+                    "Le port %s est déjà utilisé. Si le service Cliniva tourne, arrête-le avant de lancer main.py.",
+                    port,
+                )
+                raise SystemExit(
+                    f"Le port {port} est déjà utilisé. Arrête le service Cliniva avec "
+                    "scripts\\ClinivaService.ps1 -Action Stop, puis relance main.py."
+                )
 
         server_thread = LocalServerThread(listen_host, port)
         _runtime_state["thread"] = server_thread
