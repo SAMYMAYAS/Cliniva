@@ -432,8 +432,8 @@ class DicomPrintServer:
         dc = None
         try:
             import win32con
+            import win32gui
             import win32print
-            import win32ui
             from PIL import Image, ImageWin
 
             printer_info = next((item for item in DicomPrintServer.available_printers()
@@ -448,37 +448,43 @@ class DicomPrintServer:
                 devmode.PaperSize = win32con.DMPAPER_A3
                 devmode.Orientation = win32con.DMORIENT_PORTRAIT
                 devmode.Fields |= win32con.DM_PAPERSIZE | win32con.DM_ORIENTATION
-                dc = win32ui.CreateDC()
-                dc.CreateDC("WINSPOOL", printer_name, None, devmode)
+                # Create the native printer HDC with its A3 DEVMODE.  PyCDC
+                # returned by win32ui.CreateDC() is an empty MFC wrapper and
+                # does not expose CreateDC on all pywin32 builds.
+                dc = win32gui.CreateDC("WINSPOOL", printer_name, None, devmode)
+                if not dc:
+                    raise RuntimeError("Windows n’a pas pu créer le contexte de l’imprimante A3.")
             finally:
                 win32print.ClosePrinter(handle)
-            width = dc.GetDeviceCaps(win32con.HORZRES)
-            height = dc.GetDeviceCaps(win32con.VERTRES)
+            width = win32print.GetDeviceCaps(dc, win32con.HORZRES)
+            height = win32print.GetDeviceCaps(dc, win32con.VERTRES)
             if width < 1 or height < 1:
                 raise RuntimeError("Le pilote de l’imprimante ne fournit pas de zone A3 imprimable.")
-            dc.StartDoc(f"Cliniva DICOM Print - {len(paths)} image(s)")
+            win32print.StartDoc(dc, (f"Cliniva DICOM Print - {len(paths)} image(s)", None, None, 0))
             for path in sorted(paths, key=lambda item: item.stat().st_mtime_ns):
                 with Image.open(path) as source:
                     image = source.convert("RGB")
                     image.thumbnail((width, height), Image.Resampling.LANCZOS)
                     left, top = (width - image.width) // 2, (height - image.height) // 2
                     dib = ImageWin.Dib(image)
-                    dc.StartPage()
-                    dib.draw(dc.GetHandleOutput(), (left, top, left + image.width, top + image.height))
-                    dc.EndPage()
-            dc.EndDoc()
+                    win32print.StartPage(dc)
+                    dib.draw(dc, (left, top, left + image.width, top + image.height))
+                    win32print.EndPage(dc)
+            win32print.EndDoc(dc)
             logger.info("Impression automatique terminée : %d image(s) sur %s (A3)", len(paths), printer_name)
         except Exception:
             logger.exception("Échec de l’impression automatique DICOM vers %s", printer_name)
             if dc is not None:
                 try:
-                    dc.AbortDoc()
+                    import win32print
+                    win32print.AbortDoc(dc)
                 except Exception:
                     pass
         finally:
             if dc is not None:
                 try:
-                    dc.DeleteDC()
+                    import win32gui
+                    win32gui.DeleteDC(dc)
                 except Exception:
                     pass
 
