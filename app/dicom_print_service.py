@@ -98,8 +98,10 @@ def _extract_print_image_numbers(frame) -> tuple[str, str]:
     resized = cv2.resize(crop, None, fx=8, fy=8, interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 else resized
     normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-    _, fixed = cv2.threshold(normalized, 200, 255, cv2.THRESH_BINARY_INV)
-    _, otsu = cv2.threshold(normalized, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Le bandeau de cette station est clair avec des caractères noirs.
+    # Garder le texte noir sur fond blanc (l’inversion effaçait le compteur).
+    _, fixed = cv2.threshold(normalized, 200, 255, cv2.THRESH_BINARY)
+    _, otsu = cv2.threshold(normalized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     for processed in (fixed, otsu):
         padded = cv2.copyMakeBorder(processed, 30, 30, 40, 40,
                                     cv2.BORDER_CONSTANT, value=255)
@@ -557,7 +559,22 @@ class DicomPrintServer:
                     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     logger.warning("Manifeste DICOM Print illisible : %s", manifest_path)
-            if int(manifest.get("ocr_version") or 0) < 3:
+            manifest_total_before = manifest.get("total_images")
+            voted_total = _consensus_print_total(manifest, {})
+            if voted_total:
+                manifest["total_images"] = voted_total
+                for entry in manifest.get("images", []):
+                    if isinstance(entry, dict):
+                        entry["total_images"] = voted_total
+            last_total_attempt = str(manifest.get("total_ocr_attempted_at") or "")
+            try:
+                retry_total_ocr = (not manifest.get("total_images") and
+                                   (not last_total_attempt or
+                                    (datetime.now() - datetime.strptime(
+                                        last_total_attempt, "%Y-%m-%d %H:%M:%S")).total_seconds() > 300))
+            except ValueError:
+                retry_total_ocr = not manifest.get("total_images")
+            if int(manifest.get("ocr_version") or 0) < 3 or retry_total_ocr:
                 # Migre aussi les images reçues avant l’amélioration OCR afin
                 # que le tableau affiche les métadonnées corrigées sans renvoi.
                 try:
@@ -589,6 +606,13 @@ class DicomPrintServer:
                             if corrected_image != image_path and not corrected_image.exists():
                                 image_path.rename(corrected_image)
                                 entry["name"] = corrected_image.name
+                    manifest["total_ocr_attempted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    voted_total = _consensus_print_total(manifest, {})
+                    if voted_total:
+                        manifest["total_images"] = voted_total
+                        for entry in image_entries:
+                            if isinstance(entry, dict):
+                                entry["total_images"] = voted_total
                     if manifest.get("exam_date"):
                         manifest["exam_date"] = _normalize_exam_date(manifest["exam_date"])
                     if ocr_succeeded:
@@ -620,6 +644,9 @@ class DicomPrintServer:
                         "\n".join(info_lines) + "\n", encoding="utf-8")
                 except Exception:
                     logger.exception("Impossible de retraiter l’OCR du groupe DICOM Print %s", folder)
+            elif manifest.get("total_images") != manifest_total_before:
+                manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                                          encoding="utf-8")
             modified = max(path.stat().st_mtime for path in images)
             try:
                 group_id = folder.relative_to(root).as_posix()
