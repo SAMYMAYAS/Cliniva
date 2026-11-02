@@ -266,6 +266,7 @@ class ClientDicomServicesBridge:
         self.config = config
         self._lock = threading.RLock()
         self._print_server = None
+        self._a3_print_server = None
         self._pacs_server = None
         self._pacs_datetime_jobs: Dict[str, Dict[str, Any]] = {}
         self._pacs_datetime_jobs_lock = threading.Lock()
@@ -403,7 +404,24 @@ class ClientDicomServicesBridge:
             saved = self.config.get("dicom_print_config")
             if isinstance(saved, dict):
                 self._print_server._config.update(saved)
+            # Le premier récepteur reste réservé à l’archivage.
+            self._print_server._config["auto_print_enabled"] = False
+            self._print_server._config["auto_print_printer"] = ""
         return self._print_server
+
+    def _a3_service(self):
+        if self._a3_print_server is None:
+            from app.dicom_print_service import DicomPrintServer
+            self._a3_print_server = DicomPrintServer()
+            self._a3_print_server._config.update({
+                "ae_title": "CLINIVA_A3_PRINT", "port": 11114,
+                "storage_dir": str(Path.home() / "DicomPrints_A3"),
+                "auto_print_enabled": False, "auto_print_printer": "", "auto_print_paper": "A3",
+            })
+            saved = self.config.get("dicom_print_a3_config")
+            if isinstance(saved, dict):
+                self._a3_print_server._config.update(saved)
+        return self._a3_print_server
 
     def _save_config(self) -> None:
         config_path = os.path.abspath(CONFIG_FILE)
@@ -431,7 +449,10 @@ class ClientDicomServicesBridge:
     def dicom_print_start(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
             with self._lock:
-                status_data = self._service().start(settings or {})
+                safe_settings = dict(settings or {})
+                safe_settings["auto_print_enabled"] = False
+                safe_settings["auto_print_printer"] = ""
+                status_data = self._service().start(safe_settings)
                 self.config["dicom_print_config"] = status_data["config"]
                 self.config["dicom_print_enabled"] = True
                 self._save_config()
@@ -451,23 +472,66 @@ class ClientDicomServicesBridge:
             logger.exception("Impossible d’arrêter DICOM Print sur ce poste")
             return {"ok": False, "error": str(exc)}
 
-    def dicom_print_printers(self) -> list[Dict[str, Any]]:
+    def dicom_print_a3_status(self) -> Dict[str, Any]:
         try:
             with self._lock:
-                return self._service().available_printers()
+                state = self._a3_service().status()
+                return {**state, "machine": socket.gethostname()}
         except Exception:
-            logger.exception("Impossible de détecter les imprimantes du poste DICOM Print")
+            logger.exception("Impossible de lire l’état du second serveur DICOM Print")
+            return {"running": False, "config": {}, "last_error": "État indisponible"}
+
+    def dicom_print_a3_printers(self) -> list[Dict[str, Any]]:
+        try:
+            with self._lock:
+                return self._a3_service().available_printers()
+        except Exception:
+            logger.exception("Impossible de détecter les imprimantes pour le second serveur DICOM Print")
             return []
 
-    def dicom_print_configure_auto_print(self, enabled: bool, printer_name: str = "") -> Dict[str, Any]:
+    def dicom_print_a3_save_config(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         try:
             with self._lock:
-                state = self._service().configure_auto_print(enabled, printer_name)
-                self.config["dicom_print_config"] = state["config"]
+                state = self._a3_service().configure_listener(settings)
+                self.config["dicom_print_a3_config"] = state["config"]
                 self._save_config()
             return {"ok": True, **state, "machine": socket.gethostname()}
         except Exception as exc:
-            logger.warning("Impossible d’enregistrer l’impression automatique DICOM : %s", exc)
+            logger.warning("Impossible d’enregistrer la configuration du second DICOM Print : %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_a3_configure_output(self, enabled: bool, printer_name: str = "") -> Dict[str, Any]:
+        try:
+            with self._lock:
+                state = self._a3_service().configure_auto_print(enabled, printer_name)
+                self.config["dicom_print_a3_config"] = state["config"]
+                self._save_config()
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            logger.warning("Impossible de configurer la sortie imprimante A3 : %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_a3_start(self) -> Dict[str, Any]:
+        try:
+            with self._lock:
+                state = self._a3_service().start()
+                self.config["dicom_print_a3_config"] = state["config"]
+                self.config["dicom_print_a3_enabled"] = True
+                self._save_config()
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            logger.warning("Impossible de démarrer le second serveur DICOM Print : %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_a3_stop(self) -> Dict[str, Any]:
+        try:
+            with self._lock:
+                state = self._a3_service().stop()
+                self.config["dicom_print_a3_enabled"] = False
+                self._save_config()
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            logger.warning("Impossible d’arrêter le second serveur DICOM Print : %s", exc)
             return {"ok": False, "error": str(exc)}
 
     def dicom_services_shutdown(self) -> None:
@@ -476,6 +540,8 @@ class ClientDicomServicesBridge:
             with self._lock:
                 if self._print_server is not None:
                     self._print_server.stop()
+                if self._a3_print_server is not None:
+                    self._a3_print_server.stop()
                 if self._pacs_server is not None:
                     self._pacs_server.stop()
         except Exception:
@@ -1669,6 +1735,10 @@ def main() -> None:
         startup_result = client_bridge.dicom_print_start(config.get("dicom_print_config"))
         if not startup_result.get("ok"):
             logger.warning("DICOM Print local non démarré : %s", startup_result.get("error"))
+    if config.get("dicom_print_a3_enabled"):
+        startup_result = client_bridge.dicom_print_a3_start()
+        if not startup_result.get("ok"):
+            logger.warning("Second serveur DICOM Print A3 non démarré : %s", startup_result.get("error"))
     # Le récepteur PACS peut être activé aussi bien sur le serveur local que sur
     # chaque poste distant. La configuration et les fichiers restent propres
     # au poste qui exécute cette instance de Cliniva.

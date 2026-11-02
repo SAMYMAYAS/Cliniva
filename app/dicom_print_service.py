@@ -393,6 +393,36 @@ class DicomPrintServer:
             self._config["auto_print_paper"] = "A3"
             return self.status()
 
+    def configure_listener(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Configure un récepteur arrêté sans modifier un autre serveur DICOM Print."""
+        with self._lock:
+            listener_fields = ("ae_title", "host", "port", "storage_dir")
+            if self._server is not None and any(
+                str((settings or {}).get(key, self._config.get(key))) != str(self._config.get(key))
+                for key in listener_fields
+            ):
+                raise RuntimeError("Arrêtez ce serveur DICOM Print avant de modifier son AE Title, son port ou son dossier.")
+            updated = dict(self._config)
+            updated.update(settings or {})
+            ae_title = str(updated.get("ae_title") or "").strip().upper()
+            host = str(updated.get("host") or "0.0.0.0").strip() or "0.0.0.0"
+            try:
+                port = int(updated.get("port"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Le port DICOM doit être un nombre entre 1 et 65535.") from exc
+            storage_dir = Path(str(updated.get("storage_dir") or "")).expanduser()
+            if not re.fullmatch(r"[A-Z0-9_ -]{1,16}", ae_title):
+                raise ValueError("L’AE Title doit contenir de 1 à 16 caractères (A-Z, 0-9, espace, _ ou -).")
+            if not 1 <= port <= 65535:
+                raise ValueError("Le port DICOM doit être compris entre 1 et 65535.")
+            if not storage_dir.is_absolute():
+                raise ValueError("Le dossier de réception doit être un chemin absolu sur ce poste.")
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            updated.update({"ae_title": ae_title, "host": host, "port": port,
+                            "storage_dir": str(storage_dir), "auto_print_paper": "A3"})
+            self._config = updated
+            return self.status()
+
     @staticmethod
     def _print_paths_a3(paths: list[Path], printer_name: str) -> None:
         """Imprime les images du N-ACTION dans un seul travail Windows au format A3."""

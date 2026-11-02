@@ -237,6 +237,7 @@ class ClientHardwareBridge:
     def __init__(self) -> None:
         self._zoom_percent = 100
         self._dicom_print_server = None
+        self._dicom_print_a3_server = None
         self._dicom_print_lock = threading.RLock()
         self._word_sync_jobs: set[tuple[str, str, int]] = set()
         self._word_sync_states: dict[tuple[str, str, int], dict] = {}
@@ -282,7 +283,26 @@ class ClientHardwareBridge:
             saved = self._client_config().get("dicom_print_config")
             if isinstance(saved, dict):
                 self._dicom_print_server._config.update(saved)
+            self._dicom_print_server._config["auto_print_enabled"] = False
+            self._dicom_print_server._config["auto_print_printer"] = ""
         return self._dicom_print_server
+
+    def _dicom_print_a3_service(self):
+        if self._dicom_print_a3_server is None:
+            try:
+                from client_dicom_print import DicomPrintServer
+            except ImportError as exc:
+                raise RuntimeError("Le moteur DICOM Print du poste manque. Relance le client connecté au serveur pour recevoir sa mise à jour.") from exc
+            self._dicom_print_a3_server = DicomPrintServer()
+            self._dicom_print_a3_server._config.update({
+                "ae_title": "CLINIVA_A3_PRINT", "port": 11114,
+                "storage_dir": str(Path.home() / "DicomPrints_A3"),
+                "auto_print_enabled": False, "auto_print_printer": "", "auto_print_paper": "A3",
+            })
+            saved = self._client_config().get("dicom_print_a3_config")
+            if isinstance(saved, dict):
+                self._dicom_print_a3_server._config.update(saved)
+        return self._dicom_print_a3_server
 
     def dicom_print_status(self) -> dict:
         with self._dicom_print_lock:
@@ -303,7 +323,10 @@ class ClientHardwareBridge:
     def dicom_print_start(self, settings: dict | None = None) -> dict:
         try:
             with self._dicom_print_lock:
-                state = self._dicom_print_service().start(settings or {})
+                safe_settings = dict(settings or {})
+                safe_settings["auto_print_enabled"] = False
+                safe_settings["auto_print_printer"] = ""
+                state = self._dicom_print_service().start(safe_settings)
                 self._save_dicom_print_config({"dicom_print_config": state["config"], "dicom_print_enabled": True})
             return {"ok": True, **state, "machine": socket.gethostname()}
         except Exception as exc:
@@ -318,18 +341,51 @@ class ClientHardwareBridge:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def dicom_print_printers(self) -> list[dict]:
+    def dicom_print_a3_status(self) -> dict:
+        with self._dicom_print_lock:
+            state = self._dicom_print_a3_service().status()
+            return {**state, "machine": socket.gethostname()}
+
+    def dicom_print_a3_printers(self) -> list[dict]:
         try:
             with self._dicom_print_lock:
-                return self._dicom_print_service().available_printers()
+                return self._dicom_print_a3_service().available_printers()
         except Exception:
             return []
 
-    def dicom_print_configure_auto_print(self, enabled: bool, printer_name: str = "") -> dict:
+    def dicom_print_a3_save_config(self, settings: dict) -> dict:
         try:
             with self._dicom_print_lock:
-                state = self._dicom_print_service().configure_auto_print(enabled, printer_name)
-                self._save_dicom_print_config({"dicom_print_config": state["config"]})
+                state = self._dicom_print_a3_service().configure_listener(settings)
+                self._save_dicom_print_config({"dicom_print_a3_config": state["config"]})
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_a3_configure_output(self, enabled: bool, printer_name: str = "") -> dict:
+        try:
+            with self._dicom_print_lock:
+                state = self._dicom_print_a3_service().configure_auto_print(enabled, printer_name)
+                self._save_dicom_print_config({"dicom_print_a3_config": state["config"]})
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_a3_start(self) -> dict:
+        try:
+            with self._dicom_print_lock:
+                state = self._dicom_print_a3_service().start()
+                self._save_dicom_print_config({"dicom_print_a3_config": state["config"],
+                                               "dicom_print_a3_enabled": True})
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def dicom_print_a3_stop(self) -> dict:
+        try:
+            with self._dicom_print_lock:
+                state = self._dicom_print_a3_service().stop()
+                self._save_dicom_print_config({"dicom_print_a3_enabled": False})
             return {"ok": True, **state, "machine": socket.gethostname()}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -340,6 +396,10 @@ class ClientHardwareBridge:
             result = self.dicom_print_start(saved.get("dicom_print_config") or {})
             if not result.get("ok"):
                 print(f"DICOM Print local non démarré : {result.get('error')}", file=sys.stderr)
+        if saved.get("dicom_print_a3_enabled"):
+            result = self.dicom_print_a3_start()
+            if not result.get("ok"):
+                print(f"Second DICOM Print A3 non démarré : {result.get('error')}", file=sys.stderr)
 
     def dicom_print_recent_images(self) -> list[dict]:
         with self._dicom_print_lock:
