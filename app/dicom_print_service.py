@@ -207,7 +207,9 @@ class DicomPrintServer:
         self._lock = threading.RLock()
         self._server = None
         self._config = {"ae_title": "MY_PRINT_SCP", "host": "0.0.0.0", "port": 104,
-                        "storage_dir": str(Path.home() / "DicomPrints")}
+                        "storage_dir": str(Path.home() / "DicomPrints"),
+                        "auto_print_enabled": False, "auto_print_printer": "", "auto_print_paper": "A3"}
+        self._pending_print_paths: dict[int, list[Path]] = {}
         self._last_error = ""
 
     def status(self) -> dict[str, Any]:
@@ -295,6 +297,8 @@ class DicomPrintServer:
                 pixels = sequence.value[0]
                 try:
                     saved_path = self._save_print_image(pixels, attributes, storage_dir)
+                    with self._lock:
+                        self._pending_print_paths.setdefault(id(event.assoc), []).append(saved_path)
                     logger.info("Image DICOM Print reçue : %s", saved_path)
                     return 0x0000, Dataset()
                 except Exception:
@@ -302,13 +306,27 @@ class DicomPrintServer:
                     # Ne pas acquitter une image qui n'a pas été conservée.
                     return 0x0110, Dataset()
 
-            def action(_event):
+            def action(event):
                 logger.info("N-ACTION d’impression reçue")
+                with self._lock:
+                    paths = self._pending_print_paths.pop(id(event.assoc), [])
+                    enabled = bool(self._config.get("auto_print_enabled"))
+                    printer_name = str(self._config.get("auto_print_printer") or "").strip()
+                if enabled and paths:
+                    if not printer_name:
+                        logger.error("Impression automatique demandée, mais aucune imprimante A3 n’est configurée.")
+                    else:
+                        threading.Thread(target=self._print_paths_a3, args=(paths, printer_name),
+                                         name="ClinivaDprintAutoPrint", daemon=True).start()
                 return 0x0000, Dataset()
 
             def delete(_event):
                 logger.info("N-DELETE reçu : ressources du film libérées")
                 return 0x0000
+
+            def association_ended(event):
+                with self._lock:
+                    self._pending_print_paths.pop(id(event.assoc), None)
 
             ae = AE(ae_title=ae_title.encode("ascii"))
             for context in (Verification, BasicGrayscalePrintManagementMeta,
@@ -318,14 +336,121 @@ class DicomPrintServer:
             handlers = [(evt.EVT_C_ECHO, echo), (evt.EVT_N_GET, printer_status),
                         (evt.EVT_N_CREATE, create), (evt.EVT_N_SET, set_image),
                         (evt.EVT_N_ACTION, action), (evt.EVT_N_DELETE, delete)]
+            for event_name in ("EVT_RELEASED", "EVT_ABORTED"):
+                event_code = getattr(evt, event_name, None)
+                if event_code is not None:
+                    handlers.append((event_code, association_ended))
             try:
                 self._server = ae.start_server((host, port), block=False, evt_handlers=handlers)
             except Exception as exc:
                 self._last_error = str(exc)
                 raise RuntimeError(f"Impossible de démarrer DICOM Print sur {host}:{port} : {exc}") from exc
-            self._config = {"ae_title": ae_title, "host": host, "port": port, "storage_dir": str(storage_dir)}
+            self._config = {**config, "ae_title": ae_title, "host": host, "port": port,
+                            "storage_dir": str(storage_dir), "auto_print_paper": "A3"}
             self._last_error = ""
             return self.status()
+
+    @staticmethod
+    def available_printers() -> list[dict[str, Any]]:
+        """Liste les imprimantes installées sur le poste qui héberge ce récepteur."""
+        if os.name != "nt":
+            return []
+        try:
+            import win32print
+        except ImportError as exc:
+            raise RuntimeError("pywin32 est nécessaire pour détecter les imprimantes Windows.") from exc
+        flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+        printers = win32print.EnumPrinters(flags, None, 2)
+        default_name = win32print.GetDefaultPrinter() if printers else ""
+        result = []
+        for printer in printers:
+            name = str(printer.get("pPrinterName") or "").strip()
+            if name:
+                papers = None
+                try:
+                    import win32con
+                    paper_ids = win32print.DeviceCapabilities(
+                        name, str(printer.get("pPortName") or ""), win32con.DC_PAPERS)
+                    papers = [int(item) for item in paper_ids] if paper_ids else []
+                except Exception:
+                    pass
+                result.append({"name": name, "default": name == default_name,
+                               "supports_a3": None if papers is None else 8 in papers})
+        return sorted(result, key=lambda item: (not item["default"], item["name"].casefold()))
+
+    def configure_auto_print(self, enabled: bool, printer_name: str = "") -> dict[str, Any]:
+        printer_name = str(printer_name or "").strip()
+        if enabled:
+            available = {item["name"] for item in self.available_printers()}
+            if not printer_name or printer_name not in available:
+                raise ValueError("Choisissez une imprimante actuellement installée sur ce poste.")
+            details = next(item for item in self.available_printers() if item["name"] == printer_name)
+            if details.get("supports_a3") is False:
+                raise ValueError("L’imprimante sélectionnée ne déclare pas le format A3 dans son pilote Windows.")
+        with self._lock:
+            self._config["auto_print_enabled"] = bool(enabled)
+            self._config["auto_print_printer"] = printer_name if enabled else ""
+            self._config["auto_print_paper"] = "A3"
+            return self.status()
+
+    @staticmethod
+    def _print_paths_a3(paths: list[Path], printer_name: str) -> None:
+        """Imprime les images du N-ACTION dans un seul travail Windows au format A3."""
+        if os.name != "nt":
+            logger.error("Impression DICOM automatique disponible uniquement sous Windows.")
+            return
+        dc = None
+        try:
+            import win32con
+            import win32print
+            import win32ui
+            from PIL import Image, ImageWin
+
+            printer_info = next((item for item in DicomPrintServer.available_printers()
+                                 if item["name"] == printer_name), None)
+            if not printer_info:
+                raise RuntimeError(f"L’imprimante configurée « {printer_name} » n’est plus disponible.")
+            handle = win32print.OpenPrinter(printer_name)
+            try:
+                devmode = win32print.GetPrinter(handle, 2).get("pDevMode")
+                if devmode is None:
+                    raise RuntimeError("Windows n’a pas fourni les réglages du pilote d’imprimante.")
+                devmode.PaperSize = win32con.DMPAPER_A3
+                devmode.Orientation = win32con.DMORIENT_PORTRAIT
+                devmode.Fields |= win32con.DM_PAPERSIZE | win32con.DM_ORIENTATION
+                dc = win32ui.CreateDC()
+                dc.CreateDC("WINSPOOL", printer_name, None, devmode)
+            finally:
+                win32print.ClosePrinter(handle)
+            width = dc.GetDeviceCaps(win32con.HORZRES)
+            height = dc.GetDeviceCaps(win32con.VERTRES)
+            if width < 1 or height < 1:
+                raise RuntimeError("Le pilote de l’imprimante ne fournit pas de zone A3 imprimable.")
+            dc.StartDoc(f"Cliniva DICOM Print - {len(paths)} image(s)")
+            for path in sorted(paths, key=lambda item: item.stat().st_mtime_ns):
+                with Image.open(path) as source:
+                    image = source.convert("RGB")
+                    image.thumbnail((width, height), Image.Resampling.LANCZOS)
+                    left, top = (width - image.width) // 2, (height - image.height) // 2
+                    dib = ImageWin.Dib(image)
+                    dc.StartPage()
+                    dib.draw(dc.GetHandleOutput(), (left, top, left + image.width, top + image.height))
+                    dc.EndPage()
+            dc.EndDoc()
+            logger.info("Impression automatique terminée : %d image(s) sur %s (A3)", len(paths), printer_name)
+        except Exception:
+            logger.exception("Échec de l’impression automatique DICOM vers %s", printer_name)
+            if dc is not None:
+                try:
+                    dc.AbortDoc()
+                except Exception:
+                    pass
+        finally:
+            if dc is not None:
+                try:
+                    dc.DeleteDC()
+                except Exception:
+                    pass
 
     @staticmethod
     def _save_print_image(pixel_dataset, attributes, storage_dir: Path) -> Path:

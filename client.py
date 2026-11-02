@@ -318,6 +318,22 @@ class ClientHardwareBridge:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def dicom_print_printers(self) -> list[dict]:
+        try:
+            with self._dicom_print_lock:
+                return self._dicom_print_service().available_printers()
+        except Exception:
+            return []
+
+    def dicom_print_configure_auto_print(self, enabled: bool, printer_name: str = "") -> dict:
+        try:
+            with self._dicom_print_lock:
+                state = self._dicom_print_service().configure_auto_print(enabled, printer_name)
+                self._save_dicom_print_config({"dicom_print_config": state["config"]})
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def dicom_print_autostart(self) -> None:
         saved = self._client_config()
         if saved.get("dicom_print_enabled"):

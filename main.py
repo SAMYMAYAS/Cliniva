@@ -451,6 +451,25 @@ class ClientDicomServicesBridge:
             logger.exception("Impossible d’arrêter DICOM Print sur ce poste")
             return {"ok": False, "error": str(exc)}
 
+    def dicom_print_printers(self) -> list[Dict[str, Any]]:
+        try:
+            with self._lock:
+                return self._service().available_printers()
+        except Exception:
+            logger.exception("Impossible de détecter les imprimantes du poste DICOM Print")
+            return []
+
+    def dicom_print_configure_auto_print(self, enabled: bool, printer_name: str = "") -> Dict[str, Any]:
+        try:
+            with self._lock:
+                state = self._service().configure_auto_print(enabled, printer_name)
+                self.config["dicom_print_config"] = state["config"]
+                self._save_config()
+            return {"ok": True, **state, "machine": socket.gethostname()}
+        except Exception as exc:
+            logger.warning("Impossible d’enregistrer l’impression automatique DICOM : %s", exc)
+            return {"ok": False, "error": str(exc)}
+
     def dicom_services_shutdown(self) -> None:
         """Arrête les listeners à la fermeture, sans désactiver l'auto-démarrage."""
         try:
