@@ -549,12 +549,7 @@ class DicomPrintServer:
                     for item in (candidate_manifest.get("images") or [])
                     if str(item.get("current_image") or "").isdigit()
                 }
-                # Le compteur imprimé peut être mal lu et répéter la même
-                # valeur sur toutes les pages. Si l’accession est identique,
-                # le numéro sera corrigé plus bas au lieu de créer un dossier
-                # par page. Sans accession identique, un doublon reste un
-                # indice utile pour ne pas fusionner deux examens.
-                if incoming_current and incoming_current in known_indices and not same_accession:
+                if incoming_current and incoming_current in known_indices:
                     continue
                 folder, manifest = candidate, candidate_manifest
                 break
@@ -607,36 +602,6 @@ class DicomPrintServer:
         current_text = str(ocr.get("current_image") or "").strip()
         current_index = int(current_text) if current_text.isdigit() else max(known_indices, default=0) + 1
         total_for_name = manifest.get("total_images")
-        if current_index in known_indices or manifest.get("counter_ocr_unreliable"):
-            # Une lecture identique du compteur sur plusieurs pages est une
-            # erreur OCR (constatée sur des pages marquées 1/5 et lues 5/5).
-            # On bascule alors ce groupe sur l’ordre de réception et on
-            # renumérote les pages déjà reçues pour éviter 5, 1, 2, 3.
-            manifest["counter_ocr_unreliable"] = True
-            entries = [entry for entry in manifest.get("images", [])
-                       if isinstance(entry, dict) and (folder / str(entry.get("name") or "")).is_file()]
-            tracked_names = {str(entry.get("name")) for entry in entries}
-            entries.extend({"name": path.name} for path in sorted(folder.glob("Image_*.png"))
-                           if path.name not in tracked_names)
-            staged = []
-            for entry in entries:
-                old_path = folder / str(entry.get("name") or "")
-                if not old_path.is_file():
-                    continue
-                temp_path = folder / f".cliniva_reindex_{uuid4().hex}.tmp"
-                old_path.rename(temp_path)
-                staged.append((entry, temp_path))
-            total_suffix = int(total_for_name) if str(total_for_name or "").isdigit() else 0
-            for index, (entry, temp_path) in enumerate(staged, start=1):
-                total_part = f"sur_{total_suffix:03d}" if total_suffix else "sur_inconnu"
-                new_path = folder / f"Image_{index:03d}_{total_part}.png"
-                temp_path.rename(new_path)
-                entry["name"] = new_path.name
-                entry["current_image"] = index
-                entry["total_images"] = total_suffix or entry.get("total_images")
-            manifest["images"] = entries
-            known_indices = set(range(1, len(staged) + 1))
-            current_index = len(staged) + 1
         total_part = f"sur_{int(total_for_name):03d}" if total_for_name else "sur_inconnu"
         base = f"Image_{current_index:03d}_{total_part}"
         target = folder / f"{base}.png"
