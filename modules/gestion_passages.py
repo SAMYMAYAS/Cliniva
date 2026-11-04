@@ -2105,7 +2105,7 @@ def render_html(mode: str = "general") -> str:
                         <span>RAS — Rien à signaler</span>
                     </label>
 
-                    <div class="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
+                    <div id="passageQuestionnaireAnswers" class="grid grid-cols-1 md:grid-cols-12 gap-5 items-start transition-opacity">
                         <div class="md:col-span-8 space-y-2.5 text-xs font-bold text-slate-800 dark:text-slate-200">
                             <div class="flex items-center justify-between py-1.5 border-b border-slate-100 dark:border-white/5">
                                 <span class="w-48 text-left">Patient Hospitalisé</span>
@@ -3362,9 +3362,13 @@ def render_html(mode: str = "general") -> str:
             // =================================================================
             window.checkPassageFormValidity = function() {{
                 const rasCheckbox = document.getElementById('passageQuestionnaireRas');
-                const hasPositiveMedicalAnswer = Array.from(document.querySelectorAll('#passageForm input[type="radio"]:checked'))
+                const questionnaireRadios = document.querySelectorAll('.passage-questionnaire-section input[type="radio"]');
+                const hasPositiveMedicalAnswer = Array.from(document.querySelectorAll('.passage-questionnaire-section input[type="radio"]:checked'))
                     .some(radio => radio.value === 'OUI');
                 if (rasCheckbox && hasPositiveMedicalAnswer) rasCheckbox.checked = false;
+                const questionnaireAnswers = document.getElementById('passageQuestionnaireAnswers');
+                questionnaireAnswers?.classList.toggle('opacity-50', Boolean(rasCheckbox?.checked));
+                questionnaireRadios.forEach(radio => radio.disabled = Boolean(rasCheckbox?.checked));
 
                 const patientId = document.getElementById('passagePatientId')?.value;
                 const doctorId = document.getElementById('passageMedecinTraitantId')?.value;
@@ -3373,7 +3377,7 @@ def render_html(mode: str = "general") -> str:
                 const obsText = (document.getElementById('passageObservation')?.value || '').trim();
                 let hasObservation = obsText.length > 0;
 
-                const qRadios = document.querySelectorAll('input[type="radio"]:checked');
+                const qRadios = document.querySelectorAll('.passage-questionnaire-section input[type="radio"]:checked');
                 qRadios.forEach(r => {{
                     if (r.value === 'OUI') hasObservation = true;
                 }});
@@ -3399,13 +3403,12 @@ def render_html(mode: str = "general") -> str:
 
             window.handlePassageRasToggle = function() {{
                 const rasCheckbox = document.getElementById('passageQuestionnaireRas');
-                if (!rasCheckbox?.checked) return;
-                const hasPositiveMedicalAnswer = Array.from(document.querySelectorAll('#passageForm input[type="radio"]:checked'))
-                    .some(radio => radio.value === 'OUI');
-                if (hasPositiveMedicalAnswer) {{
-                    rasCheckbox.checked = false;
-                    if (typeof window.showToast === 'function') window.showToast('Décochez d’abord les réponses « OUI » avant de marquer RAS.', 'warning');
+                if (!rasCheckbox) return;
+                if (rasCheckbox.checked) {{
+                    document.querySelectorAll('.passage-questionnaire-section input[type="radio"][value="NON"]')
+                        .forEach(radio => radio.checked = true);
                 }}
+                checkPassageFormValidity();
             }};
 
             // =================================================================
