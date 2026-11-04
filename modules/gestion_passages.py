@@ -2100,6 +2100,10 @@ def render_html(mode: str = "general") -> str:
                     <h4 class="text-xs font-bold text-slate-800 dark:text-white uppercase tracking-wider border-b border-slate-100 dark:border-white/5 pb-2">
                         📋 6. Questionnaire Médical & Antécédents
                     </h4>
+                    <label class="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300">
+                        <input id="passageQuestionnaireRas" type="checkbox" checked onchange="handlePassageRasToggle()" class="h-4 w-4 accent-emerald-600">
+                        <span>RAS — Rien à signaler</span>
+                    </label>
 
                     <div class="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
                         <div class="md:col-span-8 space-y-2.5 text-xs font-bold text-slate-800 dark:text-slate-200">
@@ -2871,6 +2875,8 @@ def render_html(mode: str = "general") -> str:
                 renderPassageActsTable();
                 renderPassageScannedDocsGallery();
                 setValue('passageObservation', patient.questionnaire?.observation_medicale || patient.questionnaire?.observation || '');
+                const passageRasCheckbox = document.getElementById('passageQuestionnaireRas');
+                if (passageRasCheckbox) passageRasCheckbox.checked = patient.questionnaire?.ras === true;
                 const qMap = {{ hospitalise: 'q_hospitalise', dossier_interne: 'q_dossier_interne', dossier_externe: 'q_dossier_externe', urgence_vitale: 'q_urgence_vitale', grossesse: 'q_grossesse', allergie: 'q_allergie', diabete: 'q_diabete', hta: 'q_hta', asthme: 'q_asthme', insuffisance_renale: 'q_insuffisance_renale', pace_maker: 'q_pace_maker', valve_cardiaque: 'q_valve_cardiaque', prothese_metallique: 'q_prothese_metallique' }};
                 Object.entries(qMap).forEach(([key, radioName]) => setRadioVal(radioName, patient.questionnaire?.[key] || 'NON'));
                 setValue('passageRemiseValeur', patient.remise_valeur ?? patient.remise ?? 0);
@@ -3355,6 +3361,11 @@ def render_html(mode: str = "general") -> str:
             // 2. VÉRIFICATION DE VALIDITÉ (VERROUILLAGE DU BOUTON)
             // =================================================================
             window.checkPassageFormValidity = function() {{
+                const rasCheckbox = document.getElementById('passageQuestionnaireRas');
+                const hasPositiveMedicalAnswer = Array.from(document.querySelectorAll('#passageForm input[type="radio"]:checked'))
+                    .some(radio => radio.value === 'OUI');
+                if (rasCheckbox && hasPositiveMedicalAnswer) rasCheckbox.checked = false;
+
                 const patientId = document.getElementById('passagePatientId')?.value;
                 const doctorId = document.getElementById('passageMedecinTraitantId')?.value;
                 const hasActs = currentPassageActs && currentPassageActs.length > 0;
@@ -3383,6 +3394,17 @@ def render_html(mode: str = "general") -> str:
                         if (hint) hint.className = "text-[11px] text-amber-500 font-bold";
                         if (hint) hint.innerText = "⚠️ Requis : Patient, Médecin Traitant, au moins 1 acte et 1 observation.";
                     }}
+                }}
+            }};
+
+            window.handlePassageRasToggle = function() {{
+                const rasCheckbox = document.getElementById('passageQuestionnaireRas');
+                if (!rasCheckbox?.checked) return;
+                const hasPositiveMedicalAnswer = Array.from(document.querySelectorAll('#passageForm input[type="radio"]:checked'))
+                    .some(radio => radio.value === 'OUI');
+                if (hasPositiveMedicalAnswer) {{
+                    rasCheckbox.checked = false;
+                    if (typeof window.showToast === 'function') window.showToast('Décochez d’abord les réponses « OUI » avant de marquer RAS.', 'warning');
                 }}
             }};
 
@@ -4619,6 +4641,7 @@ def render_html(mode: str = "general") -> str:
                         documents_scannes: currentPassageScannedDocs,
                         questionnaire: {{
                             observation_medicale: document.getElementById('passageObservation')?.value?.trim() || '',
+                            ras: document.getElementById('passageQuestionnaireRas')?.checked === true,
                             hospitalise: getRadioVal('q_hospitalise'),
                             dossier_interne: getRadioVal('q_dossier_interne'),
                             dossier_externe: getRadioVal('q_dossier_externe'),
@@ -4663,6 +4686,7 @@ def render_html(mode: str = "general") -> str:
                             documents_scannes: currentPassageScannedDocs,
                             questionnaire: {{
                                 observation_medicale: document.getElementById('passageObservation')?.value?.trim() || '',
+                                ras: document.getElementById('passageQuestionnaireRas')?.checked === true,
                                 hospitalise: getRadioVal('q_hospitalise'), dossier_interne: getRadioVal('q_dossier_interne'),
                                 dossier_externe: getRadioVal('q_dossier_externe'), urgence_vitale: getRadioVal('q_urgence_vitale'),
                                 grossesse: getRadioVal('q_grossesse'), allergie: getRadioVal('q_allergie'),
