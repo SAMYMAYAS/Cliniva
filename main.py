@@ -310,6 +310,7 @@ class ClientDicomServicesBridge:
         self._lock = threading.RLock()
         self._imaging_window = None
         self._imaging_base_url = ""
+        self._imaging_loaded = False
         self._print_server = None
         self._a3_print_server = None
         self._pacs_server = None
@@ -330,10 +331,13 @@ class ClientDicomServicesBridge:
         if window is None:
             return {"ok": False, "error": "La fenêtre secondaire n'est pas disponible."}
         try:
-            window.load_url(f"{self._imaging_base_url}/?cliniva_screen=imaging")
+            if not self._imaging_loaded:
+                window.load_url(f"{self._imaging_base_url}/?cliniva_screen=imaging")
+                self._imaging_loaded = True
             window.show()
             return {"ok": True}
         except Exception as exc:
+            self._imaging_loaded = False
             logger.exception("Ouverture de la fenêtre secondaire d'imagerie impossible")
             return {"ok": False, "error": str(exc)}
 

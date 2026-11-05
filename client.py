@@ -278,6 +278,7 @@ class ClientHardwareBridge:
         self._zoom_percent = 100
         self._imaging_window = None
         self._imaging_base_url = ""
+        self._imaging_loaded = False
         self._dicom_print_server = None
         self._dicom_print_a3_server = None
         self._dicom_print_lock = threading.RLock()
@@ -294,10 +295,13 @@ class ClientHardwareBridge:
         if window is None:
             return {"ok": False, "error": "La fenêtre secondaire n'est pas disponible."}
         try:
-            window.load_url(f"{self._imaging_base_url}/?cliniva_screen=imaging")
+            if not self._imaging_loaded:
+                window.load_url(f"{self._imaging_base_url}/?cliniva_screen=imaging")
+                self._imaging_loaded = True
             window.show()
             return {"ok": True}
         except Exception as exc:
+            self._imaging_loaded = False
             return {"ok": False, "error": str(exc)}
 
     def window_minimize(self, target: str = "main") -> None:
