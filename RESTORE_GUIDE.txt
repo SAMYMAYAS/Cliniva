@@ -1,7 +1,7 @@
 CLINIVA — KIT DE RESTAURATION APRÈS PANNE
 ========================================
 
-Le dossier de backup contient :
+Chaque point de sauvegarde contient :
 - application : le projet Cliniva et ses uploads ;
 - database : l’export PostgreSQL restaurable ;
 - dicom : les répertoires PACS et DICOM Print configurés, s’ils étaient accessibles ;
@@ -9,10 +9,15 @@ Le dossier de backup contient :
 - RESTORE_CLINIVA.ps1 : copie les fichiers, restaure PostgreSQL et rétablit les chemins DICOM ;
 - requirements-installed.txt et ENVIRONMENT.json : versions Python, client PostgreSQL et bibliothèques du backup ;
 - MANIFEST.json : date, base et inventaire des fichiers/dossiers.
+- Pour un backup incrémentiel, `changes` contient les fichiers modifiés/ajoutés et le manifeste
+  indique les fichiers supprimés depuis le point précédent.
 
 RESTAURATION SUR UN NOUVEAU PC SERVEUR
 --------------------------------------
-1. Copiez le dossier Cliniva_FullBackup_... depuis le support de sauvegarde vers un disque local.
+1. Pour un backup complet, copiez son dossier depuis le support de sauvegarde vers un disque local.
+   Pour un backup incrémentiel, copiez ensemble le backup complet de référence et tous les dossiers
+   incrémentiels qui le suivent (ils doivent rester côte à côte). Lancez le fichier
+   RESTAURER_CLINIVA.bat du point que vous voulez restaurer, généralement le plus récent.
    Ne lancez pas Cliniva directement depuis le NAS.
 2. Installez Python pour Windows, une version de PostgreSQL compatible avec le dump (avec les outils
    de ligne de commande), et Microsoft Edge WebView2. Les versions sources sont dans ENVIRONMENT.json.
@@ -60,3 +65,6 @@ LOGICIELS WINDOWS COMPLÉMENTAIRES
   données médicales, des documents patients et des fichiers de configuration.
 - Cette procédure restaure les fichiers et PostgreSQL. Une restauration n’est considérée prête
   qu’après un démarrage et une vérification fonctionnelle sur le nouveau PC.
+- Les incrémentiels enregistrent les fichiers ajoutés/modifiés et les suppressions depuis le point
+  précédent. Ils ont besoin de toute la chaîne depuis le backup complet de référence. PostgreSQL
+  est exporté complètement à chaque point. Gardez régulièrement des backups complets séparés.

@@ -63,17 +63,36 @@ function Assert-TreeInventory([string]$Path, $Expected, [string]$Description) {
 }
 
 $backup = (Resolve-Path -LiteralPath $BackupPath).Path
-$applicationSource = Join-Path $backup "application"
 $manifestPath = Join-Path $backup "MANIFEST.json"
 $restoreGuide = Join-Path $backup "RESTORE_GUIDE.txt"
-
-if (-not (Test-Path -LiteralPath $applicationSource -PathType Container)) {
-    throw "Le dossier application est absent du backup : $applicationSource"
-}
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     throw "MANIFEST.json est absent. Le backup ne peut pas être vérifié."
 }
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$backupChain = @()
+$cursorPath = $backup
+$cursorManifest = $manifest
+while ($true) {
+    $backupChain = @([pscustomobject]@{ Path = $cursorPath; Manifest = $cursorManifest }) + $backupChain
+    if ([string]$cursorManifest.backup_type -ne "incremental") { break }
+    $parentName = [string]$cursorManifest.parent_backup
+    if (-not $parentName -or [IO.Path]::GetFileName($parentName) -cne $parentName) {
+        throw "La chaîne de sauvegardes incrémentielles est invalide : parent absent ou incorrect."
+    }
+    $cursorPath = Join-Path (Split-Path -Parent $cursorPath) $parentName
+    $cursorManifestPath = Join-Path $cursorPath "MANIFEST.json"
+    if (-not (Test-Path -LiteralPath $cursorManifestPath -PathType Leaf)) {
+        throw "Un élément de la chaîne de sauvegarde est absent : $cursorManifestPath"
+    }
+    $cursorManifest = Get-Content -LiteralPath $cursorManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$cursorManifest.status -ne "completed") { throw "Un élément de la chaîne n’est pas terminé." }
+}
+$baseBackup = $backupChain[0].Path
+$applicationSource = Join-Path $baseBackup "application"
+if (-not (Test-Path -LiteralPath $applicationSource -PathType Container)) {
+    throw "Le dossier application du point complet est absent : $applicationSource"
+}
+$restoreGuide = Join-Path $backup "RESTORE_GUIDE.txt"
 if (-not $DbName) { $DbName = [string]$manifest.database.name }
 $dumpPath = Join-Path $backup ([string]$manifest.database.dump)
 if (-not (Test-Path -LiteralPath $dumpPath -PathType Leaf)) {
@@ -88,10 +107,10 @@ Assert-EmptyTarget $install "Le dossier d’installation"
 if (-not (Test-Path -LiteralPath $install)) {
     New-Item -ItemType Directory -Path $install -Force | Out-Null
 }
-if (Test-Path -LiteralPath (Join-Path $backup "dicom\pacs_data") -PathType Container) {
+if (Test-Path -LiteralPath (Join-Path $baseBackup "dicom\pacs_data") -PathType Container) {
     Assert-EmptyTarget $PacsDataPath "Le dossier PACS de destination"
 }
-if (Test-Path -LiteralPath (Join-Path $backup "dicom\dicom_print") -PathType Container) {
+if (Test-Path -LiteralPath (Join-Path $baseBackup "dicom\dicom_print") -PathType Container) {
     Assert-EmptyTarget $DicomPrintDataPath "Le dossier DICOM Print de destination"
 }
 
@@ -119,6 +138,59 @@ try {
 
     Write-Host "Copie des fichiers Cliniva…" -ForegroundColor Cyan
     Invoke-Robocopy $applicationSource $install
+    $pacsSource = Join-Path $baseBackup "dicom\pacs_data"
+    $printSource = Join-Path $baseBackup "dicom\dicom_print"
+    if (Test-Path -LiteralPath $pacsSource -PathType Container) { Invoke-Robocopy $pacsSource $PacsDataPath }
+    if (Test-Path -LiteralPath $printSource -PathType Container) { Invoke-Robocopy $printSource $DicomPrintDataPath }
+
+    foreach ($entry in $backupChain | Select-Object -Skip 1) {
+        $layer = $entry.Path
+        $layerManifest = $entry.Manifest
+        foreach ($label in @("application", "pacs_data", "dicom_print")) {
+            $targetRoot = switch ($label) {
+                "application" { $install }
+                "pacs_data" { $PacsDataPath }
+                "dicom_print" { $DicomPrintDataPath }
+            }
+            $deleted = $layerManifest.deleted_files.$label
+            foreach ($relative in @($deleted)) {
+                $candidate = [IO.Path]::GetFullPath((Join-Path $targetRoot ([string]$relative)))
+                $rootPrefix = [IO.Path]::GetFullPath($targetRoot).TrimEnd('\') + '\'
+                if (-not $candidate.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Chemin de suppression invalide dans le manifeste : $relative"
+                }
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) { Remove-Item -LiteralPath $candidate -Force }
+            }
+        }
+        $applicationDelta = Join-Path $layer "changes\application"
+        $pacsDelta = Join-Path $layer "changes\dicom\pacs_data"
+        $printDelta = Join-Path $layer "changes\dicom\dicom_print"
+        if (Test-Path -LiteralPath $applicationDelta -PathType Container) { Invoke-Robocopy $applicationDelta $install }
+        if (Test-Path -LiteralPath $pacsDelta -PathType Container) { Invoke-Robocopy $pacsDelta $PacsDataPath }
+        if (Test-Path -LiteralPath $printDelta -PathType Container) { Invoke-Robocopy $printDelta $DicomPrintDataPath }
+
+        foreach ($label in @("application", "pacs_data", "dicom_print")) {
+            $targetRoot = switch ($label) {
+                "application" { $install }
+                "pacs_data" { $PacsDataPath }
+                "dicom_print" { $DicomPrintDataPath }
+            }
+            $desired = @($layerManifest.directory_state.$label)
+            $existing = @(Get-ChildItem -LiteralPath $targetRoot -Force -Recurse -Directory -ErrorAction SilentlyContinue |
+                Sort-Object { $_.FullName.Length } -Descending)
+            foreach ($directory in $existing) {
+                $relative = $directory.FullName.Substring($targetRoot.TrimEnd('\').Length).TrimStart('\').Replace('\', '/')
+                if ($relative -notin $desired) {
+                    if (-not (Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+                        Remove-Item -LiteralPath $directory.FullName -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            foreach ($relative in $desired) {
+                if ($relative) { New-Item -ItemType Directory -Path (Join-Path $targetRoot ([string]$relative)) -Force | Out-Null }
+            }
+        }
+    }
     Assert-TreeInventory $install $manifest.source_inventory.application "l’application"
     $requirementsSource = Join-Path $backup "requirements-installed.txt"
     if (Test-Path -LiteralPath $requirementsSource -PathType Leaf) {
@@ -144,14 +216,10 @@ try {
     if (-not $config.pacs_config) { Set-JsonProperty $config "pacs_config" ([pscustomobject]@{}) }
     if (-not $config.dicom_print_config) { Set-JsonProperty $config "dicom_print_config" ([pscustomobject]@{}) }
 
-    $pacsSource = Join-Path $backup "dicom\pacs_data"
     if (Test-Path -LiteralPath $pacsSource -PathType Container) {
-        Invoke-Robocopy $pacsSource $PacsDataPath
         Assert-TreeInventory $PacsDataPath $manifest.source_inventory.pacs_data "les données PACS"
     }
-    $printSource = Join-Path $backup "dicom\dicom_print"
     if (Test-Path -LiteralPath $printSource -PathType Container) {
-        Invoke-Robocopy $printSource $DicomPrintDataPath
         Assert-TreeInventory $DicomPrintDataPath $manifest.source_inventory.dicom_print "les données DICOM Print"
     }
     Set-JsonProperty $config.pacs_config "data_dir" $PacsDataPath

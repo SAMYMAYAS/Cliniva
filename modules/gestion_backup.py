@@ -68,6 +68,7 @@ def _read_settings() -> dict[str, Any]:
     settings: dict[str, Any] = {
         "destination": _default_destination(),
         "schedule_enabled": False,
+        "schedule_mode": "full",
         "schedules": [],
     }
     try:
@@ -75,6 +76,7 @@ def _read_settings() -> dict[str, Any]:
         if isinstance(data, dict):
             settings["destination"] = str(data.get("destination") or settings["destination"])
             settings["schedule_enabled"] = bool(data.get("schedule_enabled", False))
+            settings["schedule_mode"] = data.get("schedule_mode") if data.get("schedule_mode") in {"full", "incremental"} else "full"
             if isinstance(data.get("schedules"), list):
                 settings["schedules"] = [
                     item for item in data["schedules"]
@@ -107,7 +109,7 @@ def _set_schedule_run(schedule_id: str | None, *, run_at: str, status: str, mess
         _write_settings(settings)
 
 
-def _launch_backup(destination: Path, schedule_id: str | None = None) -> str:
+def _launch_backup(destination: Path, schedule_id: str | None = None, mode: str = "full") -> str:
     global _JOB
     with _JOB_LOCK:
         if _JOB.get("state") in {"running", "paused", "cancelling"}:
@@ -115,15 +117,18 @@ def _launch_backup(destination: Path, schedule_id: str | None = None) -> str:
         job_id = uuid.uuid4().hex
         _PAUSE_EVENT.set()
         _CANCEL_EVENT.clear()
-        _JOB = {"id": job_id, "state": "running", "percent": 1,
-                "message": "Démarrage de la sauvegarde automatique…" if schedule_id else "Démarrage de la sauvegarde…",
+        _JOB = {"id": job_id, "mode": mode, "state": "running", "percent": 1,
+                "message": ("Démarrage de la sauvegarde incrémentielle automatique…" if mode == "incremental" and schedule_id else
+                            "Démarrage de la sauvegarde automatique…" if schedule_id else
+                            "Démarrage de la sauvegarde incrémentielle…" if mode == "incremental" else
+                            "Démarrage de la sauvegarde complète…"),
                 "output": None, "schedule_id": schedule_id, "stage": "Préparation",
                 "speed_bps": 0, "stage_bytes": 0, "stage_total_bytes": 0, "current_file": ""}
     try:
         if schedule_id:
             _set_schedule_run(schedule_id, run_at=datetime.now().astimezone().isoformat(timespec="seconds"),
                               status="running", message="Sauvegarde en cours")
-        threading.Thread(target=_run_backup, args=(job_id, destination, schedule_id),
+        threading.Thread(target=_run_backup, args=(job_id, destination, schedule_id, mode),
                          name="ClinivaFullBackup", daemon=True).start()
     except Exception:
         with _JOB_LOCK:
@@ -157,7 +162,7 @@ def _backup_scheduler_loop() -> None:
                 continue
             try:
                 destination = Path(str(settings["destination"])).expanduser().resolve()
-                _launch_backup(destination, str(schedule["id"]))
+                _launch_backup(destination, str(schedule["id"]), str(settings.get("schedule_mode") or "full"))
             except Exception as exc:
                 logger.exception("Impossible de lancer la sauvegarde planifiée %s", schedule.get("time"))
                 _set_schedule_run(str(schedule["id"]), run_at=now.astimezone().isoformat(timespec="seconds"),
@@ -371,11 +376,14 @@ def _terminate_pg_dump_process() -> None:
 
 
 def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str, Any], total_bytes: int,
-               stage: str, stage_start_bytes: int, stage_total_bytes: int) -> dict[str, Any]:
+               stage: str, stage_start_bytes: int, stage_total_bytes: int,
+               include_files: set[Path] | None = None) -> dict[str, Any]:
     target.mkdir(parents=True, exist_ok=True)
     copied_directories: set[Path] = set()
     for source_directory in _iter_directories(root):
         relative = source_directory.relative_to(root)
+        if include_files is not None and not any(path == relative or relative in path.parents for path in include_files):
+            continue
         (target / relative).mkdir(parents=True, exist_ok=True)
         copied_directories.add(relative)
 
@@ -383,6 +391,8 @@ def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str,
     copied_bytes = 0
     for source in _iter_files(root, project_root=project_root):
         relative = source.relative_to(root)
+        if include_files is not None and relative not in include_files:
+            continue
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         file_size = source.stat().st_size
@@ -425,6 +435,8 @@ def _copy_tree(root: Path, target: Path, project_root: bool, progress: dict[str,
     # Catch empty folders created while files were being copied.
     for source_directory in _iter_directories(root):
         relative = source_directory.relative_to(root)
+        if include_files is not None and not any(path == relative or relative in path.parents for path in include_files):
+            continue
         (target / relative).mkdir(parents=True, exist_ok=True)
         copied_directories.add(relative)
 
@@ -513,10 +525,52 @@ def _sanitize_backup_database_password(application_root: Path) -> None:
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) -> None:
+def _source_signature(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _latest_backup(destination: Path) -> tuple[Path, dict[str, Any]] | None:
+    candidates = sorted(
+        (path for path in destination.iterdir() if path.is_dir() and
+         path.name.startswith(("Cliniva_FullBackup_", "Cliniva_IncrementalBackup_"))),
+        key=lambda path: path.stat().st_mtime, reverse=True,
+    )
+    for folder in candidates:
+        try:
+            manifest = json.loads((folder / "MANIFEST.json").read_text(encoding="utf-8"))
+            dump_rel = str((manifest.get("database") or {}).get("dump") or "")
+            dump = (folder / dump_rel).resolve() if dump_rel else None
+            if manifest.get("status") != "completed" or not dump or folder.resolve() not in dump.parents or not dump.is_file():
+                continue
+            cursor_folder, cursor_manifest = folder, manifest
+            visited: set[str] = set()
+            chain_valid = True
+            while cursor_manifest.get("backup_type") == "incremental":
+                parent_name = str(cursor_manifest.get("parent_backup") or "")
+                if not parent_name or Path(parent_name).name != parent_name or parent_name in visited:
+                    chain_valid = False
+                    break
+                visited.add(parent_name)
+                cursor_folder = destination / parent_name
+                cursor_manifest = json.loads((cursor_folder / "MANIFEST.json").read_text(encoding="utf-8"))
+                if cursor_manifest.get("status") != "completed":
+                    chain_valid = False
+                    break
+            if chain_valid and (cursor_folder / "application").is_dir():
+                return folder, manifest
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
+
+
+def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None, mode: str = "full") -> None:
+    if mode not in {"full", "incremental"}:
+        mode = "full"
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    final_dir = destination / f"Cliniva_FullBackup_{stamp}"
-    partial_dir = destination / f".Cliniva_FullBackup_{stamp}_{job_id[:8]}.partial"
+    prefix = "Cliniva_IncrementalBackup_" if mode == "incremental" else "Cliniva_FullBackup_"
+    final_dir = destination / f"{prefix}{stamp}"
+    partial_dir = destination / f".{prefix}{stamp}_{job_id[:8]}.partial"
     try:
         external_roots = _configured_external_roots()
         source_roots = [("application", PROJECT_ROOT, True)] + [
@@ -528,10 +582,25 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
         destination.mkdir(parents=True, exist_ok=True)
         if not destination.is_dir():
             raise OSError("Le répertoire de destination n’est pas accessible.")
+        baseline = _latest_backup(destination) if mode == "incremental" else None
+        if mode == "incremental" and baseline:
+            previous_folder, previous_manifest = baseline
+            old_roots = previous_manifest.get("source_roots") or []
+            expected_roots = [{"label": label, "source": str(root)} for label, root, _ in source_roots]
+            if old_roots != expected_roots or not previous_manifest.get("file_state"):
+                baseline = None
+        if mode == "incremental" and baseline is None:
+            # The first incremental request establishes a complete recovery point.
+            final_dir = destination / f"Cliniva_FullBackup_{stamp}"
+            partial_dir = destination / f".Cliniva_FullBackup_{stamp}_{job_id[:8]}.partial"
+        with _JOB_LOCK:
+            _JOB["mode"] = "incremental" if baseline else "full"
         planned_files: list[tuple[str, Path, bool]] = []
         planned_inventory: dict[str, dict[str, int]] = {}
         planned_file_paths: dict[str, set[Path]] = {}
         planned_directory_paths: dict[str, set[Path]] = {}
+        current_file_state: dict[str, dict[str, dict[str, int]]] = {}
+        current_directory_state: dict[str, list[str]] = {}
         for label, root, project in source_roots:
             files: list[Path] = []
             directories: list[Path] = []
@@ -540,33 +609,54 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
             planned_files.extend((label, source, project) for source in files)
             planned_file_paths[label] = {path.relative_to(root) for path in files}
             planned_directory_paths[label] = {path.relative_to(root) for path in directories}
+            current_directory_state[label] = sorted(path.relative_to(root).as_posix() for path in directories)
+            current_file_state[label] = {path.relative_to(root).as_posix(): _source_signature(path) for path in files}
             planned_inventory[label] = {
                 "files": len(files),
                 "directories": len(directories),
                 "bytes": sum(path.stat().st_size for path in files),
             }
-        total_bytes = sum(path.stat().st_size for _, path, _ in planned_files)
+        changed_paths: dict[str, set[Path]] = {}
+        deleted_paths: dict[str, list[str]] = {}
+        if baseline:
+            old_state = previous_manifest["file_state"]
+            for label, _, _ in source_roots:
+                old = old_state.get(label, {})
+                current = current_file_state[label]
+                changed_paths[label] = {
+                    Path(relative) for relative, info in current.items() if old.get(relative) != info
+                }
+                deleted_paths[label] = sorted(set(old) - set(current))
+        else:
+            changed_paths = {label: set(paths) for label, paths in planned_file_paths.items()}
+            deleted_paths = {label: [] for label, _, _ in source_roots}
+        roots_by_label = {label: root for label, root, _ in source_roots}
+        total_bytes = sum(path.stat().st_size for label, path, _ in planned_files
+                          if path.relative_to(roots_by_label[label]) in changed_paths[label])
         if partial_dir.exists() or final_dir.exists():
             raise FileExistsError("Un dossier de sauvegarde portant ce nom existe déjà.")
         partial_dir.mkdir(parents=True)
         with _JOB_LOCK:
             _JOB.update(state="running", percent=5, stage="Préparation", speed_bps=0,
                         stage_bytes=0, stage_total_bytes=total_bytes, current_file="",
-                        message="Préparation de la sauvegarde complète…")
+                        message="Préparation de la sauvegarde incrémentielle…" if baseline else "Préparation de la sauvegarde complète…")
 
         copied = {"copied_bytes": 0, "speed_bps": 0,
                   "speed_sample_at": time.monotonic(), "speed_sample_bytes": 0}
         inventory_changes: dict[str, dict[str, int]] = {}
         for label, source, project in source_roots:
-            target = partial_dir / ("application" if project else f"dicom/{label}")
+            target = partial_dir / (("changes/application" if baseline else "application") if project else
+                                    (f"changes/dicom/{label}" if baseline else f"dicom/{label}"))
             stage = "Fichiers Cliniva" if project else ("Données PACS" if label == "pacs_data" else "Images DICOM Print")
             expected = planned_inventory[label]
             copy_result = _copy_tree(
                 source, target, project, copied, total_bytes, stage,
-                copied["copied_bytes"], expected["bytes"],
+                copied["copied_bytes"], sum(roots_by_label[label].joinpath(path).stat().st_size
+                                              for path in changed_paths[label]),
+                include_files=changed_paths[label],
             )
-            missing_files = planned_file_paths[label] - copy_result["file_paths"]
-            missing_directories = planned_directory_paths[label] - copy_result["directory_paths"]
+            missing_files = changed_paths[label] - copy_result["file_paths"]
+            missing_directories = set()
             if missing_files or missing_directories:
                 missing_path = next(iter(missing_files or missing_directories))
                 raise RuntimeError(
@@ -578,17 +668,19 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
                 "files_added_during_copy": len(copy_result["file_paths"] - planned_file_paths[label]),
                 "directories_added_during_copy": len(copy_result["directory_paths"] - planned_directory_paths[label]),
             }
-            planned_inventory[label] = {
-                "files": copy_result["files"],
-                "directories": copy_result["directories"],
-                "bytes": copy_result["bytes"],
-            }
+            if not baseline:
+                planned_inventory[label] = {
+                    "files": copy_result["files"],
+                    "directories": copy_result["directories"],
+                    "bytes": copy_result["bytes"],
+                }
             if project:
                 _sanitize_backup_database_password(target)
-                planned_inventory[label]["bytes"] = sum(
-                    path.stat().st_size
-                    for path in _iter_files(target, project_root=True)
-                )
+                if not baseline:
+                    planned_inventory[label]["bytes"] = sum(
+                        path.stat().st_size
+                        for path in _iter_files(target, project_root=True)
+                    )
 
         with _JOB_LOCK:
             _JOB.update(percent=72, stage="Base PostgreSQL", stage_bytes=0,
@@ -652,9 +744,23 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
                         stage_bytes=0, stage_total_bytes=0, current_file="",
                         message="Finalisation et vérification des fichiers…")
         environment = _write_recovery_bundle(partial_dir)
+        if baseline:
+            generated_launcher = partial_dir / "application" / "scripts" / "start_cliniva.ps1"
+            incremental_launcher = partial_dir / "changes" / "application" / "scripts" / "start_cliniva.ps1"
+            incremental_launcher.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(generated_launcher), str(incremental_launcher))
+            shutil.rmtree(partial_dir / "application", ignore_errors=True)
         manifest = {
             "application": "Cliniva",
             "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "status": "completed",
+            "backup_type": "incremental" if baseline else "full",
+            "parent_backup": previous_folder.name if baseline else None,
+            "base_backup": (previous_manifest.get("base_backup") or previous_folder.name) if baseline else final_dir.name,
+            "source_roots": [{"label": label, "source": str(root)} for label, root, _ in source_roots],
+            "file_state": current_file_state,
+            "directory_state": current_directory_state,
+            "deleted_files": deleted_paths if baseline else {},
             "backup_size_bytes": sum(
                 path.stat().st_size for path in _iter_files(partial_dir)
             ),
@@ -662,8 +768,8 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
                          "host": DB_CONFIG.get("host"), "port": DB_CONFIG.get("port"),
                          "dump": f"database/{dump_path.name}"},
             "included": [
-                "Fichiers et dossiers de l’application, y compris les dossiers vides",
-                "Base PostgreSQL", "Données PACS/DICOM Print configurées",
+                "Fichiers complets" if not baseline else "Fichiers modifiés/ajoutés depuis le point de sauvegarde complet",
+                "Base PostgreSQL (export complet à chaque point)", "Données PACS/DICOM Print configurées",
                 "Lanceur en un clic, script et guide de restauration",
                 "Inventaire des versions Python installées",
             ],
@@ -686,7 +792,7 @@ def _run_backup(job_id: str, destination: Path, schedule_id: str | None = None) 
             partial_dir.rename(final_dir)
             _JOB.update(state="completed", percent=100, stage="Terminée", speed_bps=0,
                         stage_bytes=0, stage_total_bytes=0, current_file="",
-                        message="Sauvegarde complète terminée.",
+                        message="Sauvegarde incrémentielle terminée." if baseline else "Sauvegarde complète terminée.",
                         output=str(final_dir), bytes=backup_bytes)
         _set_schedule_run(schedule_id, run_at=datetime.now().astimezone().isoformat(timespec="seconds"),
                           status="completed", message="Sauvegarde terminée")
@@ -875,21 +981,30 @@ async def save_backup_schedule(request: Request):
             "last_run_message": old.get("last_run_message", "Jamais exécutée"),
         })
     settings["schedule_enabled"] = bool(payload.get("enabled", False))
+    settings["schedule_mode"] = payload.get("mode") if payload.get("mode") in {"full", "incremental"} else "full"
     settings["schedules"] = sorted(schedules, key=lambda item: item["time"])
     _write_settings(settings)
-    return {"ok": True, "schedule_enabled": settings["schedule_enabled"], "schedules": settings["schedules"]}
+    return {"ok": True, "schedule_enabled": settings["schedule_enabled"],
+            "schedule_mode": settings["schedule_mode"], "schedules": settings["schedules"]}
 
 
 @backup_router.post("/start")
 async def start_full_backup(request: Request):
     _require_admin(request)
     settings = _read_settings()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    mode = str(payload.get("mode") or "full")
+    if mode not in {"full", "incremental"}:
+        raise HTTPException(status_code=400, detail="Mode de sauvegarde invalide.")
     destination = Path(settings["destination"]).expanduser().resolve()
     try:
-        job_id = _launch_backup(destination)
+        job_id = _launch_backup(destination, mode=mode)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"ok": True, "job_id": job_id}
+    return {"ok": True, "job_id": job_id, "mode": mode}
 
 
 @backup_router.get("/status/{job_id}")
@@ -978,7 +1093,7 @@ async def full_backup_history(request: Request):
     try:
         folders = sorted(
             (path for path in destination.iterdir()
-             if path.is_dir() and path.name.startswith("Cliniva_FullBackup_")),
+             if path.is_dir() and path.name.startswith(("Cliniva_FullBackup_", "Cliniva_IncrementalBackup_"))),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
@@ -999,6 +1114,7 @@ async def full_backup_history(request: Request):
                     "status": "completed" if valid_dump else "incomplete",
                     "size_bytes": int(size_bytes) if size_bytes is not None else None,
                     "database": str(database.get("name") or "PostgreSQL"),
+                    "backup_type": str(manifest.get("backup_type") or "full"),
                     "path": str(folder),
                 })
             except (OSError, ValueError, TypeError):
@@ -1006,7 +1122,7 @@ async def full_backup_history(request: Request):
                     "name": folder.name,
                     "created_at": datetime.fromtimestamp(folder.stat().st_mtime).astimezone().isoformat(timespec="seconds"),
                     "status": "incomplete", "size_bytes": None,
-                    "database": "—", "path": str(folder),
+                    "database": "—", "backup_type": "unknown", "path": str(folder),
                 })
     except OSError as exc:
         logger.warning("Lecture de l’historique des sauvegardes impossible : %s", exc)
@@ -1020,7 +1136,7 @@ def render_html(user: dict[str, Any] | None = None) -> str:
     return r"""
 <section class="space-y-6">
   <header class="flex flex-wrap items-center justify-between gap-4 rounded-[2rem] bg-gradient-to-r from-[#101b13] to-[#183b20] px-7 py-6 text-white shadow-lg">
-    <div><p class="text-xs font-bold uppercase tracking-[.18em] text-lime-300">Administration · Protection des données</p><h1 class="mt-1 text-2xl font-extrabold">Sauvegarde complète</h1><p class="mt-1 text-sm text-slate-300">Application, base PostgreSQL, dossiers patients et stockage DICOM.</p></div>
+    <div><p class="text-xs font-bold uppercase tracking-[.18em] text-lime-300">Administration · Protection des données</p><h1 class="mt-1 text-2xl font-extrabold">Sauvegardes Cliniva</h1><p class="mt-1 text-sm text-slate-300">Application, base PostgreSQL, dossiers patients et stockage DICOM.</p></div>
     <span class="grid h-14 w-14 place-items-center rounded-2xl bg-white/10 text-lime-300"><i class="ph-bold ph-shield-check text-3xl"></i></span>
   </header>
   <article class="rounded-[1.75rem] border border-slate-200 bg-white p-6 shadow-sm">
@@ -1030,7 +1146,7 @@ def render_html(user: dict[str, Any] | None = None) -> str:
     <p class="mt-2 text-xs text-slate-500">Le navigateur affiche les disques et dossiers du serveur. Tu peux y créer le dossier de sauvegarde depuis ce poste client.</p>
      <div class="mt-5 grid gap-3 md:grid-cols-3"><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-code text-xl text-emerald-700"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Fichiers Cliniva</p><p class="mt-1 text-xs text-slate-500">Code, modèles, configuration, documents et uploads.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-database text-xl text-indigo-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Base PostgreSQL</p><p class="mt-1 text-xs text-slate-500">Export complet restaurable avec pg_restore.</p></div><div class="rounded-2xl bg-slate-50 p-4"><i class="ph-bold ph-images text-xl text-amber-600"></i><p class="mt-2 text-sm font-extrabold text-slate-800">Images DICOM</p><p class="mt-1 text-xs text-slate-500">Stockage PACS et réceptions DICOM Print configurés.</p></div></div>
      <div class="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs leading-relaxed text-emerald-900"><b>Kit de restauration inclus :</b> chaque nouveau backup contient un lanceur en un clic, le script de restauration, les versions Python installées et le guide pour remettre Cliniva en service sur un autre PC.</div>
-    <div class="mt-5 flex flex-wrap items-center gap-3"><button id="backupStart" type="button" class="rounded-xl bg-emerald-700 px-5 py-3 text-sm font-extrabold text-white shadow-sm hover:bg-emerald-800"><i class="ph-bold ph-shield-check mr-2"></i>Lancer la sauvegarde complète</button><span class="text-xs text-slate-500">L’opération s’effectue en arrière-plan; les fichiers source ne sont pas modifiés.</span></div>
+    <div class="mt-5 flex flex-wrap items-end gap-3"><label class="grid gap-1 text-xs font-bold text-slate-600">Type de sauvegarde<select id="backupMode" class="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800"><option value="full">Complète — point de restauration autonome</option><option value="incremental">Incrémentielle — changements depuis la précédente</option></select></label><button id="backupStart" type="button" class="h-11 rounded-xl bg-emerald-700 px-5 text-sm font-extrabold text-white shadow-sm hover:bg-emerald-800"><i class="ph-bold ph-shield-check mr-2"></i>Lancer la sauvegarde</button><span class="max-w-xl pb-2 text-xs text-slate-500">Une incrémentielle nécessite son point complet de référence et toute la chaîne pour restaurer les fichiers. La base PostgreSQL est exportée complètement à chaque exécution.</span></div>
     <div id="backupProgressWrap" class="mt-6 hidden rounded-2xl border border-slate-200 bg-slate-50 p-4"><div class="flex flex-wrap items-center justify-between gap-3"><p id="backupMessage" class="min-w-0 flex-1 truncate text-sm font-bold text-slate-700">Préparation…</p><div class="flex shrink-0 items-center gap-2"><button id="backupCancel" type="button" class="hidden rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100"><i class="ph-bold ph-x-circle mr-1"></i>Abandonner</button><button id="backupPause" type="button" class="hidden rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-100"><i class="ph-bold ph-pause mr-1"></i>Mettre en pause</button><button id="backupResume" type="button" class="hidden rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100"><i class="ph-bold ph-play mr-1"></i>Continuer</button><span id="backupPercent" class="text-sm font-extrabold text-emerald-700">0 %</span></div></div><div class="mt-3 h-2.5 overflow-hidden rounded-full bg-slate-200"><div id="backupProgressBar" class="h-full w-0 rounded-full bg-gradient-to-r from-lime-400 to-emerald-600 transition-all duration-300"></div></div><div class="mt-4 grid gap-3 sm:grid-cols-3"><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Étape</p><p id="backupStage" class="mt-1 truncate text-xs font-bold text-slate-700">En attente</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Débit instantané</p><p id="backupSpeed" class="mt-1 text-xs font-bold text-emerald-700">0 Ko/s</p></div><div class="rounded-xl border border-slate-200 bg-white px-3 py-2"><p class="text-[10px] font-bold uppercase tracking-wide text-slate-400">Transféré dans l’étape</p><p id="backupTransferStats" class="mt-1 text-xs font-bold text-slate-700">0 octet</p></div></div><p id="backupCurrentFile" class="mt-3 truncate text-xs text-slate-500" title=""></p><p id="backupOutput" class="mt-2 break-all text-xs text-slate-500"></p></div>
     <div class="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-relaxed text-amber-900"><b>À protéger :</b> la sauvegarde contient des données médicales et des images DICOM. Choisissez un disque ou un partage sécurisé avec suffisamment d’espace. Pour exporter la base, l’outil PostgreSQL <code>pg_dump</code> doit être installé sur le serveur.</div>
   </article>
@@ -1042,12 +1158,12 @@ def render_html(user: dict[str, Any] | None = None) -> str:
   <article class="rounded-[1.75rem] border border-slate-200 bg-white p-6 shadow-sm">
     <div class="flex flex-wrap items-center justify-between gap-4">
       <div><p class="text-xs font-bold uppercase tracking-[.12em] text-emerald-700">Sans intervention quotidienne</p><h2 class="mt-1 text-lg font-extrabold text-slate-800">Planification automatique</h2><p class="mt-1 text-xs text-slate-500">Ajoute une ligne par heure souhaitée. Chaque horaire actif lance une sauvegarde complète chaque jour.</p></div>
-      <label class="inline-flex cursor-pointer items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700"><input id="backupScheduleEnabled" type="checkbox" class="h-4 w-4 accent-emerald-700"><span>Planification activée</span></label>
+      <label class="grid gap-1 text-xs font-bold text-slate-600">Type planifié<select id="backupScheduleMode" class="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800"><option value="full">Complète</option><option value="incremental">Incrémentielle</option></select></label><label class="inline-flex cursor-pointer items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700"><input id="backupScheduleEnabled" type="checkbox" class="h-4 w-4 accent-emerald-700"><span>Planification activée</span></label>
     </div>
     <div class="mt-5 flex flex-wrap items-end gap-3 rounded-2xl bg-slate-50 p-4">
       <label class="flex flex-col text-xs font-bold text-slate-600">Heure de sauvegarde<span class="mt-2 flex h-11 items-center gap-2"><input id="backupScheduleTime" type="time" lang="fr-FR" class="box-border h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-800"><span id="backupSchedulePeriod" class="min-w-[88px] text-[10px] font-semibold text-emerald-700">Format 24 h</span></span></label>
       <button id="backupScheduleAdd" type="button" class="inline-flex h-11 items-center justify-center rounded-xl bg-emerald-700 px-4 text-sm font-bold text-white hover:bg-emerald-800"><i class="ph-bold ph-plus mr-1"></i>Ajouter l’heure</button>
-      <span id="backupScheduleNotice" class="max-w-xl text-xs text-slate-500">Cliniva doit rester démarré sur le serveur. Une seule sauvegarde complète peut tourner à la fois : un horaire atteint pendant une sauvegarde sera indiqué comme ignoré.</span>
+      <span id="backupScheduleNotice" class="max-w-xl text-xs text-slate-500">Cliniva doit rester démarré sur le serveur. Les horaires utiliseront le type planifié sélectionné ci-dessus.</span>
     </div>
     <div class="mt-5 overflow-x-auto rounded-2xl border border-slate-200">
       <table class="w-full min-w-[680px] border-collapse text-left text-sm">
@@ -1071,7 +1187,7 @@ def render_html(user: dict[str, Any] | None = None) -> str:
   async function api(url,options={}){const response=await fetch(url,{headers:{'Content-Type':'application/json'},...options});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.detail||'Erreur de communication avec le serveur.');return data;}
   function formatBytes(value){const bytes=Math.max(0,Number(value)||0);if(bytes<1024)return bytes+' octet';if(bytes<1024*1024)return (bytes/1024).toFixed(1)+' Ko';if(bytes<1024*1024*1024)return (bytes/1024/1024).toFixed(1)+' Mo';return (bytes/1024/1024/1024).toFixed(2)+' Go';}
   function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
-  async function loadHistory(){const body=$('backupHistoryRows');body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs text-slate-400">Chargement de l’historique…</td></tr>';try{const result=await api('/api/backup/history');$('backupHistoryLocation').textContent='Répertoire : '+(result.destination||'');const items=Array.isArray(result.items)?result.items:[];if(!items.length){body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs text-slate-400">Aucune sauvegarde trouvée dans ce répertoire.</td></tr>';return;}body.innerHTML=items.map(item=>{const complete=item.status==='completed';const badge=complete?'<span class="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold text-emerald-800">Terminée</span>':'<span class="rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-bold text-amber-800">Incomplète</span>';let date=item.created_at||'';const parsed=new Date(date);if(!Number.isNaN(parsed.getTime()))date=parsed.toLocaleString('fr-FR');return '<tr class="hover:bg-slate-50"><td class="whitespace-nowrap px-4 py-3 text-xs font-semibold text-slate-700">'+escapeHtml(date)+'</td><td class="px-4 py-3">'+badge+'</td><td class="whitespace-nowrap px-4 py-3 text-xs font-bold text-slate-700">'+(item.size_bytes==null?'—':escapeHtml(formatBytes(item.size_bytes)))+'</td><td class="px-4 py-3 text-xs text-slate-600">'+escapeHtml(item.database||'—')+'</td><td class="max-w-[360px] px-4 py-3 text-[11px] text-slate-500"><span class="block truncate" title="'+escapeHtml(item.path||'')+'">'+escapeHtml(item.path||item.name||'')+'</span></td></tr>';}).join('');}catch(error){body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs font-semibold text-rose-600">'+escapeHtml(error.message)+'</td></tr>';}}
+  async function loadHistory(){const body=$('backupHistoryRows');body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs text-slate-400">Chargement de l’historique…</td></tr>';try{const result=await api('/api/backup/history');$('backupHistoryLocation').textContent='Répertoire : '+(result.destination||'');const items=Array.isArray(result.items)?result.items:[];if(!items.length){body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs text-slate-400">Aucune sauvegarde trouvée dans ce répertoire.</td></tr>';return;}body.innerHTML=items.map(item=>{const complete=item.status==='completed';const kind=item.backup_type==='incremental'?'Incrémentielle':'Complète';const badge=complete?'<span class="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold text-emerald-800">Terminée · '+kind+'</span>':'<span class="rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-bold text-amber-800">Incomplète</span>';let date=item.created_at||'';const parsed=new Date(date);if(!Number.isNaN(parsed.getTime()))date=parsed.toLocaleString('fr-FR');return '<tr class="hover:bg-slate-50"><td class="whitespace-nowrap px-4 py-3 text-xs font-semibold text-slate-700">'+escapeHtml(date)+'</td><td class="px-4 py-3">'+badge+'</td><td class="whitespace-nowrap px-4 py-3 text-xs font-bold text-slate-700">'+(item.size_bytes==null?'—':escapeHtml(formatBytes(item.size_bytes)))+'</td><td class="px-4 py-3 text-xs text-slate-600">'+escapeHtml(item.database||'—')+'</td><td class="max-w-[360px] px-4 py-3 text-[11px] text-slate-500"><span class="block truncate" title="'+escapeHtml(item.path||'')+'">'+escapeHtml(item.path||item.name||'')+'</span></td></tr>';}).join('');}catch(error){body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs font-semibold text-rose-600">'+escapeHtml(error.message)+'</td></tr>';}}
   function renderProgress(state){const speed=Math.max(0,Number(state.speed_bps)||0);$('backupStage').textContent=state.stage||'Préparation';$('backupSpeed').textContent=formatBytes(speed)+'/s';const transferred=Number(state.stage_bytes)||0,total=Number(state.stage_total_bytes)||0;$('backupTransferStats').textContent=formatBytes(transferred)+(total?' / '+formatBytes(total):'');const file=state.current_file||'';$('backupCurrentFile').textContent=file?(state.stage==='Base PostgreSQL'?'Export de la base PostgreSQL en cours':'Fichier : '+file):'';$('backupCurrentFile').title=file;$('backupPause').classList.toggle('hidden',state.state!=='running');$('backupResume').classList.toggle('hidden',state.state!=='paused');$('backupCancel').classList.toggle('hidden',!['running','paused','cancelling'].includes(state.state));$('backupCancel').disabled=state.state==='cancelling';$('backupCancel').innerHTML=state.state==='cancelling'?'<i class="ph-bold ph-spinner-gap mr-1 animate-spin"></i>Abandon…':'<i class="ph-bold ph-x-circle mr-1"></i>Abandonner';}
   function showError(message){$('backupProgressWrap').classList.remove('hidden');$('backupMessage').textContent=message;$('backupMessage').className='min-w-0 truncate text-sm font-bold text-rose-700';}
   async function poll(){if(!currentJob||!document.getElementById('backupProgressWrap'))return;try{const state=await api('/api/backup/status/'+encodeURIComponent(currentJob));if(!document.getElementById('backupProgressWrap'))return;$('backupProgressWrap').classList.remove('hidden');$('backupMessage').textContent=state.message||state.state;$('backupMessage').className='min-w-0 truncate text-sm font-bold '+(['failed','cancelled'].includes(state.state)?'text-rose-700':'text-slate-700');const percent=Number(state.percent)||0;$('backupPercent').textContent=percent+' %';$('backupProgressBar').style.width=percent+'%';$('backupOutput').textContent=state.output?'Destination : '+state.output:'';renderProgress(state);if(['running','paused','cancelling'].includes(state.state)){pollTimer=setTimeout(poll,1000);}else{$('backupStart').disabled=false;$('backupStart').classList.remove('opacity-60','cursor-not-allowed');currentJob=null;loadHistory();}}catch(error){if(document.getElementById('backupProgressWrap'))showError(error.message);$('backupStart')?.removeAttribute('disabled');currentJob=null;}}
@@ -1092,13 +1208,13 @@ def render_html(user: dict[str, Any] | None = None) -> str:
   function timePeriod(value){if(!/^\d{2}:\d{2}$/.test(value||''))return 'Format 24 h';const hour=Number(value.slice(0,2));if(hour>=5&&hour<12)return 'Matin';if(hour>=12&&hour<18)return 'Après-midi';if(hour>=18&&hour<22)return 'Soir';return 'Nuit';}
   function updateSchedulePeriod(){const period=$('backupSchedulePeriod');if(period)period.textContent=timePeriod($('backupScheduleTime').value);}
   function renderSchedules(){const body=$('backupScheduleRows');if(!schedules.length){body.innerHTML='<tr><td colspan="5" class="px-4 py-6 text-center text-xs text-slate-400">Aucun horaire configuré.</td></tr>';return;}body.innerHTML=schedules.map((item,index)=>{const state=item.last_run_status==='completed'?'Terminée':item.last_run_status==='running'?'En cours':item.last_run_status==='failed'?'Échec':item.last_run_status==='cancelled'?'Abandonnée':item.last_run_status==='skipped'?'Ignorée':'Jamais exécutée';const tone=item.last_run_status==='completed'?'text-emerald-700':item.last_run_status==='failed'?'text-rose-700':item.last_run_status==='cancelled'?'text-amber-700':'text-slate-500';const last=item.last_run_at?new Date(item.last_run_at).toLocaleString('fr-FR')+' · '+state:state;return '<tr class="hover:bg-slate-50"><td class="px-4 py-3"><span class="font-mono font-bold text-slate-800">'+item.time+'</span><span class="ml-2 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">'+timePeriod(item.time)+'</span></td><td class="px-4 py-3 text-slate-600">Tous les jours</td><td class="px-4 py-3"><button type="button" data-schedule-toggle="'+index+'" class="rounded-full px-3 py-1 text-[10px] font-bold '+(item.enabled?'bg-emerald-100 text-emerald-800':'bg-slate-100 text-slate-500')+'">'+(item.enabled?'Activé':'Désactivé')+'</button></td><td class="px-4 py-3 text-xs '+tone+'">'+last+'</td><td class="px-4 py-3 text-right"><button type="button" data-schedule-delete="'+index+'" class="rounded-lg px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50"><i class="ph-bold ph-trash mr-1"></i>Supprimer</button></td></tr>';}).join('');body.querySelectorAll('[data-schedule-toggle]').forEach(button=>button.addEventListener('click',()=>{const item=schedules[Number(button.dataset.scheduleToggle)];item.enabled=!item.enabled;renderSchedules();}));body.querySelectorAll('[data-schedule-delete]').forEach(button=>button.addEventListener('click',()=>{schedules.splice(Number(button.dataset.scheduleDelete),1);renderSchedules();}));}
-  async function saveSchedule(){const result=await api('/api/backup/schedule',{method:'POST',body:JSON.stringify({enabled:$('backupScheduleEnabled').checked,schedules})});schedules=result.schedules||[];renderSchedules();$('backupScheduleNotice').textContent=result.schedule_enabled?'Planification enregistrée et active.':'Planification enregistrée et suspendue.';$('backupScheduleNotice').className='text-xs text-emerald-700';}
+  async function saveSchedule(){const result=await api('/api/backup/schedule',{method:'POST',body:JSON.stringify({enabled:$('backupScheduleEnabled').checked,mode:$('backupScheduleMode').value,schedules})});schedules=result.schedules||[];renderSchedules();$('backupScheduleNotice').textContent=result.schedule_enabled?'Planification enregistrée et active.':'Planification enregistrée et suspendue.';$('backupScheduleNotice').className='text-xs text-emerald-700';}
   $('backupScheduleAdd').addEventListener('click',()=>{const time=$('backupScheduleTime').value;if(!time){$('backupScheduleNotice').textContent='Choisis une heure avant de l’ajouter.';$('backupScheduleNotice').className='text-xs font-semibold text-rose-600';return;}if(schedules.some(item=>item.time===time)){$('backupScheduleNotice').textContent='Cette heure existe déjà dans le tableau.';$('backupScheduleNotice').className='text-xs font-semibold text-rose-600';return;}schedules.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,8),time,enabled:true});schedules.sort((a,b)=>a.time.localeCompare(b.time));$('backupScheduleTime').value='';renderSchedules();});
   $('backupScheduleTime').addEventListener('input',updateSchedulePeriod);
   $('backupScheduleSave').addEventListener('click',()=>saveSchedule().catch(error=>{$('backupScheduleNotice').textContent=error.message;$('backupScheduleNotice').className='text-xs font-semibold text-rose-600';}));
   $('backupScheduleEnabled').addEventListener('change',()=>saveSchedule().catch(error=>{$('backupScheduleNotice').textContent=error.message;$('backupScheduleNotice').className='text-xs font-semibold text-rose-600';}));
-  $('backupStart').addEventListener('click',async()=>{try{await api('/api/backup/settings',{method:'POST',body:JSON.stringify({destination:$('backupDestination').value})});const result=await api('/api/backup/start',{method:'POST',body:'{}'});currentJob=result.job_id;$('backupStart').disabled=true;$('backupStart').classList.add('opacity-60','cursor-not-allowed');$('backupProgressBar').style.width='1%';$('backupPercent').textContent='1 %';$('backupOutput').textContent='';$('backupMessage').textContent='Démarrage de la sauvegarde…';$('backupMessage').className='min-w-0 truncate text-sm font-bold text-slate-700';$('backupProgressWrap').classList.remove('hidden');renderProgress({state:'running',stage:'Préparation',speed_bps:0,stage_bytes:0});poll();}catch(error){showError(error.message);}});
-  api('/api/backup/settings').then(settings=>{$('backupDestination').value=settings.destination||'';$('backupScheduleEnabled').checked=settings.schedule_enabled===true;schedules=Array.isArray(settings.schedules)?settings.schedules:[];renderSchedules();loadHistory();}).catch(error=>showError(error.message));
+  $('backupStart').addEventListener('click',async()=>{try{await api('/api/backup/settings',{method:'POST',body:JSON.stringify({destination:$('backupDestination').value})});const mode=$('backupMode').value;const result=await api('/api/backup/start',{method:'POST',body:JSON.stringify({mode})});currentJob=result.job_id;$('backupStart').disabled=true;$('backupStart').classList.add('opacity-60','cursor-not-allowed');$('backupProgressBar').style.width='1%';$('backupPercent').textContent='1 %';$('backupOutput').textContent='';$('backupMessage').textContent=mode==='incremental'?'Démarrage de la sauvegarde incrémentielle…':'Démarrage de la sauvegarde complète…';$('backupMessage').className='min-w-0 truncate text-sm font-bold text-slate-700';$('backupProgressWrap').classList.remove('hidden');renderProgress({state:'running',stage:'Préparation',speed_bps:0,stage_bytes:0});poll();}catch(error){showError(error.message);}});
+  api('/api/backup/settings').then(settings=>{$('backupDestination').value=settings.destination||'';$('backupScheduleMode').value=settings.schedule_mode||'full';$('backupScheduleEnabled').checked=settings.schedule_enabled===true;schedules=Array.isArray(settings.schedules)?settings.schedules:[];renderSchedules();loadHistory();}).catch(error=>showError(error.message));
   api('/api/backup/current').then(state=>{if(state.id&&state.state!=='idle'){$('backupProgressWrap').classList.remove('hidden');$('backupMessage').textContent=state.message||state.state;$('backupPercent').textContent=(Number(state.percent)||0)+' %';$('backupProgressBar').style.width=(Number(state.percent)||0)+'%';$('backupOutput').textContent=state.output?'Destination : '+state.output:'';renderProgress(state);if(['running','paused','cancelling'].includes(state.state)){currentJob=state.id;$('backupStart').disabled=true;poll();}}}).catch(()=>{});
 })();
 </script>
