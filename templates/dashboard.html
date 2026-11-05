@@ -451,6 +451,12 @@
                 </div>
 
                 <div class="flex items-center justify-end gap-3.5">
+                    {% if user.role == 'Administrateur' %}
+                    <button type="button" onclick="openClinivaImagingWindow()" class="inline-flex min-h-9 items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-800 shadow-sm transition hover:border-emerald-300 hover:bg-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-400 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-200 dark:hover:bg-emerald-400/20" title="Ouvrir DICOM Print et PACS sur le deuxième écran">
+                        <i class="ph-bold ph-layout text-base"></i>
+                        <span class="hidden sm:inline text-xs font-bold">Double écran</span>
+                    </button>
+                    {% endif %}
                     <button type="button" onclick="openFaultReportModal()" class="inline-flex min-h-9 items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700 shadow-sm transition hover:border-rose-300 hover:bg-rose-100 focus:outline-none focus:ring-2 focus:ring-rose-400 dark:border-rose-400/20 dark:bg-rose-400/10 dark:text-rose-300 dark:hover:bg-rose-400/20" title="Déclaration de panne" aria-haspopup="dialog" aria-controls="faultReportModal">
                         <i class="ph-bold ph-warning-octagon text-base"></i>
                         <span class="hidden sm:inline text-xs font-bold">Déclaration de panne</span>
@@ -1847,6 +1853,57 @@
                 if (errorBox) { errorBox.textContent = error.message || 'Filtres indisponibles.'; errorBox.classList.remove('hidden'); }
             }
             await window.loadDashboardConsumptionReport();
+        })();
+
+        window.openClinivaImagingWindow = async function() {
+            try {
+                if (window.pywebview?.api?.open_imaging_window) {
+                    const result = await window.pywebview.api.open_imaging_window();
+                    if (!result?.ok) throw new Error(result?.error || 'Impossible d’ouvrir la fenêtre imagerie.');
+                    return;
+                }
+                const popup = window.open(`${window.location.origin}/?cliniva_screen=imaging`, 'cliniva-imaging', 'popup=yes,width=1280,height=820');
+                if (!popup) throw new Error('La fenêtre a été bloquée. Autorisez les fenêtres surgissantes pour Cliniva puis réessayez.');
+            } catch (error) {
+                if (typeof window.showToast === 'function') window.showToast(error.message || 'Ouverture de la fenêtre imagerie impossible.', 'error');
+                else console.error(error);
+            }
+        };
+
+        (function initClinivaImagingScreen() {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('cliniva_screen') !== 'imaging') return;
+            document.body.classList.add('cliniva-imaging-screen');
+            const style = document.createElement('style');
+            style.id = 'cliniva-imaging-screen-style';
+            style.textContent = `
+                #sidebar,#sidebar-overlay,main>header:first-child{display:none!important}
+                main{padding:12px 16px!important;gap:10px}
+                #dynamic-content-area{padding-bottom:0!important;min-height:0}
+                #cliniva-imaging-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none;padding:14px 18px;border:1px solid rgba(148,163,184,.2);border-radius:20px;background:linear-gradient(115deg,#102b21,#0f5138 62%,#11734d);color:white;box-shadow:0 10px 28px rgba(15,81,56,.2)}
+                #cliniva-imaging-toolbar .imaging-toolbar-title{display:flex;align-items:center;gap:12px;min-width:0}
+                #cliniva-imaging-toolbar .imaging-toolbar-icon{display:grid;place-items:center;width:42px;height:42px;border:1px solid rgba(255,255,255,.18);border-radius:14px;background:rgba(255,255,255,.12);font-size:20px}
+                #cliniva-imaging-toolbar h1{margin:0;font-size:15px;font-weight:850;letter-spacing:.01em}
+                #cliniva-imaging-toolbar p{margin:3px 0 0;color:#c7f9dc;font-size:11px}
+                #cliniva-imaging-tabs{display:flex;gap:8px;flex:none}
+                #cliniva-imaging-tabs button{display:inline-flex;align-items:center;gap:8px;min-height:40px;padding:0 15px;border:1px solid rgba(255,255,255,.2);border-radius:12px;background:rgba(255,255,255,.08);color:#ecfdf5;font:750 12px system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer;transition:.16s ease}
+                #cliniva-imaging-tabs button:hover{background:rgba(255,255,255,.16);transform:translateY(-1px)}
+                #cliniva-imaging-tabs button[aria-pressed="true"]{border-color:#bef264;background:#bef264;color:#183323;box-shadow:0 5px 14px rgba(0,0,0,.12)}
+                @media(max-width:680px){ #cliniva-imaging-toolbar{align-items:flex-start;flex-direction:column}#cliniva-imaging-tabs{width:100%}#cliniva-imaging-tabs button{flex:1;justify-content:center;padding:0 9px}}
+            `;
+            document.head.appendChild(style);
+            const main = document.querySelector('main');
+            const content = document.getElementById('dynamic-content-area');
+            if (!main || !content) return;
+            const toolbar = document.createElement('section');
+            toolbar.id = 'cliniva-imaging-toolbar';
+            toolbar.innerHTML = `<div class="imaging-toolbar-title"><span class="imaging-toolbar-icon"><i class="ph-bold ph-first-aid-kit"></i></span><div><h1>Cliniva · Espace imagerie</h1><p>Fenêtre dédiée à l’archivage et à la réception DICOM</p></div></div><nav id="cliniva-imaging-tabs" aria-label="Modules d’imagerie"><button type="button" data-imaging-module="gestion_dicom_print" aria-pressed="true"><i class="ph-bold ph-printer"></i>DICOM Print</button><button type="button" data-imaging-module="gestion_pacs_server" aria-pressed="false"><i class="ph-bold ph-hard-drives"></i>PACS Server</button></nav>`;
+            main.insertBefore(toolbar, content);
+            toolbar.querySelectorAll('[data-imaging-module]').forEach(button => button.addEventListener('click', async () => {
+                toolbar.querySelectorAll('[data-imaging-module]').forEach(tab => tab.setAttribute('aria-pressed', String(tab === button)));
+                await window.loadModule(button.dataset.imagingModule);
+            }));
+            window.loadModule('gestion_dicom_print');
         })();
 
         // La page reste sur son accueil; les utilisateurs sans droit dashboard

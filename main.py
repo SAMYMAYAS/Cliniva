@@ -27,6 +27,7 @@ import subprocess
 import threading
 import time
 import uuid
+import ctypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -62,6 +63,46 @@ _DEV_WORKSTATION_MACS = {
     "3024A9914C8F",
     "18473DEC5E90",
 }
+
+
+def _secondary_monitor_bounds() -> Optional[tuple[int, int, int, int]]:
+    """Retourne les limites du second écran Windows, s'il existe."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        from ctypes import wintypes
+
+        class Rect(ctypes.Structure):
+            _fields_ = [(name, wintypes.LONG) for name in ("left", "top", "right", "bottom")]
+
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", Rect),
+                        ("rcWork", Rect), ("dwFlags", wintypes.DWORD)]
+
+        monitors = []
+        callback_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(Rect), ctypes.c_ssize_t
+        )
+
+        def collect(handle, _dc, _rect, _data):
+            info = MonitorInfo()
+            info.cbSize = ctypes.sizeof(MonitorInfo)
+            if ctypes.windll.user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+                rect = info.rcMonitor
+                monitors.append((bool(info.dwFlags & 1), rect.left, rect.top, rect.right, rect.bottom))
+            return True
+
+        callback = callback_type(collect)
+        if not ctypes.windll.user32.EnumDisplayMonitors(None, None, callback, 0):
+            return None
+        secondary = sorted((item for item in monitors if not item[0]), key=lambda item: (item[1], item[2]), reverse=True)
+        if not secondary:
+            return None
+        _, left, top, right, bottom = secondary[0]
+        return left, top, right - left, bottom - top
+    except Exception as exc:
+        logger.debug("Détection du second écran indisponible : %s", exc)
+        return None
 
 
 def _is_dev_workstation() -> bool:
@@ -267,6 +308,8 @@ class ClientDicomServicesBridge:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self._lock = threading.RLock()
+        self._imaging_window = None
+        self._imaging_base_url = ""
         self._print_server = None
         self._a3_print_server = None
         self._pacs_server = None
@@ -276,13 +319,35 @@ class ClientDicomServicesBridge:
         self._pacs_send_jobs_lock = threading.Lock()
         self._pacs_send_processes: Dict[str, Any] = {}
 
-    def window_minimize(self) -> None:
-        """Réduit la fenêtre Cliniva du poste courant."""
-        if webview.windows:
-            webview.windows[0].minimize()
+    def configure_imaging_window(self, window, base_url: str) -> None:
+        """Mémorise la fenêtre secondaire d'imagerie préparée au démarrage."""
+        self._imaging_window = window
+        self._imaging_base_url = str(base_url or "").rstrip("/")
 
-    def window_close(self) -> None:
+    def open_imaging_window(self) -> Dict[str, Any]:
+        """Affiche DICOM Print/PACS dans la seconde fenêtre native Cliniva."""
+        window = self._imaging_window
+        if window is None:
+            return {"ok": False, "error": "La fenêtre secondaire n'est pas disponible."}
+        try:
+            window.load_url(f"{self._imaging_base_url}/?cliniva_screen=imaging")
+            window.show()
+            return {"ok": True}
+        except Exception as exc:
+            logger.exception("Ouverture de la fenêtre secondaire d'imagerie impossible")
+            return {"ok": False, "error": str(exc)}
+
+    def window_minimize(self, target: str = "main") -> None:
+        """Réduit la fenêtre Cliniva du poste courant."""
+        window = self._imaging_window if target == "imaging" else (webview.windows[0] if webview.windows else None)
+        if window:
+            window.minimize()
+
+    def window_close(self, target: str = "main") -> None:
         """Ferme la fenêtre Cliniva du poste courant."""
+        if target == "imaging" and self._imaging_window:
+            self._imaging_window.hide()
+            return
         if webview.windows:
             webview.windows[0].destroy()
 
@@ -1817,8 +1882,34 @@ def main() -> None:
         js_api=client_bridge,
     )
 
-    def install_window_controls() -> None:
-        window.evaluate_js("""(() => {
+    monitor = _secondary_monitor_bounds()
+    if monitor:
+        monitor_x, monitor_y, monitor_width, monitor_height = monitor
+        imaging_width = max(900, monitor_width - 32)
+        imaging_height = max(650, monitor_height - 64)
+        imaging_x = monitor_x + 16
+        imaging_y = monitor_y + 16
+    else:
+        imaging_x, imaging_y = 80, 80
+        imaging_width, imaging_height = 1280, 820
+    imaging_window = webview.create_window(
+        title="Cliniva — Imagerie",
+        url="about:blank",
+        x=imaging_x,
+        y=imaging_y,
+        width=imaging_width,
+        height=imaging_height,
+        min_size=(900, 650),
+        resizable=True,
+        zoomable=True,
+        hidden=True,
+        background_color="#f0f3f1",
+        js_api=client_bridge,
+    )
+    client_bridge.configure_imaging_window(imaging_window, target_url)
+
+    def install_window_controls(target_window) -> None:
+        target_window.evaluate_js("""(() => {
           const install = () => {
             if (document.getElementById('cliniva-window-controls')) return;
             if (!document.getElementById('cliniva-window-controls-style')) {
@@ -1845,7 +1936,7 @@ def main() -> None:
               button.type = 'button'; button.title = label; button.setAttribute('aria-label', label); button.className = className;
               button.innerHTML = icon;
               button.style.cssText = `width:34px;height:32px;border:0;border-radius:8px;background:${className === 'cliniva-close' ? '#fff0f0' : '#f1f6f3'};color:${className === 'cliniva-close' ? '#c43e49' : '#527064'};cursor:pointer;display:grid;place-items:center;padding:0`;
-              button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); window.pywebview.api[action](); });
+              button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); const target = new URLSearchParams(window.location.search).get('cliniva_screen') === 'imaging' ? 'imaging' : 'main'; window.pywebview.api[action](target); });
               bar.appendChild(button);
             };
             makeButton('Réduire', '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>', 'cliniva-minimize', 'window_minimize');
@@ -1856,7 +1947,8 @@ def main() -> None:
           new MutationObserver(install).observe(document.documentElement, {childList:true, subtree:true});
         })()""")
 
-    window.events.loaded += install_window_controls
+    window.events.loaded += lambda: install_window_controls(window)
+    imaging_window.events.loaded += lambda: install_window_controls(imaging_window)
 
     # 5. Démarrage de la boucle d'événements native
     try:
