@@ -435,7 +435,7 @@ def render_html() -> str:
 
             window.deleteRoomType = async function(id) {{
                 const item = roomTypesData.find(type => Number(type.id) === Number(id));
-                if (!item || !confirm(`Supprimer le type « ${{item.nom}} » ?`)) return;
+                if (!item || !await window.showConfirm(`Supprimer le type « ${{item.nom}} » ?`)) return;
                 const response = await fetch('/api/rooms/types/delete', {{
                     method: 'POST', headers: {{'Content-Type':'application/json'}}, body: JSON.stringify({{id}})
                 }});
@@ -572,7 +572,7 @@ def render_html() -> str:
             }};
 
             window.deleteRoom = async function(id) {{
-                if (confirm("Voulez-vous supprimer cette salle de consultation ?")) {{
+                if (await window.showConfirm("Voulez-vous supprimer cette salle de consultation ?")) {{
                     await fetch('/api/rooms/delete', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},

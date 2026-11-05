@@ -978,7 +978,7 @@ def render_html() -> str:
         };
         window.controlPrintSpoolerService = async function(action) {
             const actionLabel = {start:'démarrer', stop:'arrêter', restart:'redémarrer'}[action] || action;
-            if (action !== 'start' && !confirm(`Confirmer la commande « ${actionLabel} » du spooler serveur ?`)) return;
+            if (action !== 'start' && !await window.showConfirm(`Confirmer la commande « ${actionLabel} » du spooler serveur ?`)) return;
             const message = document.getElementById('printSpoolerMessage');
             try {
                 const response = await fetch(`/api/serveur-impression/spooler/service/${action}`, {method:'POST'});
@@ -996,7 +996,7 @@ def render_html() -> str:
         window.controlPrintServerJob = async function(index, action) {
             const job = printSpoolerRows[index];
             if (!job) return;
-            if (action === 'delete' && !confirm(`Supprimer le job #${job.job_id} de l’imprimante « ${job.printer} » ?`)) return;
+            if (action === 'delete' && !await window.showConfirm(`Supprimer le job #${job.job_id} de l’imprimante « ${job.printer} » ?`)) return;
             const message = document.getElementById('printSpoolerMessage');
             try {
                 const response = await fetch(`/api/serveur-impression/spooler/jobs/${action}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({printer:job.printer, job_id:job.job_id})});
@@ -1013,7 +1013,7 @@ def render_html() -> str:
         };
         window.deleteAllPrintServerJobs = async function() {
             if (!printSpoolerRows.length) { alert('Aucun job à supprimer.'); return; }
-            if (!confirm(`Supprimer les ${printSpoolerRows.length} job(s) de toutes les files d’attente du serveur ?`)) return;
+            if (!await window.showConfirm(`Supprimer les ${printSpoolerRows.length} job(s) de toutes les files d’attente du serveur ?`)) return;
             const message = document.getElementById('printSpoolerMessage');
             try {
                 const response = await fetch('/api/serveur-impression/spooler/jobs/delete-all', {method:'POST'});

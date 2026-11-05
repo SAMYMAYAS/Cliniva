@@ -2770,7 +2770,7 @@ def render_html() -> str:
             }};
 
             window.deletePatient = async function(id) {{
-                if (confirm("Voulez-vous supprimer ce dossier patient ?")) {{
+                if (await window.showConfirm("Voulez-vous supprimer ce dossier patient ?")) {{
                     await fetch('/api/patients-module/delete', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},

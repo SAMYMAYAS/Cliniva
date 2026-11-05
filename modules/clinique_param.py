@@ -800,7 +800,7 @@ def render_html() -> str:
             }};
 
             window.deleteService = async function(id) {{
-                if (confirm("Voulez-vous supprimer ce service de la base de données ?")) {{
+                if (await window.showConfirm("Voulez-vous supprimer ce service de la base de données ?")) {{
                     await fetch('/api/clinic/services/delete', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},

@@ -747,7 +747,7 @@ def render_html() -> str:
             }};
 
             window.deleteStaff = async function(id) {{
-                if (confirm("Voulez-vous supprimer ce collaborateur du registre ?")) {{
+                if (await window.showConfirm("Voulez-vous supprimer ce collaborateur du registre ?")) {{
                     await fetch('/api/staff/delete', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},

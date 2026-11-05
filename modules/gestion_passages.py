@@ -4738,7 +4738,7 @@ def render_html(mode: str = "general") -> str:
             }};
 
             window.deletePassage = async function(id) {{
-                if (!confirm("Confirmez-vous la suppression définitive de ce passage ? Cette action est irréversible.")) return;
+                if (!await window.showConfirm("Confirmez-vous la suppression définitive de ce passage ? Cette action est irréversible.")) return;
                 const codeSuppression = prompt("Saisissez le code de suppression pour confirmer :");
                 if (codeSuppression === null) return;
                 try {{
@@ -4760,7 +4760,7 @@ def render_html(mode: str = "general") -> str:
 
             window.magicDeletePassage = async function(id){{
                 const passageRef = '#PASS-' + String(id).padStart(4, '0');
-                if (!confirm('SUPPRESSION MAGIQUE — ' + passageRef + '\\n\\nCette action efface définitivement le passage et tous ses mouvements de caisse. Elle ne peut pas être annulée.')) return;
+                if (!await window.showConfirm('SUPPRESSION MAGIQUE — ' + passageRef + '\\n\\nCette action efface définitivement le passage et tous ses mouvements de caisse. Elle ne peut pas être annulée.')) return;
                 const password = prompt('Confirmez avec le mot de passe du compte administrateur SYSTEM :');
                 if (password === null || !password) return;
                 const confirmation = prompt('Tapez exactement SUPPRIMER ' + passageRef + ' pour confirmer :');

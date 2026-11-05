@@ -1411,42 +1411,111 @@
         // =====================================================================
         // 5. MODALE ASYNCHRONE DE CONFIRMATION (REMPLACE CONFIRM)
         // =====================================================================
-        window.showConfirm = function(message, options = {}) {
-            return new Promise((resolve) => {
-                const modal = document.getElementById('custom-confirm-modal');
-                const card = document.getElementById('custom-confirm-card');
-                const titleEl = document.getElementById('confirm-title');
-                const msgEl = document.getElementById('confirm-message');
-                const okBtn = document.getElementById('confirm-ok-btn');
-                const cancelBtn = document.getElementById('confirm-cancel-btn');
+        (() => {
+            const confirmQueue = [];
+            let confirmActive = false;
 
-                if (!modal || !okBtn || !cancelBtn) {
-                    resolve(window.confirm(message));
-                    return;
+            function ensureConfirmModal() {
+                let modal = document.getElementById('cliniva-confirm-modal');
+                if (modal) return modal;
+                if (!document.getElementById('cliniva-confirm-style')) {
+                    const style = document.createElement('style');
+                    style.id = 'cliniva-confirm-style';
+                    style.textContent = `
+                        #cliniva-confirm-modal{position:fixed;inset:0;z-index:2147483005;display:grid;place-items:center;padding:20px;background:rgba(8,15,28,.62);backdrop-filter:blur(7px);opacity:0;visibility:hidden;transition:opacity .18s ease,visibility .18s ease}
+                        #cliniva-confirm-modal.is-open{opacity:1;visibility:visible}
+                        #cliniva-confirm-card{width:min(100%,480px);overflow:hidden;border:1px solid rgba(255,255,255,.72);border-radius:24px;background:#fff;box-shadow:0 28px 90px rgba(2,6,23,.35);transform:translateY(12px) scale(.97);transition:transform .2s ease;color:#172033}
+                        #cliniva-confirm-modal.is-open #cliniva-confirm-card{transform:translateY(0) scale(1)}
+                        .cliniva-confirm-head{display:flex;align-items:center;gap:15px;padding:22px 24px;background:linear-gradient(125deg,#0f766e,#047857 65%,#059669);color:white}
+                        .cliniva-confirm-icon{display:grid;place-items:center;width:48px;height:48px;flex:none;border:1px solid rgba(255,255,255,.25);border-radius:16px;background:rgba(255,255,255,.15);font-size:23px}
+                        .cliniva-confirm-eyebrow{margin:0 0 3px;color:#d1fae5;font-size:10px;font-weight:800;letter-spacing:.16em;text-transform:uppercase}
+                        .cliniva-confirm-title{margin:0;color:white;font-size:18px;font-weight:850;line-height:1.25}
+                        .cliniva-confirm-body{padding:24px 26px 26px;font-size:14px;line-height:1.65;color:#475569;white-space:pre-line;max-height:min(50vh,360px);overflow:auto}
+                        .cliniva-confirm-actions{display:flex;justify-content:flex-end;gap:10px;padding:0 24px 22px}
+                        .cliniva-confirm-actions button{min-height:42px;padding:0 18px;border-radius:12px;font:700 13px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer;transition:transform .15s ease,background .15s ease,box-shadow .15s ease}
+                        .cliniva-confirm-cancel{border:1px solid #dbe2ea;background:#fff;color:#475569}
+                        .cliniva-confirm-cancel:hover{background:#f1f5f9}
+                        .cliniva-confirm-ok{border:1px solid #047857;background:linear-gradient(135deg,#059669,#047857);color:#fff;box-shadow:0 5px 14px rgba(4,120,87,.22)}
+                        .cliniva-confirm-ok:hover{transform:translateY(-1px);box-shadow:0 8px 18px rgba(4,120,87,.28)}
+                        #cliniva-confirm-modal[data-danger="true"] .cliniva-confirm-head{background:linear-gradient(125deg,#9f1239,#be123c 65%,#e11d48)}
+                        #cliniva-confirm-modal[data-danger="true"] .cliniva-confirm-ok{border-color:#be123c;background:linear-gradient(135deg,#e11d48,#be123c);box-shadow:0 5px 14px rgba(190,18,60,.2)}
+                        .dark #cliniva-confirm-card{border-color:#334155;background:#111827;color:#f8fafc}
+                        .dark .cliniva-confirm-body{color:#cbd5e1}
+                        .dark .cliniva-confirm-cancel{border-color:#475569;background:#1e293b;color:#e2e8f0}
+                        @media(max-width:520px){#cliniva-confirm-modal{padding:14px}.cliniva-confirm-head{padding:19px}.cliniva-confirm-body{padding:20px 21px}.cliniva-confirm-actions{padding:0 19px 19px}.cliniva-confirm-actions button{flex:1}}
+                    `;
+                    document.head.appendChild(style);
                 }
+                modal = document.createElement('div');
+                modal.id = 'cliniva-confirm-modal';
+                modal.setAttribute('aria-hidden', 'true');
+                modal.innerHTML = `<section id="cliniva-confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="cliniva-confirm-title" aria-describedby="cliniva-confirm-message"><header class="cliniva-confirm-head"><span class="cliniva-confirm-icon" aria-hidden="true"><i class="ph-bold ph-question"></i></span><div><p class="cliniva-confirm-eyebrow">Cliniva · Confirmation</p><h2 id="cliniva-confirm-title" class="cliniva-confirm-title"></h2></div></header><div id="cliniva-confirm-message" class="cliniva-confirm-body"></div><footer class="cliniva-confirm-actions"><button type="button" class="cliniva-confirm-cancel"></button><button type="button" class="cliniva-confirm-ok"></button></footer></section>`;
+                document.body.appendChild(modal);
+                return modal;
+            }
 
-                if (titleEl) titleEl.innerText = options.title || "Confirmation requise";
-                if (msgEl) msgEl.innerText = message || "Voulez-vous vraiment continuer ?";
-                okBtn.innerText = options.okText || "Confirmer";
-                cancelBtn.innerText = options.cancelText || "Annuler";
+            function showNextConfirm() {
+                if (confirmActive || !confirmQueue.length) return;
+                confirmActive = true;
+                const request = confirmQueue.shift();
+                const modal = ensureConfirmModal();
+                const card = modal.querySelector('#cliniva-confirm-card');
+                const title = modal.querySelector('#cliniva-confirm-title');
+                const message = modal.querySelector('#cliniva-confirm-message');
+                const cancel = modal.querySelector('.cliniva-confirm-cancel');
+                const ok = modal.querySelector('.cliniva-confirm-ok');
+                const icon = modal.querySelector('.cliniva-confirm-icon i');
+                const previousFocus = document.activeElement;
+                title.textContent = request.options.title || 'Confirmation requise';
+                message.textContent = request.message || 'Voulez-vous vraiment continuer ?';
+                cancel.textContent = request.options.cancelText || 'Annuler';
+                ok.textContent = request.options.okText || 'Confirmer';
+                modal.dataset.danger = String(Boolean(request.options.danger));
+                if (icon) icon.className = request.options.danger ? 'ph-bold ph-warning' : 'ph-bold ph-question';
+                modal.classList.add('is-open');
+                modal.setAttribute('aria-hidden', 'false');
+                document.body.dataset.clinivaConfirmOpen = 'true';
 
-                modal.classList.remove('hidden');
-                modal.classList.add('flex');
-                if (card) setTimeout(() => card.classList.replace('scale-95', 'scale-100'), 10);
-
-                const cleanup = (result) => {
-                    if (card) card.classList.replace('scale-100', 'scale-95');
-                    setTimeout(() => {
-                        modal.classList.add('hidden');
-                        modal.classList.remove('flex');
-                        resolve(result);
-                    }, 150);
+                let settled = false;
+                const finish = result => {
+                    if (settled) return;
+                    settled = true;
+                    document.removeEventListener('keydown', onKeydown, true);
+                    cancel.removeEventListener('click', onCancel);
+                    ok.removeEventListener('click', onOk);
+                    modal.classList.remove('is-open');
+                    modal.setAttribute('aria-hidden', 'true');
+                    modal.dataset.danger = 'false';
+                    document.body.removeAttribute('data-cliniva-confirm-open');
+                    request.resolve(result);
+                    confirmActive = false;
+                    if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+                    setTimeout(showNextConfirm, 100);
                 };
+                const onCancel = () => finish(false);
+                const onOk = () => finish(true);
+                const onKeydown = event => {
+                    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(false); }
+                    else if (event.key === 'Tab') {
+                        const controls = [cancel, ok];
+                        const index = controls.indexOf(document.activeElement);
+                        if (event.shiftKey && index <= 0) { event.preventDefault(); ok.focus(); }
+                        else if (!event.shiftKey && index === controls.length - 1) { event.preventDefault(); cancel.focus(); }
+                    }
+                };
+                cancel.addEventListener('click', onCancel);
+                ok.addEventListener('click', onOk);
+                document.addEventListener('keydown', onKeydown, true);
+                requestAnimationFrame(() => ok.focus());
+            }
 
-                okBtn.onclick = () => cleanup(true);
-                cancelBtn.onclick = () => cleanup(false);
-            });
-        };
+            window.showConfirm = function(message, options = {}) {
+                return new Promise(resolve => {
+                    confirmQueue.push({ message: String(message ?? ''), options: options || {}, resolve });
+                    showNextConfirm();
+                });
+            };
+        })();
 
         window.restartClinivaApplication = async function() {
             const confirmed = await window.showConfirm(

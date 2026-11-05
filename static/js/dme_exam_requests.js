@@ -123,7 +123,7 @@ document.getElementById('dme-panel-bilans')?.addEventListener('click',async even
             if(action==='new-catalog'){resetExamCatalogForm();return;}
             const item=state.catalog.find(entry=>entry.id===id);if(!item)return;
             if(action==='edit-catalog'){document.getElementById('dmeExamCatalogId').value=item.id;document.getElementById('dmeExamCatalogName').value=item.name;const items=typeof item.items_json==='string'?JSON.parse(item.items_json):item.items_json;document.getElementById('dmeExamCatalogItems').value=items.map(entry=>entry.label+(entry.details?' | '+entry.details:'')).join('\n');return;}
-            if(!confirm((item.active?'Désactiver':'Réactiver')+' ce bilan dans le catalogue ?'))return;
+            if(!await window.showConfirm((item.active?'Désactiver':'Réactiver')+' ce bilan dans le catalogue ?'))return;
             await examPost('/catalog/'+id+'/toggle',{active:!item.active});await window.loadDmeExamRequests();renderExamCatalog(tab);return;
         }
         if(!examEditable(tab))throw new Error('La consultation doit être en cours et vous devez être autorisé à créer des demandes.');
@@ -136,7 +136,7 @@ document.getElementById('dme-panel-bilans')?.addEventListener('click',async even
         else if(action==='remove-pack'){draft.panels.splice(pack,1);}
         else if(action==='add-item'){draft.panels[pack]?.items.push({label:'',details:'',selected:true});}
         else if(action==='cancel'){
-            if(!confirm('Annuler cette demande de bilan ? Une trace sera conservée.'))return;
+            if(!await window.showConfirm('Annuler cette demande de bilan ? Une trace sera conservée.'))return;
             await examPost('/'+id+'/cancel',examScope(tab));await window.loadDmeExamRequests();return;
         }else if(action==='save' || action==='save-print'){
             if(state.saving)return;

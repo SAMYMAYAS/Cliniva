@@ -1138,7 +1138,7 @@ def render_html() -> str:
             };
 
             window.deleteCrTemplate = async function(id) {
-                if (confirm("Voulez-vous supprimer ce modèle de compte rendu ?")) {
+                if (await window.showConfirm("Voulez-vous supprimer ce modèle de compte rendu ?")) {
                     await fetch('/api/cr-templates/delete', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },

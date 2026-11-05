@@ -520,7 +520,7 @@ def render_html() -> str:
             window.deleteTreatingDoctor = async function(id) {{
                 const d = allTreatingList.find(x => x.id === id);
                 const label = d ? `${{d.grade || 'Dr'}} ${{d.nom}} ${{d.prenom}}` : 'ce médecin';
-                if (!confirm(`Voulez-vous supprimer ${{label}} ?`)) return;
+                if (!await window.showConfirm(`Voulez-vous supprimer ${{label}} ?`)) return;
 
                 try {{
                     const res = await fetch('/api/treating-doctors/delete', {{

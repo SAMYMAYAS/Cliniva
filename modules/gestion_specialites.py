@@ -1257,7 +1257,7 @@ def render_html() -> str:
             };
 
             window.deleteConsultation = async function(id) {
-                if (confirm("Voulez-vous supprimer cet acte ?")) {
+                if (await window.showConfirm("Voulez-vous supprimer cet acte ?")) {
                     await fetch('/api/specialites-module/consultation/delete', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -1319,7 +1319,7 @@ def render_html() -> str:
             };
 
             window.deleteSpecialite = async function(id) {
-                if (confirm("Supprimer cette spécialité ?")) {
+                if (await window.showConfirm("Supprimer cette spécialité ?")) {
                     await fetch('/api/specialites-module/specialite/delete', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -1379,7 +1379,7 @@ def render_html() -> str:
             };
 
             window.deleteRefItem = async function(table, id) {
-                if (confirm("Supprimer cet élément ?")) {
+                if (await window.showConfirm("Supprimer cet élément ?")) {
                     await fetch('/api/specialites-module/ref/delete', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },

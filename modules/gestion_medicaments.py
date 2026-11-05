@@ -571,7 +571,7 @@ def render_html() -> str:
             };
 
             window.deleteMedication = async function(id) {
-                if (confirm("Voulez-vous supprimer ce médicament de la base ?")) {
+                if (await window.showConfirm("Voulez-vous supprimer ce médicament de la base ?")) {
                     await fetch('/api/medications/delete', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },

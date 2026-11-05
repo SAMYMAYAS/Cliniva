@@ -1050,7 +1050,7 @@ def _render_html() -> str:
             };
 
             window.deleteUser = async function(id) {
-                if (confirm("Voulez-vous vraiment supprimer cet utilisateur ?")) {
+                if (await window.showConfirm("Voulez-vous vraiment supprimer cet utilisateur ?")) {
                     const res = await fetch('/api/users/delete', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },

@@ -5457,7 +5457,7 @@ def _render_html() -> str:
 
             window.cancelAccidentalDmeStart = async function() {
                 const pendingKey = pendingDmeCloseTabKey;
-                if (!pendingKey || !confirm('Annuler le démarrage et remettre le passage en attente ? Les données saisies seront enregistrées en brouillon.')) return;
+                if (!pendingKey || !await window.showConfirm('Annuler le démarrage et remettre le passage en attente ? Les données saisies seront enregistrées en brouillon.')) return;
                 window.currentActiveDmeKey = pendingKey;
                 const modal = document.getElementById('dmeCloseConsultationModal');
                 modal?.classList.add('hidden');
@@ -6989,7 +6989,7 @@ def _render_html() -> str:
 
             window.deleteEchographie = async function(echoId) {
                 const currentTab = window.activeDmeTabs.find(t => t.key === window.currentActiveDmeKey);
-                if (!confirm("Voulez-vous supprimer ce cliché échographique ?")) return;
+                if (!await window.showConfirm("Voulez-vous supprimer ce cliché échographique ?")) return;
 
                 try {
                     const res = await fetch('/api/dme/echographies/delete', {
@@ -7019,7 +7019,7 @@ def _render_html() -> str:
                     echoImageGroupId(image) === groupId
                 );
                 if (!groupImages.length) return;
-                if (!confirm(`Supprimer le groupe « ${category} » et ses ${groupImages.length} image(s) de ce passage, quel que soit leur type ? Cette action est définitive.`)) return;
+                if (!await window.showConfirm(`Supprimer le groupe « ${category} » et ses ${groupImages.length} image(s) de ce passage, quel que soit leur type ? Cette action est définitive.`)) return;
 
                 try {
                     const response = await fetch('/api/dme/echographies/delete-group', {
@@ -7660,7 +7660,7 @@ def _render_html() -> str:
             }
 
             window.deletePrescription = async function(ordId, patientId, passageId, consultationId) {
-                if (confirm("Voulez-vous marquer cette ordonnance comme SUPPRIMÉE ? Un filigrane d'annulation sera apposé.")) {
+                if (await window.showConfirm("Voulez-vous marquer cette ordonnance comme SUPPRIMÉE ? Un filigrane d'annulation sera apposé.")) {
                     const response = await fetch('/api/dme/prescriptions/delete', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -7943,7 +7943,7 @@ def _render_html() -> str:
 
             window.deleteArchivedCr = async function(recordId) {
                 const currentTab = window.activeDmeTabs.find(t => t.key === window.currentActiveDmeKey);
-                if (!confirm("Voulez-vous supprimer ce compte rendu archivé ?")) return;
+                if (!await window.showConfirm("Voulez-vous supprimer ce compte rendu archivé ?")) return;
 
                 try {
                     const res = await fetch('/api/dme/cr/delete', {
@@ -7968,7 +7968,7 @@ def _render_html() -> str:
                 if (!tab || tab.mode !== 'execution' || tab.data?.dme?.verrouille || getDmeResetPermission(tab) !== true || !(tab.consultationId || tab.data?.dme?.id)) return;
                 if (tab.resetting) return;
                 if (tab.examRequestState?.saving) return;
-                if (!confirm('Remettre TOUTE cette consultation en cours à zéro, comme au démarrage ?\\n\\nLes champs cliniques, fiches spécialisées, ordonnances (y compris celle en préparation), produits consommés, comptes rendus, livrets et images ajoutés pendant cette consultation seront retirés.\\n\\nL’identité du patient, les anciens dossiers, les documents d’accueil et la caisse seront conservés.')) return;
+                if (!await window.showConfirm('Remettre TOUTE cette consultation en cours à zéro, comme au démarrage ?\\n\\nLes champs cliniques, fiches spécialisées, ordonnances (y compris celle en préparation), produits consommés, comptes rendus, livrets et images ajoutés pendant cette consultation seront retirés.\\n\\nL’identité du patient, les anciens dossiers, les documents d’accueil et la caisse seront conservés.')) return;
                 const button = document.getElementById('dmeResetConsultationButton');
                 const saveButton = document.getElementById('dmeSaveConsultationButton');
                 const controls = [...document.querySelectorAll('.dme-subtab-panel input, .dme-subtab-panel textarea, .dme-subtab-panel select, .dme-subtab-panel button')].map(control => [control, control.disabled]);
