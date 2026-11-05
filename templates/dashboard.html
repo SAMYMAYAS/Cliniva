@@ -47,6 +47,23 @@
         .banner-glow {
             background: radial-gradient(circle at 60% 50%, #153e20 0%, #0e1711 75%);
         }
+        #cliniva-alert-layer { position:fixed; inset:0; z-index:10050; display:none; place-items:center; padding:1.25rem; background:rgba(8,18,12,.48); backdrop-filter:blur(7px); opacity:0; transition:opacity .18s ease; }
+        #cliniva-alert-layer.is-open { display:grid; opacity:1; }
+        #cliniva-alert-layer.is-closing { opacity:0; }
+        #cliniva-alert-card { width:min(100%,31rem); overflow:hidden; border:1px solid rgba(255,255,255,.72); border-radius:1.55rem; background:#fff; color:#17251c; box-shadow:0 28px 90px rgba(2,20,10,.28); transform:translateY(12px) scale(.985); transition:transform .2s cubic-bezier(.2,.8,.2,1); }
+        #cliniva-alert-layer.is-open #cliniva-alert-card { transform:translateY(0) scale(1); }
+        #cliniva-alert-card .cliniva-alert-band { height:.42rem; background:linear-gradient(90deg,#84cc16,#10a66b); }
+        #cliniva-alert-card[data-kind="error"] .cliniva-alert-band { background:linear-gradient(90deg,#fb7185,#e11d48); }
+        #cliniva-alert-card[data-kind="warning"] .cliniva-alert-band { background:linear-gradient(90deg,#fbbf24,#f97316); }
+        #cliniva-alert-card[data-kind="info"] .cliniva-alert-band { background:linear-gradient(90deg,#38bdf8,#2563eb); }
+        #cliniva-alert-card .cliniva-alert-icon { display:grid; width:3.35rem; height:3.35rem; flex:none; place-items:center; border:1px solid #d9f99d; border-radius:1.1rem; background:linear-gradient(145deg,#f7fee7,#ecfccb); color:#347a26; font-size:1.7rem; box-shadow:0 7px 18px rgba(101,163,13,.12); }
+        #cliniva-alert-card[data-kind="error"] .cliniva-alert-icon { border-color:#fecdd3; background:#fff1f2; color:#e11d48; box-shadow:0 7px 18px rgba(225,29,72,.1); }
+        #cliniva-alert-card[data-kind="warning"] .cliniva-alert-icon { border-color:#fde68a; background:#fffbeb; color:#d97706; box-shadow:0 7px 18px rgba(217,119,6,.1); }
+        #cliniva-alert-card[data-kind="info"] .cliniva-alert-icon { border-color:#bae6fd; background:#f0f9ff; color:#0284c7; box-shadow:0 7px 18px rgba(2,132,199,.1); }
+        #cliniva-alert-message { max-height:min(45vh,24rem); overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; color:#475569; font-size:.94rem; line-height:1.65; }
+        .dark #cliniva-alert-card { border-color:rgba(255,255,255,.1); background:#111a14; color:#f8fafc; }
+        .dark #cliniva-alert-message { color:#cbd5e1; }
+        @media(max-width:640px) { #cliniva-alert-layer { padding:1rem; } #cliniva-alert-card { border-radius:1.3rem; } #cliniva-alert-message { font-size:.9rem; } }
         /* Dashboard : identité premium, locale et sans dépendance CDN. */
         #dashboardOverview { --dash-line:rgba(21,66,42,.09); }
         #dashboardOverview .dashboard-hero { position:relative; isolation:isolate; overflow:hidden; padding:1.45rem 1.55rem; border:1px solid rgba(255,255,255,.12); border-radius:1.65rem; background:radial-gradient(ellipse at 82% 10%,rgba(143,235,79,.24),transparent 33%),radial-gradient(ellipse at 68% 110%,rgba(22,163,111,.28),transparent 42%),linear-gradient(118deg,#0c1b13 0%,#123322 55%,#173e2a 100%); box-shadow:0 18px 42px rgba(12,41,25,.18); }
@@ -1284,10 +1301,93 @@
             }, duration);
         };
 
-        // Redirection universelle de alert() vers showToast()
-        window.alert = function(msg) {
-            window.showToast(msg, 'auto');
-        };
+        // Fenêtre d'alerte Cliniva : présentation centrée et lisible, sans changer les messages.
+        (() => {
+            const queue = [];
+            let active = false;
+            let layer, card, title, message, icon, closeButton, okButton, previousFocus;
+
+            const ensureAlert = () => {
+                if (layer) return;
+                layer = document.createElement('div');
+                layer.id = 'cliniva-alert-layer';
+                layer.innerHTML = `
+                    <section id="cliniva-alert-card" role="alertdialog" aria-modal="true" aria-labelledby="cliniva-alert-title" aria-describedby="cliniva-alert-message" data-kind="info">
+                        <div class="cliniva-alert-band"></div>
+                        <div style="padding:1.45rem 1.5rem 1.25rem">
+                            <header style="display:flex;align-items:flex-start;gap:1rem">
+                                <span class="cliniva-alert-icon" aria-hidden="true"><i id="cliniva-alert-icon" class="ph-bold ph-info"></i></span>
+                                <div style="min-width:0;flex:1;padding-top:.1rem">
+                                    <div style="display:flex;align-items:center;justify-content:space-between;gap:.75rem">
+                                        <h2 id="cliniva-alert-title" style="margin:0;font-size:1.1rem;font-weight:850;letter-spacing:-.025em">Information</h2>
+                                        <button id="cliniva-alert-close" type="button" aria-label="Fermer" style="display:grid;width:2rem;height:2rem;flex:none;place-items:center;border:0;border-radius:.7rem;background:transparent;color:#94a3b8;cursor:pointer"><i class="ph-bold ph-x" aria-hidden="true"></i></button>
+                                    </div>
+                                    <p id="cliniva-alert-message" style="margin:.75rem 0 0"></p>
+                                </div>
+                            </header>
+                            <footer style="display:flex;justify-content:flex-end;margin-top:1.4rem;padding-top:1rem;border-top:1px solid rgba(148,163,184,.18)">
+                                <button id="cliniva-alert-ok" type="button" style="min-width:7.5rem;min-height:2.7rem;padding:.65rem 1.2rem;border:0;border-radius:.85rem;background:linear-gradient(135deg,#15803d,#047857);color:#fff;font-size:.85rem;font-weight:800;box-shadow:0 7px 16px rgba(4,120,87,.2);cursor:pointer">Compris</button>
+                            </footer>
+                        </div>
+                    </section>`;
+                document.body.appendChild(layer);
+                card = layer.querySelector('#cliniva-alert-card');
+                title = layer.querySelector('#cliniva-alert-title');
+                message = layer.querySelector('#cliniva-alert-message');
+                icon = layer.querySelector('#cliniva-alert-icon');
+                closeButton = layer.querySelector('#cliniva-alert-close');
+                okButton = layer.querySelector('#cliniva-alert-ok');
+                closeButton.addEventListener('click', dismiss);
+                okButton.addEventListener('click', dismiss);
+                layer.addEventListener('keydown', event => {
+                    if (event.key === 'Escape') { event.preventDefault(); dismiss(); }
+                    if (event.key === 'Tab') { event.preventDefault(); (document.activeElement === okButton ? closeButton : okButton).focus(); }
+                });
+            };
+
+            const dismiss = () => {
+                if (!active || !layer || layer.classList.contains('is-closing')) return;
+                layer.classList.add('is-closing');
+                setTimeout(() => {
+                    layer.classList.remove('is-open', 'is-closing');
+                    if (previousFocus?.isConnected) previousFocus.focus();
+                    previousFocus = null;
+                    active = false;
+                    showNext();
+                }, 180);
+            };
+
+            const showNext = () => {
+                if (active || !queue.length) return;
+                ensureAlert();
+                active = true;
+                previousFocus = document.activeElement;
+                const text = queue.shift();
+                const lower = text.toLocaleLowerCase('fr');
+                const kind = /erreur|impossible|échou|echec|refus|introuvable|❌/.test(lower) ? 'error' :
+                    /attention|avertissement|⚠/.test(lower) ? 'warning' :
+                    /succès|enregistré|ajouté|validé|terminé|✅/.test(lower) ? 'success' : 'info';
+                const variants = {
+                    error: ['Une erreur est survenue', 'ph-bold ph-x-circle'],
+                    warning: ['Attention', 'ph-bold ph-warning-circle'],
+                    success: ['Opération terminée', 'ph-bold ph-check-circle'],
+                    info: ['Information', 'ph-bold ph-info']
+                };
+                card.dataset.kind = kind;
+                title.textContent = variants[kind][0];
+                icon.className = variants[kind][1];
+                message.textContent = text.replace(/^[✅❌⚠️ℹ️]\s*/, '');
+                layer.classList.remove('is-closing');
+                layer.classList.add('is-open');
+                requestAnimationFrame(() => okButton.focus());
+            };
+
+            window.showClinivaAlert = function(msg) {
+                queue.push(String(msg ?? ''));
+                showNext();
+            };
+            window.alert = function(msg) { window.showClinivaAlert(msg); };
+        })();
 
         // Interdit les requêtes d'avatars Internet: les images externes utilisent un visuel local.
         const normalizeOfflineImages = (root) => {
