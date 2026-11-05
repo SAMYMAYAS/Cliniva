@@ -545,11 +545,13 @@ class ClientHardwareBridge:
         return {"name": image_data["name"], "patient_name": group.get("patient_name", ""),
                 "pdf_data_url": "data:application/pdf;base64," + base64.b64encode(output.getvalue()).decode("ascii")}
 
-    def dicom_print_save_pdf(self, pdf_data_url: str, suggested_name: str = "Image_DICOM_A3.pdf") -> dict:
+    def dicom_print_save_pdf(self, pdf_data_url: str, suggested_name: str = "Image_DICOM_A3.pdf",
+                             target: str = "main") -> dict:
         import base64
         try:
             import webview
-            if not webview.windows:
+            dialog_window = self._imaging_window if target == "imaging" else (webview.windows[0] if webview.windows else None)
+            if not dialog_window:
                 return {"ok": False, "error": "La fenêtre Cliniva n’est pas prête à enregistrer le PDF."}
             header, separator, encoded = str(pdf_data_url or "").partition(",")
             if not separator or header.strip().lower() != "data:application/pdf;base64":
@@ -557,7 +559,7 @@ class ClientHardwareBridge:
             content = base64.b64decode(encoded, validate=True)
             name = _safe_filename(suggested_name, "Image_DICOM_A3.pdf", ".pdf")
             dialog = getattr(webview, "FileDialog", None)
-            selected = webview.windows[0].create_file_dialog(
+            selected = dialog_window.create_file_dialog(
                 dialog.SAVE if dialog else webview.SAVE_DIALOG,
                 save_filename=name, file_types=("Fichiers PDF (*.pdf)",),
             )

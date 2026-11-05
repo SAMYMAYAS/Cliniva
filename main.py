@@ -711,12 +711,14 @@ class ClientDicomServicesBridge:
                 "patient_name": group.get("patient_name", ""),
                 "pdf_data_url": "data:application/pdf;base64," + base64.b64encode(output.getvalue()).decode("ascii")}
 
-    def dicom_print_save_pdf(self, pdf_data_url: str, suggested_name: str = "Image_DICOM_A3.pdf") -> Dict[str, Any]:
+    def dicom_print_save_pdf(self, pdf_data_url: str, suggested_name: str = "Image_DICOM_A3.pdf",
+                             target: str = "main") -> Dict[str, Any]:
         """Demande un emplacement natif puis enregistre le PDF A3 sur le poste client."""
         import base64
 
         try:
-            if not webview.windows:
+            dialog_window = self._imaging_window if target == "imaging" else (webview.windows[0] if webview.windows else None)
+            if not dialog_window:
                 return {"ok": False, "error": "La fenêtre Cliniva n’est pas prête à enregistrer le PDF."}
             header, separator, encoded = str(pdf_data_url or "").partition(",")
             if not separator or header.strip().lower() != "data:application/pdf;base64":
@@ -728,7 +730,7 @@ class ClientDicomServicesBridge:
                 name += ".pdf"
             dialog_api = getattr(webview, "FileDialog", None)
             dialog_type = dialog_api.SAVE if dialog_api else webview.SAVE_DIALOG
-            selected = webview.windows[0].create_file_dialog(
+            selected = dialog_window.create_file_dialog(
                 dialog_type, save_filename=name, file_types=("Fichiers PDF (*.pdf)",)
             )
             if not selected:
