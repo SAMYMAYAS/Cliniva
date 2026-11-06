@@ -72,6 +72,31 @@ def _icosnet_sms_settings() -> Dict[str, Any]:
             "password_configured": bool(settings.get("password_ciphertext"))}
 
 
+def _ensure_print_sms_status_schema() -> None:
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS print_server_sms_status (
+                record_id INTEGER PRIMARY KEY REFERENCES patient_cr_records(id) ON DELETE CASCADE,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                error_message TEXT
+            );
+        """)
+
+
+def _set_print_sms_status(record_id: int, status: str, error_message: str = "") -> None:
+    _ensure_print_sms_status_schema()
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO print_server_sms_status (record_id, status, updated_at, error_message)
+            VALUES (%s, %s, CURRENT_TIMESTAMP, %s)
+            ON CONFLICT (record_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                updated_at = EXCLUDED.updated_at,
+                error_message = EXCLUDED.error_message;
+        """, (record_id, status, error_message or None))
+
+
 def _enumerate_server_printers():
     if sys.platform != "win32":
         raise HTTPException(status_code=503, detail="La détection des imprimantes du serveur est disponible uniquement sous Windows.")
@@ -383,6 +408,7 @@ async def list_validated_booklets(request: Request):
     # Assure les migrations des colonnes d’archives avant la lecture globale.
     from modules.gestion_dme import dme_manager
     dme_manager.ensure_dme_schema()
+    _ensure_print_sms_status_schema()
 
     with get_db_cursor() as cursor:
         cursor.execute("""
@@ -392,9 +418,13 @@ async def list_validated_booklets(request: Request):
                    COALESCE(NULLIF(cr.date_heure_str, ''), TO_CHAR(cr.created_at, 'DD/MM/YYYY HH24:MI')) AS date_creation,
                    COALESCE(NULLIF(BTRIM(CONCAT_WS(' ', p.prenom, p.nom)), ''), 'Patient #' || cr.id_patient::text) AS patient,
                    COALESCE(p.telephone_1, '') AS telephone_1,
-                   COALESCE(p.telephone_2, '') AS telephone_2
+                   COALESCE(p.telephone_2, '') AS telephone_2,
+                   COALESCE(sms.status, 'unsent') AS sms_status,
+                   sms.updated_at AS sms_status_at,
+                   COALESCE(sms.error_message, '') AS sms_error
             FROM patient_cr_records cr
             LEFT JOIN patients p ON p.id = cr.id_patient
+            LEFT JOIN print_server_sms_status sms ON sms.record_id = cr.id
             WHERE LOWER(BTRIM(COALESCE(cr.type_modele, ''))) LIKE 'livret%'
                OR (
                     (
@@ -444,6 +474,7 @@ async def send_booklet_patient_sms(record_id: int, request: Request):
     user = get_current_user_optional(request)
     if not user:
         raise HTTPException(status_code=401, detail="Session expirée. Veuillez vous reconnecter.")
+    _ensure_print_sms_status_schema()
     data = await request.json()
     selected = data.get("destinations")
     if not isinstance(selected, list) or not selected:
@@ -509,6 +540,7 @@ async def send_booklet_patient_sms(record_id: int, request: Request):
         f"https://smsapi.icosnet.com:8443/bulksms/bulksms?{query}",
         headers={"Accept": "text/plain"}, method="GET",
     )
+    _set_print_sms_status(record_id, "pending")
     def submit_to_icosnet() -> str:
         with urllib.request.urlopen(api_request, timeout=20) as response:
             return response.read(4096).decode("utf-8", errors="replace").strip()
@@ -516,9 +548,11 @@ async def send_booklet_patient_sms(record_id: int, request: Request):
     try:
         provider_response = await asyncio.to_thread(submit_to_icosnet)
     except urllib.error.HTTPError as exc:
+        _set_print_sms_status(record_id, "error", f"Réponse HTTP Icosnet {exc.code}.")
         logger.warning("Icosnet SMS HTTP %s pour livret %s", exc.code, record_id)
         raise HTTPException(status_code=502, detail=f"Icosnet a refusé la requête (HTTP {exc.code}).") from exc
     except Exception as exc:
+        _set_print_sms_status(record_id, "error", "Connexion à la passerelle Icosnet impossible.")
         logger.warning("Échec de connexion à Icosnet pour livret %s : %s", record_id, exc)
         raise HTTPException(status_code=502, detail="Connexion à la passerelle Icosnet impossible. Réessaie plus tard.") from exc
 
@@ -530,8 +564,11 @@ async def send_booklet_patient_sms(record_id: int, request: Request):
                     "8": "Erreur interne Icosnet (code 8). La passerelle a rejeté la requête ; contacte Icosnet avec l’heure de l’essai et vérifie son journal avant de réessayer.",
                     "1725": "Crédit Icosnet insuffisant.", "1715": "Délai de réponse dépassé. Vérifie le journal Icosnet avant de renvoyer.",
                     "1028": "Message bloqué comme indésirable."}
+        error_message = messages.get(response_code, f"Icosnet a refusé l’envoi (code {response_code or 'inconnu'}).")
+        _set_print_sms_status(record_id, "error", error_message)
         logger.warning("Icosnet a refusé le SMS du livret %s avec code %s", record_id, response_code)
-        raise HTTPException(status_code=502, detail=messages.get(response_code, f"Icosnet a refusé l’envoi (code {response_code or 'inconnu'})."))
+        raise HTTPException(status_code=502, detail=error_message)
+    _set_print_sms_status(record_id, "sent")
     logger.info("SMS Icosnet soumis pour livret %s vers %s numéro(s), utilisateur %s", record_id, len(destinations), user.get("id"))
     return JSONResponse({"success": True, "message": f"SMS accepté par Icosnet pour {len(destinations)} numéro(s). La remise au téléphone sera confirmée par le rapport de livraison.", "provider_response": provider_response})
 
@@ -990,9 +1027,11 @@ Cher patient, votre dossier médical est prêt.</textarea></label>
                 if (!response.ok || !result.success) throw new Error(result.detail || 'Échec de l’envoi SMS.');
                 feedback.textContent = result.message || 'SMS accepté par la passerelle Icosnet.';
                 feedback.className = 'min-h-5 text-xs font-semibold text-emerald-700';
+                await window.loadPrintServerBooklets();
             } catch (error) {
                 feedback.textContent = error.message || 'Échec de l’envoi SMS.';
                 feedback.className = 'min-h-5 text-xs font-semibold text-rose-600';
+                await window.loadPrintServerBooklets();
             } finally {
                 if (sendButton) sendButton.disabled = false;
             }
@@ -1049,6 +1088,10 @@ Cher patient, votre dossier médical est prêt.</textarea></label>
             }
             body.innerHTML = visible.map(row => {
                 const prestation = String(row.titre || '').replace(/^Livret\s*-\s*/i, '');
+                const smsSent = row.sms_status === 'sent';
+                const smsLabel = smsSent ? 'Envoyé' : row.sms_status === 'error' ? 'Réessayer' : 'SMS';
+                const smsTitle = smsSent ? `SMS accepté par Icosnet${row.sms_status_at ? ` le ${row.sms_status_at}` : ''}` : row.sms_error ? `Dernier envoi échoué : ${row.sms_error}` : 'Envoyer un SMS au patient';
+                const smsColor = smsSent ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-sky-600 hover:bg-sky-700';
                 return `<tr class="bg-slate-50 text-sm text-slate-700 hover:bg-emerald-50/70">
                     <td class="rounded-l-xl px-3 py-3 font-mono text-xs text-slate-500">${htmlEscape(row.date_creation)}</td>
                     <td class="px-3 py-3"><div class="font-bold text-slate-800">${htmlEscape(row.patient)}</div><div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-medium text-slate-500">${row.telephone_1 ? `<span class="inline-flex items-center gap-1"><i class="ph-bold ph-phone text-emerald-600"></i>${htmlEscape(row.telephone_1)}</span>` : ''}${row.telephone_2 ? `<span class="inline-flex items-center gap-1"><i class="ph ph-phone text-slate-400"></i>${htmlEscape(row.telephone_2)}</span>` : ''}${!row.telephone_1 && !row.telephone_2 ? '<span class="text-slate-400">Téléphone non renseigné</span>' : ''}</div></td>
@@ -1058,7 +1101,7 @@ Cher patient, votre dossier médical est prêt.</textarea></label>
                     <td class="px-3 py-3">${htmlEscape(row.proprietaire || '—')}</td>
                     <td class="rounded-r-xl px-3 py-3"><div class="flex justify-end gap-2">
                         <button type="button" onclick="showPrintServerPreview(${Number(row.id)})" class="inline-flex items-center gap-2 rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-700"><i class="ph-bold ph-eye"></i>Afficher</button>
-                        <button type="button" onclick="openPrintServerSmsModal(${Number(row.id)})" ${row.telephone_1 || row.telephone_2 ? '' : 'disabled'} class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-2 text-xs font-bold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40" title="Envoyer un SMS au patient"><i class="ph-bold ph-chat-circle-text"></i>SMS</button>
+                        <button type="button" onclick="openPrintServerSmsModal(${Number(row.id)})" ${row.telephone_1 || row.telephone_2 ? '' : 'disabled'} class="inline-flex items-center gap-2 rounded-lg ${smsColor} px-3 py-2 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-40" title="${htmlEscape(smsTitle)}"><i class="ph-bold ${smsSent ? 'ph-check-circle' : 'ph-chat-circle-text'}"></i>${smsLabel}</button>
                         <button type="button" onclick="printServerBookletDirect(${Number(row.id)})" class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700"><i class="ph-bold ph-printer"></i>Imprimer</button>
                     </div></td>
                 </tr>`;
