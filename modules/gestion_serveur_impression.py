@@ -466,7 +466,16 @@ async def send_booklet_patient_sms(record_id: int, request: Request):
         raise HTTPException(status_code=404, detail="Patient ou livret introuvable.")
     allowed = [str(patient.get(key) or "").strip() for key in ("telephone_1", "telephone_2")]
     allowed = [phone for phone in allowed if phone]
-    normalize_phone = lambda value: re.sub(r"[^\d+]", "", str(value or ""))
+    def normalize_phone(value: Any) -> str:
+        raw = str(value or "").strip()
+        digits = re.sub(r"\D", "", raw)
+        if digits.startswith("00213"):
+            digits = digits[2:]
+        if digits.startswith("213"):
+            return f"+{digits}"
+        if digits.startswith("0"):
+            digits = digits[1:]
+        return f"+213{digits}" if digits else ""
     destinations = []
     for destination in selected:
         candidate = str(destination or "").strip()
@@ -928,7 +937,8 @@ Cher patient, votre dossier médical est prêt.</textarea></label>
             document.getElementById('printServerSmsPatient').textContent = row.patient || 'Patient';
             document.getElementById('printServerSmsFeedback').textContent = '';
             const destinationBox = document.getElementById('printServerSmsDestinations');
-            const phones = [row.telephone_1, row.telephone_2].map(value => String(value || '').trim()).filter(Boolean);
+            const normalizeAlgerianPhone = value => { let digits = String(value || '').replace(/\D/g, ''); if (digits.startsWith('00213')) digits = digits.slice(2); if (digits.startsWith('213')) return `+${digits}`; if (digits.startsWith('0')) digits = digits.slice(1); return digits ? `+213${digits}` : ''; };
+            const phones = [...new Set([row.telephone_1, row.telephone_2].map(normalizeAlgerianPhone).filter(Boolean))];
             destinationBox.innerHTML = phones.length ? phones.map((phone, index) => `<label class="flex cursor-pointer items-center gap-3 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-700"><input type="checkbox" class="printServerSmsPhone h-4 w-4 accent-sky-600" value="${htmlEscape(phone)}" ${index === 0 ? 'checked' : ''}><i class="ph-bold ph-phone text-sky-600"></i>${htmlEscape(phone)}</label>`).join('') : '<p class="text-xs font-semibold text-rose-600">Aucun numéro de téléphone renseigné.</p>';
             document.getElementById('printServerSmsModal').classList.remove('hidden');
             document.getElementById('printServerSmsModal').classList.add('flex');
