@@ -420,7 +420,7 @@ async def list_validated_booklets(request: Request):
                    COALESCE(p.telephone_1, '') AS telephone_1,
                    COALESCE(p.telephone_2, '') AS telephone_2,
                    COALESCE(sms.status, 'unsent') AS sms_status,
-                   sms.updated_at AS sms_status_at,
+                   TO_CHAR(sms.updated_at, 'DD/MM/YYYY HH24:MI:SS') AS sms_status_at,
                    COALESCE(sms.error_message, '') AS sms_error
             FROM patient_cr_records cr
             LEFT JOIN patients p ON p.id = cr.id_patient
