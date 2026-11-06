@@ -642,9 +642,18 @@ def render_html() -> str:
 
         <div class="rounded-[1.75rem] border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
             <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div><h2 class="text-lg font-extrabold text-slate-800">Livrets validés</h2><p id="printServerCount" class="text-xs text-slate-500">Chargement…</p><p class="mt-1 text-[10px] text-slate-400">Les livrets du jour s’affichent d’abord. La recherche retrouve aussi les anciens livrets.</p></div>
+                <div><h2 class="text-lg font-extrabold text-slate-800">Livrets validés</h2><p id="printServerCount" class="text-xs text-slate-500">Chargement…</p><p class="mt-1 text-[10px] text-slate-400">Filtrez par période, date précise ou nom du patient.</p></div>
                 <div class="flex w-full flex-wrap gap-2 sm:w-auto">
-                    <input id="printServerSearch" type="search" placeholder="Rechercher un patient ou un ancien livret…" oninput="filterPrintServerBooklets()" class="min-w-56 flex-1 rounded-xl border border-slate-200 px-4 py-2.5 text-sm outline-none focus:border-emerald-500">
+                    <select id="printServerPeriodFilter" aria-label="Période des livrets" onchange="filterPrintServerBooklets()" class="min-w-48 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-700 outline-none focus:border-emerald-500">
+                        <option value="today">Aujourd’hui</option>
+                        <option value="yesterday">Hier</option>
+                        <option value="day_before_yesterday">Avant-hier</option>
+                        <option value="this_week">Cette semaine</option>
+                        <option value="last_15_days">Depuis 15 jours</option>
+                        <option value="last_month">Depuis 1 mois</option>
+                        <option value="all">Toutes les périodes</option>
+                    </select>
+                    <input id="printServerSearch" type="search" placeholder="Nom du patient…" aria-label="Rechercher par nom du patient" oninput="filterPrintServerBooklets()" class="min-w-48 flex-1 rounded-xl border border-slate-200 px-4 py-2.5 text-sm outline-none focus:border-emerald-500">
                     <label class="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500"><i class="ph-bold ph-calendar-blank text-emerald-600"></i><input id="printServerDateFilter" type="date" aria-label="Filtrer les livrets par date de création" onchange="filterPrintServerBooklets()" class="bg-transparent text-sm text-slate-700 outline-none"></label>
                 </div>
             </div>
@@ -728,28 +737,50 @@ def render_html() -> str:
 
         window.filterPrintServerBooklets = function() {
             const query = (document.getElementById('printServerSearch')?.value || '').trim().toLocaleLowerCase();
+            const patientQueryLabel = (document.getElementById('printServerSearch')?.value || '').trim();
             const selectedDate = document.getElementById('printServerDateFilter')?.value || '';
+            const period = document.getElementById('printServerPeriodFilter')?.value || 'today';
             const now = new Date();
-            const today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+            const dateKey = date => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+            const today = dateKey(now);
+            const shiftDays = (date, days) => { const shifted = new Date(date); shifted.setDate(shifted.getDate() + days); return shifted; };
+            const periodRange = (() => {
+                if (period === 'all') return null;
+                if (period === 'yesterday') { const day = dateKey(shiftDays(now, -1)); return [day, day]; }
+                if (period === 'day_before_yesterday') { const day = dateKey(shiftDays(now, -2)); return [day, day]; }
+                if (period === 'this_week') {
+                    const mondayOffset = (now.getDay() + 6) % 7;
+                    return [dateKey(shiftDays(now, -mondayOffset)), today];
+                }
+                if (period === 'last_15_days') return [dateKey(shiftDays(now, -14)), today];
+                if (period === 'last_month') {
+                    const firstOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+                    const previousMonthLastDay = new Date(firstOfCurrentMonth.getFullYear(), firstOfCurrentMonth.getMonth(), 0).getDate();
+                    const start = new Date(firstOfCurrentMonth.getFullYear(), firstOfCurrentMonth.getMonth() - 1, Math.min(now.getDate(), previousMonthLastDay));
+                    return [dateKey(start), today];
+                }
+                return [today, today];
+            })();
             const visible = printServerRows.filter(row => {
-                const textMatch = [row.date_creation, row.patient, row.titre, row.nom_fichier, row.modalite, row.medecin_signataire, row.proprietaire].some(value => String(value || '').toLocaleLowerCase().includes(query));
+                const patientMatch = !query || String(row.patient || '').toLocaleLowerCase().includes(query);
                 const rowDate = (() => {
-                    const match = String(row.date_creation || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-                    return match ? `${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}` : '';
+                    const value = String(row.date_creation || '');
+                    const frenchDate = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+                    if (frenchDate) return `${frenchDate[3]}-${frenchDate[2].padStart(2, '0')}-${frenchDate[1].padStart(2, '0')}`;
+                    const isoDate = value.match(/^(\d{4}-\d{2}-\d{2})/);
+                    return isoDate ? isoDate[1] : '';
                 })();
-                // Sans filtre explicite, l’écran montre seulement aujourd’hui.
-                // Dès qu’une recherche est saisie, elle porte sur tout l’historique.
-                const dateMatch = selectedDate ? rowDate === selectedDate : query ? true : rowDate === today;
-                return textMatch && dateMatch;
+                const dateMatch = selectedDate ? rowDate === selectedDate : !periodRange || (rowDate >= periodRange[0] && rowDate <= periodRange[1]);
+                return patientMatch && dateMatch;
             });
             const body = document.getElementById('printServerBookletsBody');
-            document.getElementById('printServerCount').textContent = selectedDate
-                ? `${visible.length} livret(s) · ${selectedDate}`
-                : query ? `${visible.length} résultat(s) dans l’historique` : `${visible.length} livret(s) aujourd’hui`;
+            const periodLabel = document.getElementById('printServerPeriodFilter')?.selectedOptions?.[0]?.textContent || 'Aujourd’hui';
+            const filterLabel = selectedDate ? selectedDate : periodLabel;
+            document.getElementById('printServerCount').textContent = `${visible.length} livret(s) · ${filterLabel}${query ? ` · Patient : ${patientQueryLabel}` : ''}`;
             if (!visible.length) {
-                const emptyMessage = query || selectedDate
+                const emptyMessage = query || selectedDate || period !== 'today'
                     ? 'Aucun livret ne correspond à cette recherche.'
-                    : printServerRows.length ? 'Aucun livret validé aujourd’hui. Recherchez un patient ou un livret pour retrouver les anciens.' : 'Aucun livret validé aujourd’hui.';
+                    : printServerRows.length ? 'Aucun livret validé aujourd’hui. Choisissez une période ou recherchez un patient pour retrouver les anciens.' : 'Aucun livret validé aujourd’hui.';
                 body.innerHTML = `<tr><td colspan="7" class="rounded-2xl bg-slate-50 py-10 text-center text-sm text-slate-400">${emptyMessage}</td></tr>`;
                 return;
             }
