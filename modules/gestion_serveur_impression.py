@@ -1,5 +1,6 @@
 """Serveur d'impression centralise des livrets médicaux validés."""
 
+import asyncio
 import json
 import base64
 import logging
@@ -9,6 +10,9 @@ import re
 import shutil
 import sys
 import subprocess
+import urllib.parse
+import urllib.request
+import urllib.error
 from datetime import datetime
 import time
 from typing import Any, Dict
@@ -36,6 +40,36 @@ def _save_print_config(config: Dict[str, Any]) -> None:
     with open(temporary_path, "w", encoding="utf-8") as config_file:
         json.dump(config, config_file, ensure_ascii=False, indent=4)
     os.replace(temporary_path, CONFIG_FILE)
+
+
+def _protect_sms_password(password: str) -> str:
+    if not password:
+        return ""
+    if sys.platform != "win32":
+        raise RuntimeError("Le stockage protégé du mot de passe SMS nécessite Windows.")
+    try:
+        import win32crypt
+        encrypted = win32crypt.CryptProtectData(password.encode("utf-8"), "Cliniva Icosnet SMS", None, None, None, 0)
+        return base64.b64encode(encrypted).decode("ascii")
+    except ImportError as exc:
+        raise RuntimeError("pywin32 est requis pour protéger le mot de passe SMS sur le serveur.") from exc
+
+
+def _unprotect_sms_password(ciphertext: str) -> str:
+    if not ciphertext:
+        return ""
+    try:
+        import win32crypt
+        encrypted = base64.b64decode(ciphertext, validate=True)
+        return win32crypt.CryptUnprotectData(encrypted, None, None, None, 0)[1].decode("utf-8")
+    except Exception as exc:
+        raise RuntimeError("Le mot de passe SMS ne peut pas être déchiffré sous ce compte Windows. Réenregistre-le depuis Cliniva.") from exc
+
+
+def _icosnet_sms_settings() -> Dict[str, Any]:
+    settings = _load_print_config().get("icosnet_sms") or {}
+    return {"enabled": bool(settings.get("enabled")), "username": str(settings.get("username") or ""),
+            "password_configured": bool(settings.get("password_ciphertext"))}
 
 
 def _enumerate_server_printers():
@@ -376,6 +410,122 @@ async def list_validated_booklets(request: Request):
     return JSONResponse({"success": True, "livrets": booklets})
 
 
+@print_server_router.get("/sms/settings")
+async def get_print_server_sms_settings(request: Request):
+    if not get_current_user_optional(request):
+        raise HTTPException(status_code=401, detail="Session expirée. Veuillez vous reconnecter.")
+    return JSONResponse({"success": True, "settings": _icosnet_sms_settings()})
+
+
+@print_server_router.post("/sms/settings")
+async def save_print_server_sms_settings(request: Request):
+    _require_print_server_admin(request)
+    data = await request.json()
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+    from main import load_app_configuration, _persist_config_updates
+    current = load_app_configuration().get("icosnet_sms") or {}
+    ciphertext = "" if data.get("clear_password") else str(current.get("password_ciphertext") or "")
+    if password:
+        try:
+            ciphertext = _protect_sms_password(password)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    enabled = bool(data.get("enabled"))
+    if enabled and (not username or not ciphertext):
+        raise HTTPException(status_code=400, detail="Le compte Icosnet et son mot de passe sont requis pour activer l’envoi.")
+    saved = {"enabled": enabled, "username": username, "password_ciphertext": ciphertext}
+    _persist_config_updates({"icosnet_sms": saved})
+    return JSONResponse({"success": True, "settings": _icosnet_sms_settings()})
+
+
+@print_server_router.post("/livrets/{record_id}/sms")
+async def send_booklet_patient_sms(record_id: int, request: Request):
+    user = get_current_user_optional(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expirée. Veuillez vous reconnecter.")
+    data = await request.json()
+    selected = data.get("destinations")
+    if not isinstance(selected, list) or not selected:
+        raise HTTPException(status_code=400, detail="Coche au moins un numéro de téléphone.")
+    sender = str(data.get("source") or "").strip()
+    if sender not in {"KACEL GROUP", "KACEL RADIO"}:
+        raise HTTPException(status_code=400, detail="L’expéditeur sélectionné n’est pas autorisé.")
+    message = str(data.get("message") or "").strip()
+    if not message or len(message) > 1200:
+        raise HTTPException(status_code=400, detail="Le message est obligatoire et ne doit pas dépasser 1 200 caractères.")
+
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT p.telephone_1, p.telephone_2
+            FROM patient_cr_records cr JOIN patients p ON p.id = cr.id_patient
+            WHERE cr.id = %s
+        """, (record_id,))
+        patient = cursor.fetchone()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient ou livret introuvable.")
+    allowed = [str(patient.get(key) or "").strip() for key in ("telephone_1", "telephone_2")]
+    allowed = [phone for phone in allowed if phone]
+    normalize_phone = lambda value: re.sub(r"[^\d+]", "", str(value or ""))
+    destinations = []
+    for destination in selected:
+        candidate = str(destination or "").strip()
+        if not candidate or normalize_phone(candidate) not in {normalize_phone(phone) for phone in allowed}:
+            raise HTTPException(status_code=400, detail="Un numéro sélectionné ne correspond pas aux coordonnées du patient.")
+        normalized = normalize_phone(candidate)
+        if normalized not in {normalize_phone(phone) for phone in destinations}:
+            destinations.append(normalized)
+    if not destinations:
+        raise HTTPException(status_code=400, detail="Aucun numéro valide à contacter.")
+
+    settings = _load_print_config().get("icosnet_sms") or {}
+    if not settings.get("enabled"):
+        raise HTTPException(status_code=503, detail="L’envoi SMS Icosnet n’est pas configuré. Demande à un administrateur de l’activer.")
+    try:
+        password = _unprotect_sms_password(str(settings.get("password_ciphertext") or ""))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    username = str(settings.get("username") or "").strip()
+    if not username or not password:
+        raise HTTPException(status_code=503, detail="Les identifiants Icosnet sont incomplets. Vérifie la configuration SMS.")
+
+    # Le Delphi fourni envoyait le texte Unicode sous forme d’unités UTF-16 hexadécimales.
+    unicode_hex = message.encode("utf-16-be").hex().upper()
+    form_data = urllib.parse.urlencode({
+        "username": username, "password": password, "message": unicode_hex,
+        "source": sender, "destination": ",".join(destinations), "type": "2", "dlr": "1",
+    }).encode("ascii")
+    api_request = urllib.request.Request(
+        "https://smsapi.icosnet.com:8443/bulksms/bulksms", data=form_data,
+        headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Accept": "text/plain"},
+        method="POST",
+    )
+    def submit_to_icosnet() -> str:
+        with urllib.request.urlopen(api_request, timeout=20) as response:
+            return response.read(4096).decode("utf-8", errors="replace").strip()
+
+    try:
+        provider_response = await asyncio.to_thread(submit_to_icosnet)
+    except urllib.error.HTTPError as exc:
+        logger.warning("Icosnet SMS HTTP %s pour livret %s", exc.code, record_id)
+        raise HTTPException(status_code=502, detail=f"Icosnet a refusé la requête (HTTP {exc.code}).") from exc
+    except Exception as exc:
+        logger.warning("Échec de connexion à Icosnet pour livret %s : %s", record_id, exc)
+        raise HTTPException(status_code=502, detail="Connexion à la passerelle Icosnet impossible. Réessaie plus tard.") from exc
+
+    response_code = provider_response.split("|", 1)[0].strip()
+    if response_code != "1701":
+        messages = {"1702": "Paramètre manquant ou invalide.", "1703": "Identifiants Icosnet refusés.",
+                    "1704": "Type de message refusé.", "1705": "Message refusé.", "1706": "Numéro de destination invalide.",
+                    "1707": "Nom d’expéditeur refusé.", "1708": "Option de rapport de livraison invalide.",
+                    "1725": "Crédit Icosnet insuffisant.", "1715": "Délai de réponse dépassé. Vérifie le journal Icosnet avant de renvoyer.",
+                    "1028": "Message bloqué comme indésirable."}
+        logger.warning("Icosnet a refusé le SMS du livret %s avec code %s", record_id, response_code)
+        raise HTTPException(status_code=502, detail=messages.get(response_code, f"Icosnet a refusé l’envoi (code {response_code or 'inconnu'})."))
+    logger.info("SMS Icosnet soumis pour livret %s vers %s numéro(s), utilisateur %s", record_id, len(destinations), user.get("id"))
+    return JSONResponse({"success": True, "message": f"SMS accepté par Icosnet pour {len(destinations)} numéro(s). La remise au téléphone sera confirmée par le rapport de livraison.", "provider_response": provider_response})
+
+
 @print_server_router.get("/visionneurs-pdf")
 async def list_pdf_viewers(request: Request):
     if not get_current_user_optional(request):
@@ -669,6 +819,34 @@ def render_html() -> str:
             </div>
         </div>
 
+        <div id="printServerSmsModal" class="fixed inset-0 z-[145] hidden items-center justify-center bg-slate-950/75 p-3 backdrop-blur-sm sm:p-6" role="dialog" aria-modal="true" aria-labelledby="printServerSmsTitle">
+            <div class="w-full max-w-2xl overflow-hidden rounded-[2rem] bg-white shadow-2xl">
+                <div class="flex items-start justify-between gap-4 bg-gradient-to-br from-[#10243b] via-[#17486a] to-[#087e8b] px-6 py-5 text-white sm:px-8">
+                    <div class="flex items-center gap-4"><span class="grid h-12 w-12 place-items-center rounded-2xl bg-white/15 text-2xl"><i class="ph-bold ph-chat-circle-text"></i></span><div><p class="text-[10px] font-extrabold uppercase tracking-[.2em] text-cyan-200">Contact patient</p><h2 id="printServerSmsTitle" class="text-xl font-extrabold">Envoyer un SMS</h2><p id="printServerSmsPatient" class="mt-1 text-xs text-white/80"></p></div></div>
+                    <button type="button" onclick="closePrintServerSmsModal()" class="rounded-xl p-2 text-white/80 hover:bg-white/10" aria-label="Fermer"><i class="ph-bold ph-x text-xl"></i></button>
+                </div>
+                <div class="max-h-[75vh] space-y-4 overflow-y-auto p-5 sm:p-7">
+                    <div class="grid gap-4 sm:grid-cols-2">
+                        <label class="text-xs font-bold text-slate-600">Expéditeur<select id="printServerSmsSource" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm font-semibold text-slate-800"><option value="KACEL RADIO" selected>KACEL RADIO</option><option value="KACEL GROUP">KACEL GROUP</option></select></label>
+                        <div><p class="text-xs font-bold text-slate-600">Numéro(s) destinataire(s)</p><div id="printServerSmsDestinations" class="mt-2 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3"><p class="text-xs text-slate-400">Chargement…</p></div></div>
+                    </div>
+                    <label class="block text-xs font-bold text-slate-600">Message<textarea id="printServerSmsMessage" rows="4" maxlength="1200" class="mt-2 w-full resize-y rounded-xl border border-slate-200 px-4 py-3 text-sm leading-6 text-slate-800 outline-none focus:border-sky-500 focus:ring-4 focus:ring-sky-100">عزيزي المريض نتمنى لك الشفاء العاجل
+Cher patient, votre dossier médical est prêt.</textarea></label>
+                    <details class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <summary class="cursor-pointer select-none text-sm font-extrabold text-slate-700"><i class="ph-bold ph-gear-six mr-2 text-sky-600"></i>Configuration de la passerelle Icosnet</summary>
+                        <div class="mt-4 space-y-3">
+                            <label class="flex items-center gap-2 text-xs font-semibold text-slate-700"><input id="printServerSmsEnabled" type="checkbox" class="h-4 w-4 accent-sky-600">Activer l’envoi SMS</label>
+                            <div class="grid gap-3 sm:grid-cols-2"><label class="text-xs font-bold text-slate-600">Identifiant Icosnet<input id="printServerSmsUsername" autocomplete="off" class="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"></label><label class="text-xs font-bold text-slate-600">Mot de passe<input id="printServerSmsPassword" type="password" autocomplete="new-password" placeholder="Vide = conserver le mot de passe enregistré" class="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"></label></div>
+                            <div class="flex flex-wrap items-center justify-between gap-3"><span id="printServerSmsConfigStatus" class="text-[11px] text-slate-500"></span><div class="flex items-center gap-3"><label class="text-[11px] font-semibold text-rose-700"><input id="printServerSmsClearPassword" type="checkbox" class="mr-1 accent-rose-600">Effacer le mot de passe</label><button type="button" onclick="savePrintServerSmsSettings()" class="rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-700"><i class="ph-bold ph-floppy-disk mr-1"></i>Enregistrer la configuration</button></div></div>
+                            <p class="text-[10px] leading-5 text-slate-500">Le secret est chiffré avec DPAPI Windows et reste sur le serveur. Configuration réservée aux administrateurs. Révoque tout identifiant partagé hors d’un canal secret avant utilisation.</p>
+                        </div>
+                    </details>
+                    <p id="printServerSmsFeedback" class="min-h-5 text-xs font-semibold text-slate-500" aria-live="polite"></p>
+                </div>
+                <div class="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-4 sm:px-7"><button type="button" onclick="closePrintServerSmsModal()" class="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-100">Annuler</button><button type="button" onclick="sendPrintServerPatientSms()" class="inline-flex items-center gap-2 rounded-xl bg-sky-700 px-5 py-2.5 text-sm font-extrabold text-white shadow-sm hover:bg-sky-800"><i class="ph-bold ph-paper-plane-tilt"></i>Envoyer le SMS</button></div>
+            </div>
+        </div>
+
         <div id="printServerConfigModal" class="fixed inset-0 z-[125] hidden items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm sm:p-6" onclick="if(event.target===this)closePrintServerConfigModal()">
             <div class="w-full max-w-3xl overflow-hidden rounded-[2rem] bg-white shadow-2xl">
                 <div class="relative overflow-hidden bg-gradient-to-br from-[#101b13] via-[#183b20] to-[#24653a] px-6 py-6 text-white sm:px-8">
@@ -733,9 +911,78 @@ def render_html() -> str:
     (() => {
         let printServerRows = [];
         let activePrintServerRecordId = null;
+        let activePrintServerSmsRecordId = null;
         let printSpoolerRows = [];
         const htmlEscape = (value) => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
         const pdfUrl = id => `/api/dme/cr/view-pdf/${encodeURIComponent(id)}`;
+
+        window.openPrintServerSmsModal = async function(id) {
+            const row = printServerRows.find(item => Number(item.id) === Number(id));
+            if (!row) return;
+            activePrintServerSmsRecordId = Number(id);
+            document.getElementById('printServerSmsSource').value = 'KACEL RADIO';
+            document.getElementById('printServerSmsClearPassword').checked = false;
+            document.getElementById('printServerSmsPatient').textContent = row.patient || 'Patient';
+            document.getElementById('printServerSmsFeedback').textContent = '';
+            const destinationBox = document.getElementById('printServerSmsDestinations');
+            const phones = [row.telephone_1, row.telephone_2].map(value => String(value || '').trim()).filter(Boolean);
+            destinationBox.innerHTML = phones.length ? phones.map((phone, index) => `<label class="flex cursor-pointer items-center gap-3 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-700"><input type="checkbox" class="printServerSmsPhone h-4 w-4 accent-sky-600" value="${htmlEscape(phone)}" ${index === 0 ? 'checked' : ''}><i class="ph-bold ph-phone text-sky-600"></i>${htmlEscape(phone)}</label>`).join('') : '<p class="text-xs font-semibold text-rose-600">Aucun numéro de téléphone renseigné.</p>';
+            document.getElementById('printServerSmsModal').classList.remove('hidden');
+            document.getElementById('printServerSmsModal').classList.add('flex');
+            try {
+                const response = await fetch('/api/serveur-impression/sms/settings', {cache:'no-store'});
+                const result = await response.json();
+                if (!response.ok || !result.success) throw new Error(result.detail || 'Configuration SMS indisponible.');
+                document.getElementById('printServerSmsEnabled').checked = Boolean(result.settings.enabled);
+                document.getElementById('printServerSmsUsername').value = result.settings.username || '';
+                document.getElementById('printServerSmsConfigStatus').textContent = result.settings.password_configured ? 'Mot de passe enregistré et chiffré sur le serveur.' : 'Aucun mot de passe Icosnet enregistré.';
+            } catch (error) {
+                document.getElementById('printServerSmsConfigStatus').textContent = error.message;
+            }
+        };
+        window.closePrintServerSmsModal = function() {
+            const modal = document.getElementById('printServerSmsModal');
+            modal.classList.add('hidden'); modal.classList.remove('flex');
+            activePrintServerSmsRecordId = null;
+            document.getElementById('printServerSmsPassword').value = '';
+        };
+        window.savePrintServerSmsSettings = async function() {
+            const status = document.getElementById('printServerSmsConfigStatus');
+            try {
+                const response = await fetch('/api/serveur-impression/sms/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:document.getElementById('printServerSmsEnabled').checked, username:document.getElementById('printServerSmsUsername').value.trim(), password:document.getElementById('printServerSmsPassword').value, clear_password:document.getElementById('printServerSmsClearPassword').checked})});
+                const result = await response.json();
+                if (!response.ok || !result.success) throw new Error(result.detail || 'Enregistrement de la configuration impossible.');
+                document.getElementById('printServerSmsPassword').value = '';
+                document.getElementById('printServerSmsClearPassword').checked = false;
+                status.textContent = result.settings.password_configured ? 'Configuration enregistrée. Mot de passe chiffré sur le serveur.' : 'Configuration enregistrée.';
+                status.className = 'text-[11px] font-semibold text-emerald-700';
+            } catch (error) {
+                status.textContent = error.message;
+                status.className = 'text-[11px] font-semibold text-rose-600';
+            }
+        };
+        window.sendPrintServerPatientSms = async function() {
+            const feedback = document.getElementById('printServerSmsFeedback');
+            const sendButton = document.querySelector('#printServerSmsModal button[onclick="sendPrintServerPatientSms()"]');
+            const destinations = [...document.querySelectorAll('.printServerSmsPhone:checked')].map(input => input.value);
+            if (!activePrintServerSmsRecordId) return;
+            if (sendButton?.disabled) return;
+            if (!destinations.length) { feedback.textContent = 'Coche au moins un numéro de téléphone.'; feedback.className = 'min-h-5 text-xs font-semibold text-rose-600'; return; }
+            if (sendButton) sendButton.disabled = true;
+            try {
+                feedback.textContent = 'Envoi en cours…'; feedback.className = 'min-h-5 text-xs font-semibold text-sky-700';
+                const response = await fetch(`/api/serveur-impression/livrets/${activePrintServerSmsRecordId}/sms`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source:document.getElementById('printServerSmsSource').value, destinations, message:document.getElementById('printServerSmsMessage').value})});
+                const result = await response.json();
+                if (!response.ok || !result.success) throw new Error(result.detail || 'Échec de l’envoi SMS.');
+                feedback.textContent = result.message || 'SMS accepté par la passerelle Icosnet.';
+                feedback.className = 'min-h-5 text-xs font-semibold text-emerald-700';
+            } catch (error) {
+                feedback.textContent = error.message || 'Échec de l’envoi SMS.';
+                feedback.className = 'min-h-5 text-xs font-semibold text-rose-600';
+            } finally {
+                if (sendButton) sendButton.disabled = false;
+            }
+        };
 
         window.filterPrintServerBooklets = function() {
             const query = (document.getElementById('printServerSearch')?.value || '').trim().toLocaleLowerCase();
@@ -797,6 +1044,7 @@ def render_html() -> str:
                     <td class="px-3 py-3">${htmlEscape(row.proprietaire || '—')}</td>
                     <td class="rounded-r-xl px-3 py-3"><div class="flex justify-end gap-2">
                         <button type="button" onclick="showPrintServerPreview(${Number(row.id)})" class="inline-flex items-center gap-2 rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-700"><i class="ph-bold ph-eye"></i>Afficher</button>
+                        <button type="button" onclick="openPrintServerSmsModal(${Number(row.id)})" ${row.telephone_1 || row.telephone_2 ? '' : 'disabled'} class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-2 text-xs font-bold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40" title="Envoyer un SMS au patient"><i class="ph-bold ph-chat-circle-text"></i>SMS</button>
                         <button type="button" onclick="printServerBookletDirect(${Number(row.id)})" class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700"><i class="ph-bold ph-printer"></i>Imprimer</button>
                     </div></td>
                 </tr>`;
