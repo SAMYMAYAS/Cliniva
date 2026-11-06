@@ -498,16 +498,14 @@ async def send_booklet_patient_sms(record_id: int, request: Request):
     if not username or not password:
         raise HTTPException(status_code=503, detail="Les identifiants Icosnet sont incomplets. Vérifie la configuration SMS.")
 
-    # Le Delphi fourni envoyait le texte Unicode sous forme d’unités UTF-16 hexadécimales.
-    unicode_hex = message.encode("utf-16-be").hex().upper()
-    form_data = urllib.parse.urlencode({
-        "username": username, "password": password, "message": unicode_hex,
+    # Le guide Icosnet demande un GET dont chaque paramètre est encodé en UTF-8.
+    query = urllib.parse.urlencode({
+        "username": username, "password": password, "message": message,
         "source": sender, "destination": ",".join(destinations), "type": "2", "dlr": "1",
-    }).encode("ascii")
+    }, encoding="utf-8", errors="strict")
     api_request = urllib.request.Request(
-        "https://smsapi.icosnet.com:8443/bulksms/bulksms", data=form_data,
-        headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Accept": "text/plain"},
-        method="POST",
+        f"https://smsapi.icosnet.com:8443/bulksms/bulksms?{query}",
+        headers={"Accept": "text/plain"}, method="GET",
     )
     def submit_to_icosnet() -> str:
         with urllib.request.urlopen(api_request, timeout=20) as response:
@@ -527,6 +525,7 @@ async def send_booklet_patient_sms(record_id: int, request: Request):
         messages = {"1702": "Paramètre manquant ou invalide.", "1703": "Identifiants Icosnet refusés.",
                     "1704": "Type de message refusé.", "1705": "Message refusé.", "1706": "Numéro de destination invalide.",
                     "1707": "Nom d’expéditeur refusé.", "1708": "Option de rapport de livraison invalide.",
+                    "8": "Erreur interne Icosnet (code 8). La passerelle a rejeté la requête ; contacte Icosnet avec l’heure de l’essai et vérifie son journal avant de réessayer.",
                     "1725": "Crédit Icosnet insuffisant.", "1715": "Délai de réponse dépassé. Vérifie le journal Icosnet avant de renvoyer.",
                     "1028": "Message bloqué comme indésirable."}
         logger.warning("Icosnet a refusé le SMS du livret %s avec code %s", record_id, response_code)
