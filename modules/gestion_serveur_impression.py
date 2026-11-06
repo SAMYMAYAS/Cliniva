@@ -498,9 +498,11 @@ async def send_booklet_patient_sms(record_id: int, request: Request):
     if not username or not password:
         raise HTTPException(status_code=503, detail="Les identifiants Icosnet sont incomplets. Vérifie la configuration SMS.")
 
-    # Le guide Icosnet demande un GET dont chaque paramètre est encodé en UTF-8.
+    # Icosnet reçoit un GET URL-UTF-8; le Delphi fourni encode le contenu Unicode
+    # en unités UTF-16 hexadécimales avant de le placer dans le paramètre message.
+    unicode_hex = message.encode("utf-16-be").hex().upper()
     query = urllib.parse.urlencode({
-        "username": username, "password": password, "message": message,
+        "username": username, "password": password, "message": unicode_hex,
         "source": sender, "destination": ",".join(destinations), "type": "2", "dlr": "1",
     }, encoding="utf-8", errors="strict")
     api_request = urllib.request.Request(
