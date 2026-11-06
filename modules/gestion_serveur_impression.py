@@ -356,7 +356,9 @@ async def list_validated_booklets(request: Request):
                    cr.medecin_prescripteur, cr.medecin_signataire, cr.proprietaire,
                    cr.nom_fichier,
                    COALESCE(NULLIF(cr.date_heure_str, ''), TO_CHAR(cr.created_at, 'DD/MM/YYYY HH24:MI')) AS date_creation,
-                   COALESCE(NULLIF(BTRIM(CONCAT_WS(' ', p.prenom, p.nom)), ''), 'Patient #' || cr.id_patient::text) AS patient
+                   COALESCE(NULLIF(BTRIM(CONCAT_WS(' ', p.prenom, p.nom)), ''), 'Patient #' || cr.id_patient::text) AS patient,
+                   COALESCE(p.telephone_1, '') AS telephone_1,
+                   COALESCE(p.telephone_2, '') AS telephone_2
             FROM patient_cr_records cr
             LEFT JOIN patients p ON p.id = cr.id_patient
             WHERE LOWER(BTRIM(COALESCE(cr.type_modele, ''))) LIKE 'livret%'
@@ -788,7 +790,7 @@ def render_html() -> str:
                 const prestation = String(row.titre || '').replace(/^Livret\s*-\s*/i, '');
                 return `<tr class="bg-slate-50 text-sm text-slate-700 hover:bg-emerald-50/70">
                     <td class="rounded-l-xl px-3 py-3 font-mono text-xs text-slate-500">${htmlEscape(row.date_creation)}</td>
-                    <td class="px-3 py-3 font-bold text-slate-800">${htmlEscape(row.patient)}</td>
+                    <td class="px-3 py-3"><div class="font-bold text-slate-800">${htmlEscape(row.patient)}</div><div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-medium text-slate-500">${row.telephone_1 ? `<span class="inline-flex items-center gap-1"><i class="ph-bold ph-phone text-emerald-600"></i>${htmlEscape(row.telephone_1)}</span>` : ''}${row.telephone_2 ? `<span class="inline-flex items-center gap-1"><i class="ph ph-phone text-slate-400"></i>${htmlEscape(row.telephone_2)}</span>` : ''}${!row.telephone_1 && !row.telephone_2 ? '<span class="text-slate-400">Téléphone non renseigné</span>' : ''}</div></td>
                     <td class="px-3 py-3"><div class="font-bold">${htmlEscape(row.nom_fichier || row.titre || 'Livret')}</div><div class="text-xs text-indigo-600">${htmlEscape(prestation)}</div></td>
                     <td class="px-3 py-3">${htmlEscape(row.modalite || '—')}</td>
                     <td class="px-3 py-3">${htmlEscape(row.medecin_signataire || '—')}</td>
